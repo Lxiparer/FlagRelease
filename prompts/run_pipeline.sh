@@ -651,7 +651,7 @@ claude -p "${PROMPT_SEG1}" \
     --max-turns 100 \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
 
 # 段间检查
 SEG1_END_TS=$(date +%s)
@@ -724,18 +724,21 @@ echo ""
 
 # ===== 段1越界检测：如果段1执行了步骤4+的操作，回滚 context 中的越界状态 =====
 SEG1_OVERFLOW=$(python3 -c "
-import yaml
+import yaml, re
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
 ledger = ctx.get('workflow_ledger', {}).get('steps', [])
 overflow_steps = []
+def step_num(s):
+    m = re.match(r'(\d+)', str(s))
+    return int(m.group(1)) if m else 0
 if isinstance(ledger, list):
     for s in ledger:
         if not isinstance(s, dict):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        if step >= '04' and status not in ('pending', ''):
+        if step_num(step) >= 4 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 elif isinstance(ledger, dict):
     for key, s in ledger.items():
@@ -743,7 +746,7 @@ elif isinstance(ledger, dict):
             continue
         step = str(s.get('step', key))
         status = s.get('status', '')
-        if step >= '04' and status not in ('pending', ''):
+        if step_num(step) >= 4 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG1_OVERFLOW=""
@@ -753,41 +756,43 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     # 通过容器内 update_context.py 回滚越界步骤
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 04_quick_accuracy --ledger-status pending --ledger-notes '段1越界回滚' \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 05_accuracy_tuning --ledger-status pending --ledger-notes '段1越界回滚' \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 06_quick_performance --ledger-status pending --ledger-notes '段1越界回滚' \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 07_performance_tuning --ledger-status pending --ledger-notes '段1越界回滚' \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 08_release --ledger-status pending --ledger-notes '段1越界回滚' \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段1越界回滚' \
-            --json" >/dev/null 2>&1
+            --json" >/dev/null 2>&1 || true
     done
     # 回滚 workflow 状态字段
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set workflow.accuracy_ok=false --set workflow.performance_ok=false \
         --set workflow.qualified=false --set workflow.all_done=false \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     # 回滚 timing 中越界步骤的计时
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set-timing steps.quick_accuracy=0 --set-timing steps.accuracy_tuning=0 \
         --set-timing steps.quick_performance=0 --set-timing steps.performance_tuning=0 \
         --set-timing steps.release=0 \
-        --json" >/dev/null 2>&1
+        --json" >/dev/null 2>&1 || true
     # 同步回滚后的 context 到宿主机快照
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
     if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
-        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（shared/context.yaml 可能不存在），继续执行"
     else
-        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（容器可能已停止），继续执行"
     fi
     echo "  ✓ 越界状态已回滚，段2 将从步骤4重新开始"
     SEG_LAST="03_service_startup"
@@ -955,7 +960,7 @@ claude -p "${PROMPT_SEG2}" \
     --max-turns 250 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
 
 # 段间检查
 SEG2_END_TS=$(date +%s)
@@ -1002,7 +1007,7 @@ if [ "$SEG2_STATUS" != "complete" ]; then
         --max-turns 250 \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" ${FILTER_FLAGS} || true
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" --load-durations "${LOG_DIR}/seg1_durations.json" --durations-file "${LOG_DIR}/seg2_durations.json" ${FILTER_FLAGS} || true
     # 重试后再次同步 context
     CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
     SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
@@ -1020,18 +1025,21 @@ fi
 
 # ===== 段2越界检测：如果段2执行了步骤8+的操作，回滚 context 中的越界状态 =====
 SEG2_OVERFLOW=$(python3 -c "
-import yaml
+import yaml, re
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
 ledger = ctx.get('workflow_ledger', {}).get('steps', [])
 overflow_steps = []
+def step_num(s):
+    m = re.match(r'(\d+)', str(s))
+    return int(m.group(1)) if m else 0
 if isinstance(ledger, list):
     for s in ledger:
         if not isinstance(s, dict):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        if step >= '08' and status not in ('pending', ''):
+        if step_num(step) >= 8 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 elif isinstance(ledger, dict):
     for key, s in ledger.items():
@@ -1039,7 +1047,7 @@ elif isinstance(ledger, dict):
             continue
         step = str(s.get('step', key))
         status = s.get('status', '')
-        if step >= '08' and status not in ('pending', ''):
+        if step_num(step) >= 8 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG2_OVERFLOW=""
@@ -1049,20 +1057,40 @@ if [ -n "${SEG2_OVERFLOW}" ]; then
     for STEP_KEY in 08_release 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段2越界回滚' \
-            --json" >/dev/null 2>&1
+            --json" >/dev/null 2>&1 || true
     done
     # 同步回滚后的 context 到宿主机
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
     if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
-        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（shared/context.yaml 可能不存在），继续执行"
     else
-        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（容器可能已停止），继续执行"
     fi
     echo "  ✓ 越界状态已回滚，段3 将从步骤8重新开始"
 fi
 echo ""
 
 fi  # end SKIP_SEG2 check
+
+# ===== 段2→段3 过渡：兜底计算 qualified 状态 =====
+# 如果段2完成后 service_ok/accuracy_ok/performance_ok 都为 true 但 qualified 未设置，自动修正
+python3 -c "
+import yaml
+ctx_path = '/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml'
+try:
+    with open(ctx_path) as f:
+        ctx = yaml.safe_load(f)
+    wf = ctx.get('workflow', {})
+    if 'qualified' not in wf and wf.get('service_ok') and wf.get('accuracy_ok') and wf.get('performance_ok'):
+        wf['qualified'] = True
+        ctx['workflow'] = wf
+        with open(ctx_path, 'w') as f:
+            yaml.dump(ctx, f, default_flow_style=False, allow_unicode=True)
+        print('  ✓ 兜底设置 workflow.qualified=true（service_ok/accuracy_ok/performance_ok 均为 true）')
+except: pass
+" 2>/dev/null || true
 
 # 从 context_snapshot 提取段3所需的关键参数
 SEG3_CTX_SUMMARY=$(python3 -c "
@@ -1101,6 +1129,8 @@ ${COMMON_TOKENS}
 - 容器 ${SEG_CTR} 已就绪，评测结果已写入 results/ 目录
 - context.yaml 中 workflow_ledger 的部分步骤状态可能未更新（已知问题），但前段步骤确实已完成
 - **禁止**回头检查或重做步骤1-7，直接执行步骤8
+- **禁止**修改 workflow_ledger 中步骤1-7和步骤9-13的状态。只允许更新步骤8（08_release）的 ledger 条目
+- **禁止**使用 --set 'workflow_ledger.steps...' 的 dot notation 写入 ledger，必须使用 --ledger-update API
 
 **关键参数（从 context.yaml 提取，无需重新读取文件）**：
 ${SEG3_CTX_SUMMARY}
@@ -1168,7 +1198,7 @@ claude -p "${PROMPT_SEG3}" \
     --max-turns 100 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" --load-durations "${LOG_DIR}/seg2_durations.json" --durations-file "${LOG_DIR}/seg3_durations.json" ${FILTER_FLAGS} || true
 
 SEG3_END_TS=$(date +%s)
 SEG3_ELAPSED=$(( SEG3_END_TS - SEG3_START_TS ))
@@ -1178,18 +1208,21 @@ fi
 
 # ===== 段3越界检测：如果段3执行了步骤9+的操作，回滚 context 中的越界状态 =====
 SEG3_OVERFLOW=$(python3 -c "
-import yaml
+import yaml, re
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
 ledger = ctx.get('workflow_ledger', {}).get('steps', [])
 overflow_steps = []
+def step_num(s):
+    m = re.match(r'(\d+)', str(s))
+    return int(m.group(1)) if m else 0
 if isinstance(ledger, list):
     for s in ledger:
         if not isinstance(s, dict):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        if step >= '09' and status not in ('pending', ''):
+        if step_num(step) >= 9 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 elif isinstance(ledger, dict):
     for key, s in ledger.items():
@@ -1197,7 +1230,7 @@ elif isinstance(ledger, dict):
             continue
         step = str(s.get('step', key))
         status = s.get('status', '')
-        if step >= '09' and status not in ('pending', ''):
+        if step_num(step) >= 9 and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG3_OVERFLOW=""
@@ -1207,13 +1240,15 @@ if [ -n "${SEG3_OVERFLOW}" ]; then
     for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段3越界回滚' \
-            --json" >/dev/null 2>&1
+            --json" >/dev/null 2>&1 || true
     done
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
     if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
-        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（shared/context.yaml 可能不存在），继续执行"
     else
-        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || \
+            echo "  ⚠ 回滚后 context 同步失败（容器可能已停止），继续执行"
     fi
     echo "  ✓ 越界状态已回滚，段4 将从步骤9重新开始"
 fi
@@ -1401,7 +1436,7 @@ print('no')
         --max-turns 200 \
         2>&1 | tee -a "${LOG_FILE}" \
              | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" ${FILTER_FLAGS} || true
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 9 --cost-file "${LOG_DIR}/seg4_cost.txt" --load-durations "${LOG_DIR}/seg3_durations.json" --durations-file "${LOG_DIR}/seg4_durations.json" ${FILTER_FLAGS} || true
 
     SEG4_END_TS=$(date +%s)
     SEG4_ELAPSED=$(( SEG4_END_TS - SEG4_START_TS ))
