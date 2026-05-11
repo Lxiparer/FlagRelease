@@ -2,14 +2,15 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
-# 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载
+# 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
 #   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B
 #
 # 向后兼容（已弃用）:
 #   bash prompts/run_pipeline.sh --image <镜像地址> <模型名> [<宿主机模型路径>] <tokens...>
@@ -26,6 +27,30 @@ set -euo pipefail
 if ! docker ps &>/dev/null; then
     echo "错误: Docker daemon 未运行或无权限，请检查 Docker 状态"
     exit 1
+fi
+
+# ========== 宿主机 Python 依赖检查 ==========
+if ! command -v python3 &>/dev/null; then
+    echo "错误: python3 未安装，请先安装 Python 3"
+    exit 1
+fi
+
+HOST_PY_DEPS=("yaml:pyyaml" "huggingface_hub:huggingface_hub")
+MISSING_PKGS=()
+for dep in "${HOST_PY_DEPS[@]}"; do
+    mod="${dep%%:*}"
+    pkg="${dep##*:}"
+    if ! python3 -c "import ${mod}" 2>/dev/null; then
+        MISSING_PKGS+=("${pkg}")
+    fi
+done
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "[pre-flight] 安装缺失的宿主机 Python 依赖: ${MISSING_PKGS[*]}"
+    pip3 install "${MISSING_PKGS[@]}" -q 2>/dev/null || \
+    pip3 install "${MISSING_PKGS[@]}" -q -i https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null || \
+    pip3 install "${MISSING_PKGS[@]}" -q -i https://pypi.tuna.tsinghua.edu.cn/simple/ 2>/dev/null || \
+    { echo "错误: 宿主机 Python 依赖安装失败: ${MISSING_PKGS[*]}"; exit 1; }
 fi
 
 # ========== 参数解析与自动识别 ==========
@@ -70,13 +95,14 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
         echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
     fi
@@ -88,9 +114,27 @@ else
     export GITHUB_TOKEN="$5"
     export HARBOR_USER="$6"
     export HARBOR_PASSWORD="$7"
-    if [[ "${8:-}" == "--verbose" ]]; then
-        FILTER_FLAGS="--verbose"
-    fi
+    shift 7
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --verbose)
+                FILTER_FLAGS="--verbose"
+                shift
+                ;;
+            --model-path)
+                if [ -z "${2:-}" ]; then
+                    echo "错误: --model-path 需要指定路径"
+                    exit 1
+                fi
+                MODEL_PATH="$2"
+                shift 2
+                ;;
+            *)
+                echo "警告: 未知参数 '$1'，已忽略"
+                shift
+                ;;
+        esac
+    done
 
     # 自动识别：含冒号(:)或斜杠(/)的视为镜像地址，否则尝试 docker inspect 判断
     if [[ "$TARGET" == *":"* ]] || [[ "$TARGET" == *"/"* ]]; then
@@ -139,6 +183,22 @@ except:
     CONTAINER_MODEL_PATH="${MODEL_PATH}"
 fi
 
+# 用户通过 --model-path 显式指定时，设置相关变量
+if [ -n "$MODEL_PATH" ] && [ -z "${MODEL_FOUND_ON_HOST:-}" ]; then
+    if ! $IMAGE_MODE; then
+        echo "警告: --model-path 在容器模式下无效（容器已有自己的文件系统），已忽略"
+        MODEL_PATH=""
+    elif [ ! -d "$MODEL_PATH" ]; then
+        echo "错误: 指定的模型路径不存在: ${MODEL_PATH}"
+        exit 1
+    else
+        MODEL_FOUND_ON_HOST=true
+        CONTAINER_MODEL_PATH="${MODEL_PATH}"
+        USER_SPECIFIED_MODEL_PATH=true
+        echo "[pre-flight] 使用指定模型路径: ${MODEL_PATH}"
+    fi
+fi
+
 # ========== Banner ==========
 echo "============================================================"
 echo "  FlagOS 全自动迁移流程"
@@ -151,7 +211,11 @@ fi
 echo "  模型: ${MODEL}"
 if $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
-        echo "  模型路径: ${MODEL_PATH} (自动检测)"
+        if [ -n "${USER_SPECIFIED_MODEL_PATH:-}" ]; then
+            echo "  模型路径: ${MODEL_PATH} (用户指定)"
+        else
+            echo "  模型路径: ${MODEL_PATH} (自动检测)"
+        fi
     else
         echo "  模型路径: ${MODEL_PATH} (预创建，容器内下载)"
     fi
@@ -1461,12 +1525,12 @@ except:
             if [ "${FALLBACK_SERVICE_OK}" != "True" ]; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底跳过：服务未启动成功，不具备发布条件"
             else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
-            python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
-                echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
-            # 重新同步 context 和 traces（main.py 可能更新了）
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
+                python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
+                    echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
+                # 重新同步 context 和 traces（main.py 可能更新了）
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
             fi
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Harbor 发布已完成，跳过兜底"
