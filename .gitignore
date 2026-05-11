@@ -4,4 +4,3 @@ __pycache__/
 output/
 *.log
 nohup.out
-settings.local.json
