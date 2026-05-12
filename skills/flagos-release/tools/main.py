@@ -3,12 +3,36 @@
 FlagRelease - 模型发布流水线工具
 主入口文件
 """
+import os
 import sys
 import time
 import argparse
 from typing import List, Dict, Any
 
 from src.config import load_config_from_context, validate_config, auto_fill_config, PipelineConfig
+
+
+def _load_env_file(context_path: str):
+    """从 context.yaml 同级目录或 workspace 根目录加载 .env 文件到 os.environ（不覆盖已有值）"""
+    import yaml
+    try:
+        with open(context_path, 'r', encoding='utf-8') as f:
+            ctx = yaml.safe_load(f)
+        host_path = ctx.get('workspace', {}).get('host_path', '')
+        if host_path:
+            env_file = os.path.join(host_path, '.env')
+            if os.path.isfile(env_file):
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if '=' not in line or line.startswith('#'):
+                            continue
+                        key, _, val = line.partition('=')
+                        key, val = key.strip(), val.strip()
+                        if key and not os.environ.get(key):
+                            os.environ[key] = val
+    except Exception:
+        pass
 from src.stages import PublishStage
 from src.utils import print_banner, print_config_summary, print_stage_summary
 
@@ -156,6 +180,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # 从 workspace/.env 加载 token 到环境变量（Claude Bash 沙箱不继承父进程 env）
+    _load_env_file(args.from_context)
 
     # 加载配置
     try:

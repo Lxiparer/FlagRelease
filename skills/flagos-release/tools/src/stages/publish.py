@@ -1152,10 +1152,17 @@ token = os.environ.get('MODELSCOPE_API_TOKEN', '')
 if token:
     api.login(token)
 model_id = '{model_id}'
+target_visibility = {visibility}
 print(f'检查 ModelScope 模型仓库: {{model_id}}')
 try:
     api.get_model(model_id)
-    print('仓库已存在')
+    print('仓库已存在，更新可见性为 {private_label}...')
+    try:
+        vis_str = 'private' if target_visibility == 1 else 'public'
+        api.set_repo_visibility(repo_id=model_id, repo_type='model', visibility=vis_str)
+        print('可见性已更新')
+    except Exception as e:
+        print(f'更新可见性失败: {{e}}，继续上传...')
 except Exception:
     print('仓库不存在，创建中...')
     try:
@@ -1346,10 +1353,15 @@ if token:
     login(token=token)
 api = HfApi()
 repo_id = '{repo_id}'
+target_private = {private_flag}
 print(f'检查 HuggingFace 仓库: {{repo_id}}')
 try:
-    api.repo_info(repo_id=repo_id)
+    info = api.repo_info(repo_id=repo_id)
     print('仓库已存在')
+    if info.private != target_private:
+        print(f'更新可见性为 {{\"私有\" if target_private else \"公开\"}}...')
+        api.update_repo_settings(repo_id=repo_id, private=target_private)
+        print('可见性已更新')
 except Exception:
     print('仓库不存在，创建中...')
     api.create_repo(repo_id=repo_id, private={private_flag}, exist_ok=True)

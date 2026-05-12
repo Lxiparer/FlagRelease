@@ -207,10 +207,32 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     if existing_registry_url and '/' in existing_registry_url:
         config.publish.existing_harbor_image = existing_registry_url
 
-    # token 从宿主机环境变量读取，若不存在则尝试从容器内获取
+    # token 读取优先级：环境变量 → workspace/.env 文件 → 容器 printenv
     config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')
     config.publish.huggingface_token = os.environ.get('HF_TOKEN', '')
 
+    # fallback: 从 workspace/.env 读取（run_pipeline.sh 通过 setup_workspace.sh 写入）
+    if not config.publish.modelscope_token or not config.publish.huggingface_token:
+        workspace = ctx.get('workspace', {})
+        host_workspace = workspace.get('host_path', '')
+        env_file = os.path.join(host_workspace, '.env') if host_workspace else ''
+        if env_file and os.path.isfile(env_file):
+            try:
+                with open(env_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if '=' not in line or line.startswith('#'):
+                            continue
+                        key, _, val = line.partition('=')
+                        key, val = key.strip(), val.strip()
+                        if not config.publish.modelscope_token and key == 'MODELSCOPE_TOKEN':
+                            config.publish.modelscope_token = val
+                        elif not config.publish.huggingface_token and key == 'HF_TOKEN':
+                            config.publish.huggingface_token = val
+            except (PermissionError, OSError):
+                pass
+
+    # fallback: 从容器内 printenv 获取
     if (not config.publish.modelscope_token or not config.publish.huggingface_token) and config.container_name:
         for env_var, attr in [('MODELSCOPE_TOKEN', 'modelscope_token'), ('HF_TOKEN', 'huggingface_token')]:
             if not getattr(config.publish, attr):
