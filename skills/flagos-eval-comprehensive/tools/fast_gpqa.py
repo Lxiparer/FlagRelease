@@ -264,22 +264,43 @@ def _estimate_concurrency(latency: float, is_thinking: bool) -> list:
             return [2, 4, 8]
 
 
+def _detect_degenerate_output(text: str, min_length: int = 100) -> bool:
+    """检测输出是否为退化重复文本（repetition loop）。"""
+    if len(text) < min_length:
+        return False
+    from collections import Counter
+    lines = text.split('\n')
+    line_counts = Counter(lines)
+    top_line, top_count = line_counts.most_common(1)[0]
+    if top_count > 3 and len(top_line.strip()) > 5:
+        return True
+    if len(text) > 200:
+        tail = text[-300:]
+        for i in range(0, min(len(tail) - 30, 100)):
+            substr = tail[i:i + 30]
+            if tail.count(substr) > 4:
+                return True
+    return False
+
+
+_PROBE_QUESTIONS = [
+    "What is the result of the Diels-Alder reaction between cyclopentadiene "
+    "and maleic anhydride? Choose the most likely product.",
+    "A quantum mechanical particle of mass m moves in two dimensions in the "
+    "potential V(r,theta) = 1/2 kr^2 + 3/2 kr^2 cos^2(theta). "
+    "Describe the energy spectrum qualitatively.",
+    "Explain the mechanism of the Wittig reaction between an aldehyde and "
+    "a phosphonium ylide. What determines the E/Z selectivity?",
+]
+
+
 def _run_concurrent_probe(api_base: str, api_key: str, model_name: str,
                            max_tokens: int, is_thinking: bool,
                            concurrency: int, num_requests: int = 3) -> Tuple[float, int]:
-    """并发发 num_requests 个请求，返回 (throughput_rps, error_count)"""
+    """并发发 num_requests 个请求，返回 (throughput_rps, failure_count)。
+    failure_count 包含 HTTP 错误和输出退化。"""
     import concurrent.futures
 
-    SAMPLE_QUESTION = (
-        "What is the result of the Diels-Alder reaction between cyclopentadiene "
-        "and maleic anhydride? Choose the most likely product."
-    )
-    payload = {
-        'model': model_name,
-        'messages': [{'role': 'user', 'content': SAMPLE_QUESTION}],
-        'max_tokens': max_tokens,
-        'temperature': 0.6 if is_thinking else 0.0,
-    }
     headers = {'Content-Type': 'application/json'}
     if api_key and api_key != 'EMPTY':
         headers['Authorization'] = f'Bearer {api_key}'
@@ -291,46 +312,65 @@ def _run_concurrent_probe(api_base: str, api_key: str, model_name: str,
 
     actual_n = min(concurrency, num_requests)
     errors = 0
+    degenerate_count = 0
 
-    def _send_one():
+    def _send_one(idx):
+        question = _PROBE_QUESTIONS[idx % len(_PROBE_QUESTIONS)]
+        payload = {
+            'model': model_name,
+            'messages': [{'role': 'user', 'content': question}],
+            'max_tokens': min(max_tokens, 1024),
+            'temperature': 0.6 if is_thinking else 0.0,
+        }
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=300)
             r.raise_for_status()
-            return True
+            data = r.json()
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if _detect_degenerate_output(content):
+                return 'degenerate'
+            return 'ok'
         except Exception:
-            return False
+            return 'error'
 
     start = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_send_one) for _ in range(actual_n)]
+        futures = [pool.submit(_send_one, i) for i in range(actual_n)]
         for f in concurrent.futures.as_completed(futures):
-            if not f.result():
+            result = f.result()
+            if result == 'error':
                 errors += 1
+            elif result == 'degenerate':
+                degenerate_count += 1
     elapsed = time.time() - start
 
-    throughput = (actual_n - errors) / elapsed if elapsed > 0 else 0
-    return throughput, errors
+    total_failures = errors + degenerate_count
+    if degenerate_count > 0:
+        print(f"    ⚠ 检测到 {degenerate_count}/{actual_n} 个退化输出（并发={concurrency}）")
+    throughput = (actual_n - total_failures) / elapsed if elapsed > 0 else 0
+    return throughput, total_failures
 
 
 def _validate_concurrency(api_base: str, api_key: str, model_name: str,
                            candidates: list, max_tokens: int,
                            is_thinking: bool) -> int:
-    """对候选并发各跑 3 题，选吞吐最高且无 OOM/超时的。"""
+    """对候选并发各跑 3 题，选吞吐最高且无错误/退化的。
+    一旦检测到退化，直接返回 1。"""
     best_concurrency = candidates[0]
     best_throughput = 0.0
 
     for c in candidates:
-        throughput, errors = _run_concurrent_probe(
+        throughput, failures = _run_concurrent_probe(
             api_base, api_key, model_name, max_tokens, is_thinking,
             concurrency=c, num_requests=3,
         )
-        print(f"  并发 {c}: throughput={throughput:.2f} rps, errors={errors}")
-        if errors == 0 and throughput > best_throughput:
+        print(f"  并发 {c}: throughput={throughput:.2f} rps, failures={failures}")
+        if failures == 0 and throughput > best_throughput:
             best_throughput = throughput
             best_concurrency = c
-        elif errors > 0:
-            print(f"  并发 {c} 出现错误，跳过更高并发")
-            break
+        elif failures > 0:
+            print(f"  [PROBE] ⚠ 检测到输出退化，降级到 batch_size=1")
+            return 1
 
     return best_concurrency
 
