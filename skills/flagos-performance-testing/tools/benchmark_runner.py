@@ -82,8 +82,8 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if "model" not in config:
         config["model"] = {"name": "", "tokenizer_path": ""}
 
-    # Fallback: 从 context.yaml 补充缺失的 server.host / model.tokenizer_path
-    if not config["server"].get("host") or not config["model"].get("tokenizer_path"):
+    # Fallback: 从 context.yaml 补充缺失的 server.host / model.tokenizer_path / model.name
+    if not config["server"].get("host") or not config["model"].get("tokenizer_path") or not config["model"].get("name"):
         ctx_path = Path("/flagos-workspace/shared/context.yaml")
         if ctx_path.exists():
             try:
@@ -98,7 +98,8 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 if not config["model"].get("tokenizer_path"):
                     config["model"]["tokenizer_path"] = ctx.get("model", {}).get("container_path", "")
                 if not config["model"].get("name"):
-                    config["model"]["name"] = ctx.get("model", {}).get("name", "")
+                    # 优先使用 service.model_id（vLLM --served-model-name），与推理服务注册名一致
+                    config["model"]["name"] = svc.get("model_id", "") or ctx.get("model", {}).get("name", "")
                 print(f"[INFO] 从 context.yaml 补充了缺失配置")
             except Exception as e:
                 print(f"[WARN] 读取 context.yaml 失败: {e}")
@@ -123,6 +124,66 @@ def validate_config(config: Dict[str, Any]) -> bool:
         print(f"ERROR: {err}")
 
     return len(errors) == 0
+
+
+PREFLIGHT_TIMEOUT = 90
+
+
+def preflight_check(config: Dict[str, Any]) -> bool:
+    """启动 benchmark 前验证 endpoint 可用且 model name 正确"""
+    host = config["server"]["host"]
+    port = config["server"]["port"]
+    model_name = config["model"]["name"]
+    endpoint = config.get("benchmark", {}).get("endpoint", "/v1/completions")
+    base_url = f"http://{host}:{port}"
+
+    print(f"[PREFLIGHT] 验证 endpoint: {base_url}{endpoint}, model={model_name}")
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        # 1. 检查服务是否存活
+        req = urllib.request.Request(f"{base_url}/v1/models", method="GET")
+        with urllib.request.urlopen(req, timeout=PREFLIGHT_TIMEOUT) as resp:
+            models_data = json.loads(resp.read().decode())
+
+        available_models = [m["id"] for m in models_data.get("data", [])]
+        if model_name not in available_models:
+            print(f"[PREFLIGHT] FAILED: model '{model_name}' 不在服务注册列表中")
+            print(f"[PREFLIGHT] 可用模型: {available_models}")
+            if available_models:
+                print(f"[PREFLIGHT] 提示: 请检查 context.yaml 中 service.model_id 是否与 --served-model-name 一致")
+            return False
+
+        # 2. 发一个短请求验证 endpoint 返回 200
+        payload = json.dumps({
+            "model": model_name,
+            "prompt": "hello",
+            "max_tokens": 1,
+        }).encode()
+        req = urllib.request.Request(
+            f"{base_url}{endpoint}",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=PREFLIGHT_TIMEOUT) as resp:
+            if resp.status == 200:
+                print(f"[PREFLIGHT] OK: endpoint 可用, model '{model_name}' 响应正常")
+                return True
+            else:
+                print(f"[PREFLIGHT] FAILED: endpoint 返回 {resp.status}")
+                return False
+
+    except urllib.error.HTTPError as e:
+        print(f"[PREFLIGHT] FAILED: HTTP {e.code} — {e.reason}")
+        if e.code == 404:
+            print(f"[PREFLIGHT] 提示: model name 或 endpoint 路径不匹配")
+        return False
+    except Exception as e:
+        print(f"[PREFLIGHT] FAILED: {type(e).__name__}: {e}")
+        return False
 
 
 # =============================================================================
@@ -554,6 +615,11 @@ def main():
     config = load_config(args.config)
 
     if not validate_config(config):
+        sys.exit(1)
+
+    # 预检：验证 endpoint 和 model name 可用，避免 vllm bench serve 卡在 ready check
+    if not args.dry_run and not preflight_check(config):
+        print("ERROR: preflight 检查失败，中止 benchmark")
         sys.exit(1)
 
     # 筛选测试用例

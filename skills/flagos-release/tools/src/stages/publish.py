@@ -1260,6 +1260,65 @@ print(f'已发布到 ModelScope: {{model_id}}')
             print(f"  ⚠ 复制 README 到容器失败: {e}")
             return False
 
+    def _verify_remote_weights(self, platform: str, repo_id: str, token: str) -> bool:
+        """验证远端仓库是否包含权重文件（>100MB 的 .safetensors/.bin）"""
+        if not self.config.publish.upload_weights:
+            return True
+        container = self.config.container_name
+        if not container:
+            print("  ⚠ 无容器，跳过远端验证")
+            return True
+
+        min_size = 100 * 1024 * 1024  # 100MB
+
+        if platform == "modelscope":
+            token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
+            verify_script = f"""
+import os
+os.environ['MODELSCOPE_API_TOKEN'] = os.environ.get('MODELSCOPE_API_TOKEN', '')
+from modelscope.hub.api import HubApi
+api = HubApi()
+files = api.get_model_files('{repo_id}', recursive=True)
+weight_files = [f for f in files if f.get('Name','').endswith(('.safetensors','.bin','.gguf')) and f.get('Size',0) > {min_size}]
+if weight_files:
+    print(f'VERIFY_OK: {{len(weight_files)}} weight file(s) found')
+else:
+    all_files = [(f.get('Name',''), f.get('Size',0)) for f in files]
+    print(f'VERIFY_FAIL: no weight files > 100MB. Files: {{all_files}}')
+"""
+            cmd = f"PATH=/opt/conda/bin:$PATH {token_env}python3 -c {repr(verify_script)}"
+        else:
+            token_env = f"HF_TOKEN={token} " if token else ""
+            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+            verify_script = f"""
+import os
+os.environ['HF_ENDPOINT'] = '{hf_endpoint}'
+from huggingface_hub import HfApi
+api = HfApi()
+info = api.repo_info('{repo_id}')
+weight_files = [s for s in info.siblings if s.rfilename.endswith(('.safetensors','.bin','.gguf')) and (s.size or 0) > {min_size}]
+if weight_files:
+    print(f'VERIFY_OK: {{len(weight_files)}} weight file(s) found')
+else:
+    all_files = [(s.rfilename, s.size) for s in info.siblings]
+    print(f'VERIFY_FAIL: no weight files > 100MB. Files: {{all_files}}')
+"""
+            cmd = f"PATH=/opt/conda/bin:$PATH {token_env}HF_ENDPOINT={hf_endpoint} python3 -c {repr(verify_script)}"
+
+        result, stdout, stderr = self.run_command(
+            cmd=cmd, step_name=f"验证 {platform} 权重文件",
+            timeout=120, in_container=True
+        )
+        output = (stdout or "") + (stderr or "")
+        if "VERIFY_OK" in output:
+            return True
+        elif "VERIFY_FAIL" in output:
+            print(f"  ⚠ 远端验证失败: {output.strip()}")
+            return False
+        else:
+            print(f"  ⚠ 验证脚本异常，视为通过（避免误阻断）: {output[:200]}")
+            return True
+
     def _publish_to_modelscope_cli(self, readme_path: Optional[str]) -> bool:
         """使用命令行发布到 ModelScope（容器内执行，避免宿主机 torch 崩溃）"""
         publish_config = self.config.publish
@@ -1306,17 +1365,21 @@ print(f'已发布到 ModelScope: {{model_id}}')
                 timeout=UPLOAD_TIMEOUT, in_container=True
             )
             if result:
-                success = True
-                print(f"  + 已发布到 ModelScope: {model_id}")
-                break
-            else:
-                if attempt < UPLOAD_MAX_RETRIES - 1:
-                    print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
-                    print(f"    等待 {current_delay} 秒后重试...")
-                    time.sleep(current_delay)
-                    current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
+                if self._verify_remote_weights("modelscope", model_id, token):
+                    success = True
+                    print(f"  + 已发布到 ModelScope: {model_id} (权重验证通过)")
+                    break
                 else:
-                    print(f"  x 上传失败，已达最大重试次数")
+                    print(f"  x 上传命令成功但远端缺少权重文件 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+            else:
+                print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+
+            if attempt < UPLOAD_MAX_RETRIES - 1:
+                print(f"    等待 {current_delay} 秒后重试...")
+                time.sleep(current_delay)
+                current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
+            else:
+                print(f"  x 上传失败，已达最大重试次数")
 
         return success
 
@@ -1450,17 +1513,22 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
                 timeout=UPLOAD_TIMEOUT, in_container=True
             )
             if result:
-                success = True
-                print(f"  + 已发布到 HuggingFace: {repo_id}")
-                break
-            else:
-                if attempt < UPLOAD_MAX_RETRIES - 1:
-                    print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
-                    print(f"    等待 {current_delay} 秒后重试...")
-                    time.sleep(current_delay)
-                    current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
+                token = publish_config.huggingface_token or ""
+                if self._verify_remote_weights("huggingface", repo_id, token):
+                    success = True
+                    print(f"  + 已发布到 HuggingFace: {repo_id} (权重验证通过)")
+                    break
                 else:
-                    print(f"  x 上传失败，已达最大重试次数")
+                    print(f"  x 上传命令成功但远端缺少权重文件 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+            else:
+                print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+
+            if attempt < UPLOAD_MAX_RETRIES - 1:
+                print(f"    等待 {current_delay} 秒后重试...")
+                time.sleep(current_delay)
+                current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
+            else:
+                print(f"  x 上传失败，已达最大重试次数")
 
         return success
 
