@@ -133,6 +133,7 @@ class ReportData:
         self.issue_files: List[Dict[str, str]] = []
         self.oplists: Dict[str, List[str]] = {}
         self.op_config: Optional[dict] = None
+        self.ops_control_initial: Optional[dict] = None
         self.workflow_complete = False
 
     def collect(self) -> bool:
@@ -187,6 +188,9 @@ class ReportData:
 
         # operator config (search log from operator_search.py)
         self.op_config = read_json(os.path.join(r, "operator_config.json"))
+
+        # 初始控制文件（start_service.sh 保存的副本）
+        self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))
 
         return True
 
@@ -270,6 +274,115 @@ def format_duration(seconds) -> str:
         h, m = divmod(m, 60)
         return f"{h}h {m}m {s}s"
     return f"{m}m {s}s"
+
+
+def _parse_oplist_txt(lines: List[str]) -> List[str]:
+    """从 oplist txt 提取算子名（GEMS 名称）。
+    格式: [DEBUG] flag_gems.ops.<module>.<func>: GEMS <NAME>
+    返回: ['ZEROS', 'FULL', 'ZERO_', ...] 按出现顺序，不去重
+    """
+    ops = []
+    for line in lines:
+        m = re.match(r'\[DEBUG\] flag_gems\.\S+:\s*GEMS\s+(.+)', line)
+        if m:
+            ops.append(m.group(1).strip())
+        elif not line.startswith('[DEBUG]') and line.strip():
+            ops.append(line.strip())
+    return ops
+
+
+def _render_ops_comparison(config_ops: List[str], txt_lines: List[str], stage_label: str) -> List[str]:
+    """生成配置 vs 运行时 txt 的并排对比文本行。
+
+    config_ops: 配置文件中的算子列表（小写简化名，如 ['add', 'bitwise', ...])
+    txt_lines: oplist txt 的原始行
+    stage_label: 阶段标签（如 '初始启动'）
+    """
+    txt_gems_names = _parse_oplist_txt(txt_lines)
+
+    lines = []
+    lines.append(f"  ┌─ {stage_label} 算子对比 (配置: {len(config_ops)} 个 | 运行时 txt: {len(txt_gems_names)} 条) ─┐")
+    lines.append(f"  │ {'配置文件 (include/enabled)':<34}│ {'运行时 txt (GEMS)':<34}│")
+    lines.append(f"  │{'─' * 34}┼{'─' * 34}│")
+
+    # 解析每条 txt 行的函数名和 GEMS 名
+    # 格式: [DEBUG] flag_gems.ops.<module>.<func>: GEMS <NAME>
+    # 或:   [DEBUG] flag_gems.runtime.backend.<vendor>.<arch>.ops.<module>.<func>: GEMS <NAME>
+    txt_entries = []  # [(func_name, module_name, gems_name, line_index)]
+    for i, line in enumerate(txt_lines):
+        m = re.match(
+            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+\.\w+\.ops)\.(\w+)\.(\w+):\s*GEMS\s+(.+)',
+            line
+        )
+        if m:
+            txt_entries.append((m.group(2).lower(), m.group(1).lower(), m.group(3).strip(), i))
+
+    # 建立配置名 → txt GEMS 名的映射
+    # 匹配规则：配置名与 txt 函数名或模块名匹配
+    config_to_txt = {}  # config_name -> [GEMS names]
+    matched_txt_indices = set()
+
+    # 匹配时按名称长度降序（更具体的先匹配，避免 'cumsum' 抢走 'cumsum_out' 的条目）
+    config_set_lower = {op.lower() for op in config_ops}
+    for cfg_op in sorted(config_ops, key=len, reverse=True):
+        matched_gems = []
+        cfg_lower = cfg_op.lower()
+        for func_name, mod_name, gems_name, idx in txt_entries:
+            if idx in matched_txt_indices:
+                continue
+            # 精确匹配（函数名或模块名）
+            if func_name == cfg_lower or mod_name == cfg_lower:
+                matched_gems.append(gems_name)
+                matched_txt_indices.add(idx)
+                continue
+            # 前缀匹配（如 bitwise → bitwise_and, bitwise_not; constant → constant_pad_nd）
+            cfg_base = cfg_lower.rstrip('_')
+            if func_name.startswith(cfg_base):
+                rest = func_name[len(cfg_base):]
+                if not rest or rest[0] in ('_', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'):
+                    # 跳过：如果 func_name 本身精确匹配另一个配置名
+                    if func_name in config_set_lower and func_name != cfg_lower:
+                        continue
+                    matched_gems.append(gems_name)
+                    matched_txt_indices.add(idx)
+        config_to_txt[cfg_op] = matched_gems
+
+    # 未匹配的 txt 行
+    unmatched_txt = []
+    for func_name, mod_name, gems_name, idx in txt_entries:
+        if idx not in matched_txt_indices:
+            unmatched_txt.append(gems_name)
+
+    # 输出并排对比
+    for cfg_op in sorted(config_ops):
+        gems_list = config_to_txt.get(cfg_op, [])
+        if gems_list:
+            txt_col = ", ".join(gems_list)
+            lines.append(f"  │ {cfg_op:<34}│ {txt_col:<34}│")
+        else:
+            lines.append(f"  │ {cfg_op:<34}│ {'(未加载)':<34}│ ←")
+
+    # txt 中有但配置中没有的
+    if unmatched_txt:
+        lines.append(f"  │{'─' * 34}┼{'─' * 34}│")
+        for gems_name in unmatched_txt:
+            lines.append(f"  │ {'(无对应配置)':<34}│ {gems_name:<34}│ ←")
+
+    lines.append(f"  └{'─' * 34}┴{'─' * 34}┘")
+
+    # 差异摘要
+    no_load = [op for op in sorted(config_ops) if not config_to_txt.get(op)]
+    if no_load or unmatched_txt:
+        diff_parts = []
+        if no_load:
+            diff_parts.append(f"配置有但未加载: {', '.join(no_load)}")
+        if unmatched_txt:
+            diff_parts.append(f"txt 有但配置无: {', '.join(unmatched_txt)}")
+        lines.append(f"  差异: {'; '.join(diff_parts)}")
+    else:
+        lines.append(f"  差异: 无（完全匹配）")
+
+    return lines
 
 
 def _resolve_disabled_ops(data: ReportData) -> tuple:
@@ -437,30 +550,45 @@ def generate_text_report(data: ReportData) -> str:
             else:
                 lines.append(f"  性能调优: 未触发")
 
-        # 最终算子列表（优先 final_oplist.txt，fallback 到 operator_config.json 的 enabled_ops）
-        best_ops = final_ops or acc_tuned_ops or initial_ops
-        enabled_from_config = []
-        if data.op_config and isinstance(data.op_config, dict):
-            enabled_from_config = data.op_config.get("enabled_ops", [])
-        if excluded_perf_list and not final_ops and enabled_from_config:
-            best_ops = enabled_from_config
-        if best_ops:
-            lines.append(f"  最终启用算子 ({len(best_ops)} 个):")
-            ops_str = ", ".join(best_ops)
-            if len(ops_str) > 120:
-                ops_str = ", ".join(best_ops[:15]) + f", ... (共 {len(best_ops)} 个)"
-            lines.append(f"    {ops_str}")
+        # ── 算子配置 vs 运行时 txt 完整对比 ──
+        lines.append("")
+        lines.append("  算子配置 vs 运行时 txt 对比:")
 
-        # 运行时 txt 一致性
-        runtime_count = None
-        if data.op_config and isinstance(data.op_config, dict):
-            runtime_count = data.op_config.get("runtime_enabled_count")
-        if runtime_count is not None and best_ops:
-            match = "与配置一致 ✓" if runtime_count == len(best_ops) else f"不一致 ✗ (配置 {len(best_ops)}, 运行时 {runtime_count})"
-            lines.append(f"  运行时 txt 算子数: {runtime_count} 个 ({match})")
+        # 初始阶段
+        initial_config_ops = None
+        if data.ops_control_initial and isinstance(data.ops_control_initial, dict):
+            initial_config_ops = data.ops_control_initial.get("include", [])
+        if not initial_config_ops and data.op_config and isinstance(data.op_config, dict):
+            # fallback: all_ops - disabled_ops (初始时 disabled 为空)
+            all_ops = data.op_config.get("all_ops", [])
+            if all_ops:
+                initial_config_ops = list(all_ops)
+
+        initial_txt = data.oplists.get("initial_oplist", [])
+        if initial_config_ops and initial_txt:
+            lines.extend(_render_ops_comparison(initial_config_ops, initial_txt, "初始启动"))
+
+        # 精度调优后
+        acc_tuned_txt = data.oplists.get("accuracy_tuned_oplist", [])
+        if acc_tuned_txt and excluded_acc_list:
+            acc_config_ops = [op for op in (initial_config_ops or []) if op not in excluded_acc_list]
+            if not acc_config_ops and data.op_config and isinstance(data.op_config, dict):
+                acc_config_ops = data.op_config.get("enabled_ops", [])
+            if acc_config_ops:
+                lines.append("")
+                lines.extend(_render_ops_comparison(acc_config_ops, acc_tuned_txt, "精度调优后"))
+
+        # 性能调优后
+        final_txt = data.oplists.get("final_oplist", [])
+        if final_txt and excluded_perf_list:
+            perf_config_ops = []
+            if data.op_config and isinstance(data.op_config, dict):
+                perf_config_ops = data.op_config.get("enabled_ops", [])
+            if perf_config_ops:
+                lines.append("")
+                lines.extend(_render_ops_comparison(perf_config_ops, final_txt, "性能调优后"))
 
         lines.append(f"  算子配置已固化: {'是' if config_persisted else '否'}")
-
     # 精度评测
     v1_score = eval_sec.get("v1_score") if isinstance(eval_sec, dict) else None
     v2_score = eval_sec.get("v2_score") if isinstance(eval_sec, dict) else None
@@ -541,16 +669,15 @@ def generate_text_report(data: ReportData) -> str:
         if not (isinstance(release, dict) and release):
             lines.append("")
             lines.append("发布信息:")
-        visibility = "公开" if qualified else "私有"
-        lines.append(f"  发布方式: {visibility}")
+        lines.append(f"  发布方式: 私有")
         lines.append(f"  qualified: {qualified}")
 
     # 主流程结论
     lines.append("")
     if qualified is True:
-        lines.append("结论: qualified (公开发布)")
+        lines.append("结论: 达标 (qualified)")
     elif qualified is False:
-        lines.append("结论: 不合格 (私有发布)")
+        lines.append("结论: 未达标")
     elif not data.workflow_complete:
         lines.append("结论: 流程未完成，暂无最终判定")
     else:
@@ -738,6 +865,7 @@ def _build_operator_tuning_json(data: ReportData, wf: dict, eval_sec: dict) -> d
         "optimized_ratio": optimized_ratio,
         "search_log_summary": search_log_summary,
         "initial_oplist": data.oplists.get("initial_oplist", []),
+        "ops_control_initial": data.ops_control_initial.get("include", []) if data.ops_control_initial else [],
         "accuracy_tuned_oplist": data.oplists.get("accuracy_tuned_oplist", []),
         "final_oplist": data.oplists.get("final_oplist", []),
         "config_persisted": wf.get("config_persisted", False),
@@ -1019,37 +1147,43 @@ def generate_summary(data: ReportData) -> str:
         lines.append("  调优: 未触发")
     lines.append("")
 
-    # 算子列表
-    initial_ops = data.oplists.get("initial_oplist", [])
-    final_ops = data.oplists.get("final_oplist", [])
-    acc_tuned_ops = data.oplists.get("accuracy_tuned_oplist", [])
-    oplist_count = data.get("service", "enable_oplist_count", default=None)
-    best_ops = final_ops or acc_tuned_ops or initial_ops
-    # fallback: 如果有性能调优且无 final_oplist，用 operator_config.json 的 enabled_ops
-    if excluded_perf_list and not final_ops and data.op_config and isinstance(data.op_config, dict):
-        enabled_from_config = data.op_config.get("enabled_ops", [])
-        if enabled_from_config:
-            best_ops = enabled_from_config
+    # 算子配置 vs 运行时 txt 完整对比
+    initial_txt = data.oplists.get("initial_oplist", [])
+    acc_tuned_txt = data.oplists.get("accuracy_tuned_oplist", [])
+    final_txt = data.oplists.get("final_oplist", [])
 
-    lines.append("算子列表:")
-    if initial_ops:
-        lines.append(f"  初始: {len(initial_ops)} 个")
-    elif oplist_count is not None:
-        lines.append(f"  初始: {oplist_count} 个")
-    if best_ops:
-        ops_preview = ", ".join(best_ops[:10])
-        if len(best_ops) > 10:
-            ops_preview += f", ... (共 {len(best_ops)} 个)"
-        lines.append(f"  最终启用: {len(best_ops)} 个 ({ops_preview})")
+    initial_config_ops = None
+    if data.ops_control_initial and isinstance(data.ops_control_initial, dict):
+        initial_config_ops = data.ops_control_initial.get("include", [])
+    if not initial_config_ops and data.op_config and isinstance(data.op_config, dict):
+        all_ops = data.op_config.get("all_ops", [])
+        if all_ops:
+            initial_config_ops = list(all_ops)
 
-    # 运行时 txt
-    gems_txt_path = data.get("service", "gems_txt_path", default=None) or data.get("environment", "flaggems_txt_path", default=None)
-    if gems_txt_path:
-        runtime_count = None
+    lines.append("算子配置 vs 运行时 txt 对比:")
+    if initial_config_ops and initial_txt:
+        lines.extend(_render_ops_comparison(initial_config_ops, initial_txt, "初始启动"))
+
+    if acc_tuned_txt and excluded_acc_list:
+        acc_config_ops = [op for op in (initial_config_ops or []) if op not in excluded_acc_list]
+        if not acc_config_ops and data.op_config and isinstance(data.op_config, dict):
+            acc_config_ops = data.op_config.get("enabled_ops", [])
+        if acc_config_ops:
+            lines.append("")
+            lines.extend(_render_ops_comparison(acc_config_ops, acc_tuned_txt, "精度调优后"))
+
+    if final_txt and excluded_perf_list:
+        perf_config_ops = []
         if data.op_config and isinstance(data.op_config, dict):
-            runtime_count = data.op_config.get("runtime_enabled_count")
-        count_str = f" ({runtime_count} 行)" if runtime_count else ""
-        lines.append(f"  运行时 txt: {gems_txt_path}{count_str}")
+            perf_config_ops = data.op_config.get("enabled_ops", [])
+        if perf_config_ops:
+            lines.append("")
+            lines.extend(_render_ops_comparison(perf_config_ops, final_txt, "性能调优后"))
+
+    if not initial_config_ops and not initial_txt:
+        oplist_count = data.get("service", "enable_oplist_count", default=None)
+        if oplist_count is not None:
+            lines.append(f"  初始算子数: {oplist_count} 个 (无详细对比数据)")
     lines.append("")
 
     # Issue
@@ -1071,8 +1205,8 @@ def generate_summary(data: ReportData) -> str:
     qualified = wf.get("qualified")
     release = data.get("release", default={}) or {}
     if qualified is not None:
-        visibility = "公开" if qualified else "私有"
-        lines.append(f"发布: qualified={qualified} ({visibility})")
+        status = "达标" if qualified else "未达标"
+        lines.append(f"发布: qualified={qualified} ({status}, 私有)")
         if release.get("harbor_image"):
             lines.append(f"  Harbor: {release['harbor_image']}")
         if release.get("modelscope_url"):

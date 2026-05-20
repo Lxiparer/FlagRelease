@@ -266,6 +266,8 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
     # 报告生成工具
     "shared/generate_report.py:scripts/generate_report.py"
+    # 越位执行数据清理工具
+    "shared/rollback_overflow.py:scripts/rollback_overflow.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do
@@ -342,6 +344,15 @@ if [ -n "${ENV_LINES}" ]; then
     echo "  ✓ /flagos-workspace/.env 已写入 (${ENV_COUNT} 个 token)"
 else
     echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
+fi
+
+# 4.55. 写入代理配置到容器（供容器内脚本自动切换代理）
+if [ -n "${FLAGOS_PROXY_LIST:-}" ]; then
+    echo "[4.55/6] 写入代理配置到容器..."
+    echo "${FLAGOS_PROXY_LIST}" | tr ',' '\n' | docker exec -i "${CONTAINER}" \
+        bash -c "cat > /flagos-workspace/.proxy && chmod 600 /flagos-workspace/.proxy"
+    PROXY_COUNT=$(echo "${FLAGOS_PROXY_LIST}" | tr ',' '\n' | wc -l)
+    echo "  ✓ /flagos-workspace/.proxy 已写入 (${PROXY_COUNT} 个代理)"
 fi
 
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
