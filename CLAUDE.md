@@ -56,6 +56,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
 | 安装 plugin / install plugin / plugin 安装 / vllm-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
+| 修复 plugin / fix plugin / plugin 修复 / plugin-fix | flagos-plugin-fix | `skills/flagos-plugin-fix/SKILL.md` |
 
 ---
 
@@ -107,6 +108,22 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 ### NV 重点场景
 
 `vllm + flagtree + flaggems`（无 plugin）是当前 NV 模型发布的优先场景，推荐版本组合：`vllm>=0.7.3 + flaggems>=5.1.0 + flagtree>=0.5.0`。
+
+### Plugin Fix Pipeline（独立流程）
+
+面向场景：**已有 plugin 环境的镜像，plugin 有问题无法启动服务**。Claude 自主修复 plugin 直到跑通。
+
+```
+1 容器准备     → 从镜像创建容器 + 模型搜索/挂载 + 工具部署
+2 环境检测     → 确认 plugin 环境就绪（vllm + flaggems + plugin 已安装）
+3 Plugin 修复  → Claude 自主循环：启动服务 → 读日志 → 分析根因 → 改代码 → 重试（最多 5 轮）
+4 精度性能评测 → Plugin 模式启动服务 → 跑 GPQA 精度 + 4k1k 性能（仅记录，不判定达标）
+5 打包发布     → docker commit → Harbor 镜像上传
+```
+
+启动方式：`bash prompts/run_plugin_fix_pipeline.sh <镜像地址> <模型名> <HARBOR_USER> <HARBOR_PASSWORD> [--proxy ...] [--max-fix-rounds 5]`
+
+Context 模板：`shared/context_plugin_fix.template.yaml`。步骤 3 失败时跳过 4 和 5，仅输出诊断报告。
 
 ---
 

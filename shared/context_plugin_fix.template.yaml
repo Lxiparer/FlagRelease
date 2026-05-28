@@ -1,0 +1,240 @@
+# ============================================================================
+# context_plugin_fix.template.yaml — Plugin Fix Pipeline 专用模板
+# ============================================================================
+# 此文件是 Plugin Fix Pipeline 的 context 模板，由 run_plugin_fix_pipeline.sh
+# 通过 setup_workspace.sh 复制到容器内 /flagos-workspace/shared/context.yaml。
+#
+# ⚠ 禁止直接读写此文件作为运行时状态！
+# 运行时 context 位于容器内 /flagos-workspace/shared/context.yaml
+# ============================================================================
+
+# ============================================================================
+# 网络环境
+# ============================================================================
+network:
+  proxy: ""
+  pip_index: ""
+  confirmed: false
+
+# ============================================================================
+# 执行模式
+# ============================================================================
+execution:
+  mode: ""                    # host | container
+  cmd_prefix: ""
+
+# ============================================================================
+# 场景
+# ============================================================================
+scenario: "plugin-fix"        # 固定为 plugin-fix
+
+# ============================================================================
+# 环境入口
+# ============================================================================
+entry:
+  type: ""                    # new_container (始终从镜像创建)
+  source: ""                  # 用户提供的镜像地址
+
+# ============================================================================
+# 模型信息
+# ============================================================================
+model:
+  name: ""
+  url: ""
+  local_path: ""
+  container_path: ""
+  tokenizer_path: ""
+
+# ============================================================================
+# 容器信息
+# ============================================================================
+container:
+  name: ""
+  status: ""
+
+# ============================================================================
+# 镜像信息
+# ============================================================================
+image:
+  name: ""
+  tag: ""
+
+# ============================================================================
+# 工作目录
+# ============================================================================
+workspace:
+  host_path: ""
+  container_path: "/flagos-workspace"
+
+# ============================================================================
+# GPU 信息
+# ============================================================================
+gpu:
+  vendor: ""
+  type: ""
+  count: 0
+  visible_devices_env: ""
+
+# ============================================================================
+# 环境检查信息
+# ============================================================================
+inspection:
+  core_packages:
+    torch: ""
+    vllm: ""
+  flag_packages:
+    flaggems: ""
+    flagtree: ""
+    vllm_plugin: ""
+  env_type: ""                # 应为 vllm_plugin_flaggems
+  flaggems_control: ""
+  env_vars: {}
+
+# ============================================================================
+# Plugin 信息
+# ============================================================================
+plugin:
+  installed: false
+  version: ""
+  importable: false
+  source_path: ""             # plugin 源码路径（修复时需要）
+
+# ============================================================================
+# Plugin 修复状态 (步骤3 核心)
+# ============================================================================
+plugin_fix:
+  status: ""                  # pending | in_progress | success | failed
+  max_rounds: 5              # 最大修复轮次
+  current_round: 0           # 当前轮次
+  fix_history: []            # 每轮修复记录
+  # 每条记录格式:
+  #   - round: 1
+  #     error_type: "ImportError"
+  #     error_summary: "cannot import name 'xxx' from 'vllm_plugin_fl'"
+  #     fix_action: "修改 xxx.py 第 N 行"
+  #     fix_file: "/path/to/file.py"
+  #     result: "success | still_failing"
+  #     timestamp: "ISO 8601"
+  final_status: ""            # fixed | unfixable | max_rounds_exceeded
+  final_error: ""             # 最终失败时的错误摘要
+
+# ============================================================================
+# 服务状态
+# ============================================================================
+service:
+  port: 0
+  model_name: ""
+  status: ""                  # running | stopped | crashed
+  startup_command: ""
+
+# ============================================================================
+# 精度评测结果 (仅记录，不判定达标)
+# ============================================================================
+accuracy:
+  executed: false
+  score: 0
+  total_questions: 0
+  correct_answers: 0
+  result_path: ""
+
+# ============================================================================
+# 性能评测结果 (仅记录，不判定达标)
+# ============================================================================
+performance:
+  executed: false
+  output_throughput: 0
+  total_throughput: 0
+  result_path: ""
+
+# ============================================================================
+# 发布信息
+# ============================================================================
+release:
+  harbor_image: ""            # 推送的 Harbor 镜像地址
+  harbor_tag: ""
+  pushed: false
+  timestamp: ""
+
+# ============================================================================
+# 工作流状态
+# ============================================================================
+workflow:
+  all_done: false
+  service_ok: false           # plugin 修复后服务是否可用
+  fix_completed: false        # 步骤3是否完成（无论成功失败）
+
+# ============================================================================
+# 工作流台账
+# ============================================================================
+workflow_ledger:
+  steps:
+    01_container_preparation:
+      step: "01_container_preparation"
+      title: "容器准备"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    02_environment_inspection:
+      step: "02_environment_inspection"
+      title: "环境检测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    03_plugin_fix:
+      step: "03_plugin_fix"
+      title: "Plugin 修复"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    04_eval_benchmark:
+      step: "04_eval_benchmark"
+      title: "精度性能评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    05_release:
+      step: "05_release"
+      title: "打包发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# ============================================================================
+# 流程计时
+# ============================================================================
+timing:
+  workflow_start: ""
+  workflow_end: ""
+  total_duration_seconds: 0
+  steps:
+    container_preparation: 0
+    environment_inspection: 0
+    plugin_fix: 0
+    eval_benchmark: 0
+    release: 0
+
+# ============================================================================
+# Issues
+# ============================================================================
+issues:
+  submitted: []
