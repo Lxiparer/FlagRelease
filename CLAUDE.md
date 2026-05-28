@@ -109,21 +109,26 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 `vllm + flagtree + flaggems`（无 plugin）是当前 NV 模型发布的优先场景，推荐版本组合：`vllm>=0.7.3 + flaggems>=5.1.0 + flagtree>=0.5.0`。
 
-### Plugin Fix Pipeline（独立流程）
+### Plugin Fix Pipeline（独立流程，三段式）
 
 面向场景：**已有 plugin 环境的镜像，plugin 有问题无法启动服务**。Claude 自主修复 plugin 直到跑通。
 
+**三段独立 Claude 会话**：
 ```
-1 容器准备     → 从镜像创建容器 + 模型搜索/挂载 + 工具部署
-2 环境检测     → 确认 plugin 环境就绪（vllm + flaggems + plugin 已安装）
-3 Plugin 修复  → Claude 自主循环：启动服务 → 读日志 → 分析根因 → 改代码 → 重试（最多 5 轮）
-4 精度性能评测 → Plugin 模式启动服务 → 跑 GPQA 精度 + 4k1k 性能（仅记录，不判定达标）
-5 打包发布     → docker commit → Harbor 镜像上传
+段1: 容器准备 + 环境检测 (步骤 1+2)        — max_turns 200
+段2: Plugin 修复循环 (步骤 3)              — max_turns 500（独占会话）
+段3: 精度性能评测 + 打包发布 (步骤 4+5)    — max_turns 200
 ```
+
+段2 失败（service_ok=false）时跳过段3，仅输出诊断报告。
+
+**输出目录**：`/data/plugin-fix-workspace/<model>/`（独立于主流程的 `/data/flagos-workspace/`）
+
+**段间上下文传递**：宿主机 `/data/plugin-fix-workspace/<model>/config/context_snapshot.yaml` 作为桥梁，shell 层 `read_plugin_fix_context()` 提取关键参数注入下一段 prompt。
 
 启动方式：`bash prompts/run_plugin_fix_pipeline.sh <镜像地址> <模型名> <HARBOR_USER> <HARBOR_PASSWORD> [--proxy ...] [--max-fix-rounds 5]`
 
-Context 模板：`shared/context_plugin_fix.template.yaml`。步骤 3 失败时跳过 4 和 5，仅输出诊断报告。
+Context 模板：`shared/context_plugin_fix.template.yaml`。
 
 ---
 

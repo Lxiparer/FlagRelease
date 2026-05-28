@@ -1,6 +1,14 @@
-# Plugin Fix Pipeline — Prompt 模板
+# Plugin Fix Pipeline — Prompt 模板（参考文档）
 
-你正在执行 **Plugin Fix Pipeline**，目标是修复一个 plugin 环境的 Docker 镜像，使其能正常启动推理服务，然后采集精度性能数据并打包发布。
+> 此文件为设计参考，实际 prompt 由 `run_plugin_fix_pipeline.sh` 三段式动态构造。
+> 输出目录：`/data/plugin-fix-workspace/<model>/`（非 /data/flagos-workspace/）
+
+Plugin Fix Pipeline 分为三段独立 Claude 会话：
+- **段1**：容器准备 + 环境检测（步骤 1+2）
+- **段2**：Plugin 修复循环（步骤 3）— 独占一个 Claude 会话
+- **段3**：精度性能评测 + 打包发布（步骤 4+5）
+
+段间通过 `/data/plugin-fix-workspace/<model>/config/context_snapshot.yaml` 传递上下文。
 
 ---
 
