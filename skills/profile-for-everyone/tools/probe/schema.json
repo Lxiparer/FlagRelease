@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "description": "Decoder-only LLM nograph decode schema. Edit when model architecture changes.",
+  "tree_skeleton": {
+    "root_key": "worker_busy_loop",
+    "root_name": "worker_busy_loop",
+    "decode_key_template": "decode_token[{decode_idx}]",
+    "decode_name_template": "decode_token[{decode_idx}]",
+    "unmapped_bucket": {
+      "key": "unmapped_gpu",
+      "name": "unmapped_gpu"
+    },
+    "fallback_bucket": {
+      "key": "other_gpu",
+      "name": "other_gpu"
+    }
+  },
+  "module_aliases": [
+    {
+      "pattern": "^RMSNormFL$",
+      "target": "RMSNorm"
+    },
+    {
+      "pattern": "^RMSNorm$",
+      "target": "RMSNorm"
+    },
+    {
+      "pattern": "^RotaryEmbeddingFL$",
+      "target": "RotaryEmbedding"
+    },
+    {
+      "pattern": "^RotaryEmbedding$",
+      "target": "RotaryEmbedding"
+    },
+    {
+      "pattern": "^SiluAndMulFL$",
+      "target": "SiluAndMul"
+    },
+    {
+      "pattern": "^SiluAndMul$",
+      "target": "SiluAndMul"
+    },
+    {
+      "pattern": "^Qwen3DecoderLayer$",
+      "target": "DecoderLayer"
+    },
+    {
+      "pattern": "^Qwen2DecoderLayer$",
+      "target": "DecoderLayer"
+    },
+    {
+      "pattern": "^Qwen3Attention$",
+      "target": "Attention"
+    },
+    {
+      "pattern": "^Qwen2Attention$",
+      "target": "Attention"
+    },
+    {
+      "pattern": "^Qwen2MLP$",
+      "target": "MLP"
+    },
+    {
+      "pattern": "^Qwen3MLP$",
+      "target": "MLP"
+    },
+    {
+      "pattern": "^Qwen3ForCausalLM$",
+      "target": "ForCausalLM"
+    },
+    {
+      "pattern": "^Qwen2ForCausalLM$",
+      "target": "ForCausalLM"
+    }
+  ],
+  "always_index_canonical_types": [
+    "DecoderLayer"
+  ],
+  "classify_rules": [
+    {
+      "id": "prepare_inputs",
+      "phase": "input_and_attention_metadata._prepare_inputs",
+      "match": {
+        "chain_contains_any": [
+          "_prepare_inputs"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "input_and_attention_metadata",
+          "name": "input_and_attention_metadata",
+          "category": "phase"
+        },
+        {
+          "key": "_prepare_inputs",
+          "name": "_prepare_inputs",
+          "category": "phase"
+        }
+      ],
+      "expand_modules": false
+    },
+    {
+      "id": "build_attention_metadata",
+      "phase": "input_and_attention_metadata._build_attention_metadata",
+      "match": {
+        "chain_contains_any": [
+          "_build_attention_metadata"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "input_and_attention_metadata",
+          "name": "input_and_attention_metadata",
+          "category": "phase"
+        },
+        {
+          "key": "_build_attention_metadata",
+          "name": "_build_attention_metadata",
+          "category": "phase"
+        }
+      ],
+      "expand_modules": false
+    },
+    {
+      "id": "model_forward",
+      "phase": "model_forward",
+      "match": {
+        "chain_contains_any": [
+          "_model_forward"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "model_forward",
+          "name": "model_forward",
+          "category": "phase"
+        }
+      ],
+      "expand_modules": true,
+      "module_filter": null,
+      "unattributed_bucket": {
+        "key": "unattributed",
+        "name": "model_forward.unattributed"
+      }
+    },
+    {
+      "id": "sampler",
+      "phase": "sampler",
+      "match": {
+        "any_of": [
+          {
+            "module_types_contains_any": [
+              "Sampler",
+              "TopKTopPSampler"
+            ]
+          },
+          {
+            "chain_contains_any": [
+              "sample_tokens",
+              "apply_temperature",
+              "Sampler",
+              "TopKTopP"
+            ]
+          }
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "sampler",
+          "name": "sampler",
+          "category": "phase"
+        }
+      ],
+      "expand_modules": true,
+      "module_filter": null,
+      "unattributed_bucket": {
+        "key": "unattributed",
+        "name": "sampler.unattributed"
+      },
+      "fallback_buckets": [
+        {
+          "when": {
+            "chain_contains_any": [
+              "apply_temperature"
+            ]
+          },
+          "key": "apply_temperature",
+          "name": "apply_temperature"
+        }
+      ]
+    },
+    {
+      "id": "hidden_select",
+      "phase": "hidden_select_and_logits.hidden_select",
+      "match": {
+        "chain_contains_any": [
+          "hidden_select",
+          "hidden_select_and_logits",
+          "select_hidden_states",
+          "select_last_hidden",
+          "last_token_hidden_states"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "hidden_select_and_logits",
+          "name": "hidden_select_and_logits",
+          "category": "phase"
+        },
+        {
+          "key": "hidden_select",
+          "name": "hidden_select",
+          "category": "bucket"
+        }
+      ],
+      "expand_modules": false,
+      "description": "Explicit hidden-state selection only. Do not match generic aten::index/index_select; embedding and input preprocessing also use those ops."
+    },
+    {
+      "id": "logits",
+      "phase": "hidden_select_and_logits.logits",
+      "match": {
+        "chain_contains_any": [
+          "compute_logits",
+          "LogitsProcessor"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "hidden_select_and_logits",
+          "name": "hidden_select_and_logits",
+          "category": "phase"
+        },
+        {
+          "key": "logits",
+          "name": "logits",
+          "category": "bucket"
+        }
+      ],
+      "expand_modules": true,
+      "module_filter": [
+        "LogitsProcessor"
+      ]
+    },
+    {
+      "id": "other_execute_model",
+      "phase": "execute_model.other_gpu",
+      "match": {
+        "chain_contains_any": [
+          "execute_model"
+        ]
+      },
+      "emit_path": [
+        {
+          "key": "execute_model",
+          "name": "execute_model",
+          "category": "phase"
+        },
+        {
+          "key": "other_execute_model_gpu",
+          "name": "other_execute_model_gpu",
+          "category": "bucket"
+        }
+      ],
+      "expand_modules": false
+    }
+  ],
+  "html_render": {
+    "merge_repeated_min": 3,
+    "trailing_digit_strip_regex": "_\\d+$"
+  },
+  "output_naming": {
+    "output_dir": "output",
+    "trace_suffixes_to_strip": [
+      ".pt.trace.json.gz",
+      ".trace.json.gz",
+      ".json.gz",
+      ".gz",
+      ".json"
+    ],
+    "default_prefix_template": "{base}.nograph.decode{decode_idx}",
+    "outputs": {
+      "tree": "{prefix}.normalized_tree.json",
+      "template": "{prefix}.semantic_template.json",
+      "csv": "{prefix}.kernel_timeline.csv",
+      "html": "{prefix}.semantic_tree.html"
+    }
+  }
+}

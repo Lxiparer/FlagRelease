@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "description": "Platform-level naming for nograph trace. Edit when switching runtime/hardware.",
+
+  "decode_marker_aliases": [
+    "execute_context_0(0)_generation_1(1)",
+    "execute_new_0_cached_1"
+  ],
+
+  "marker_autodetect": {
+    "name_like_any": ["%execute%", "%generation%", "%cached%"],
+    "name_bonus_keywords": {
+      "generation": 1000,
+      "cached":     1000,
+      "context":    1000,
+      "execute":     100
+    }
+  },
+
+  "gpu_categories": ["kernel", "gpu_memcpy", "gpu_memset"],
+
+  "cpu_wrapper_compact_names": [
+    "forward",
+    "__call__",
+    "_call_impl",
+    "_wrapped_call_impl",
+    "inner",
+    "decorate_context",
+    "wrapper"
+  ],
+
+  "cuda_launch_prefixes": [
+    "cudaLaunchKernel",
+    "cuLaunchKernelEx",
+    "cudaMemcpyAsync",
+    "cudaMemsetAsync",
+    "hipLaunchKernel",
+    "hipModuleLaunchKernel",
+    "hipExtLaunchKernel",
+    "hipMemcpyAsync",
+    "hipMemsetAsync"
+  ]
+}

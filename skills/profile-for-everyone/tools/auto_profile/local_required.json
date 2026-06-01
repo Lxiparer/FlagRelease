@@ -1,0 +1,11 @@
+{
+  "target": "both",
+  "targets": {
+    "vendor": {
+      "model_path": "/path/to/models/your-model"
+    },
+    "gems": {
+      "model_path": "/path/to/models/your-model"
+    }
+  }
+}

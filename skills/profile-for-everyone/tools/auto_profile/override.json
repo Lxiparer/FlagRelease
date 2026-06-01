@@ -1,0 +1,294 @@
+{
+  "target": null,
+  "release_name": null,
+  "served_model_name": null,
+  "host": null,
+  "client_host": null,
+  "port": null,
+  "host_output_dir": null,
+  "host_log_dir": null,
+  "warmup_prompt": null,
+  "profile_prompt": null,
+  "max_tokens": null,
+  "profile_request_count": null,
+  "wait_after_stop_profile_s": null,
+  "ready_s": null,
+  "http_request_s": null,
+  "vllm_stop_s": null,
+  "stream_vllm_log_to_console": null,
+  "require_model_config_json": null,
+  "start_if_stopped": null,
+  "create_if_missing": null,
+  "stop_after_run": null,
+  "stop_timeout_s": null,
+  "python_bin_in_container": null,
+  "vllm_rewrite": {
+    "remove_args": null,
+    "keep_unknown_args": null
+  },
+  "profile": {
+    "profiler_dir": null,
+    "host_output_dir": null,
+    "wait_after_stop_profile_s": null,
+    "profile_request_count": null,
+    "profiler_config": {
+      "profiler": null,
+      "torch_profiler_dir": null,
+      "torch_profiler_with_stack": null,
+      "torch_profiler_record_shapes": null
+    },
+    "trace_output_name": null,
+    "trace_wait_timeout_s": null,
+    "trace_poll_interval_s": null
+  },
+  "timeouts": {
+    "ready_s": null,
+    "http_request_s": null,
+    "vllm_stop_s": null
+  },
+  "requests": {
+    "warmup": {
+      "endpoint": null,
+      "payload": {
+        "model": null,
+        "prompt": null,
+        "max_tokens": null,
+        "ignore_eos": null
+      }
+    },
+    "profile": {
+      "endpoint": null,
+      "payload": {
+        "model": null,
+        "prompt": null,
+        "max_tokens": null,
+        "ignore_eos": null
+      }
+    }
+  },
+  "logging": {
+    "host_log_dir": null,
+    "stream_vllm_log_to_console": null
+  },
+  "precheck": {
+    "require_model_config_json": null
+  },
+  "container": {
+    "name": null,
+    "start_if_stopped": null,
+    "create_if_missing": null,
+    "stop_after_run": null,
+    "stop_timeout_s": null
+  },
+  "runtime": {
+    "workdir": null,
+    "python_bin_in_container": null
+  },
+  "override": {
+    "model_path": null,
+    "served_model_name": null,
+    "host": null,
+    "port": null,
+    "client_host": null
+  },
+  "targets": {
+    "vendor": {
+      "model_path": null,
+      "served_model_name": null,
+      "host": null,
+      "client_host": null,
+      "port": null,
+      "host_output_dir": null,
+      "host_log_dir": null,
+      "warmup_prompt": null,
+      "profile_prompt": null,
+      "max_tokens": null,
+      "profile_request_count": null,
+      "wait_after_stop_profile_s": null,
+      "ready_s": null,
+      "http_request_s": null,
+      "vllm_stop_s": null,
+      "stream_vllm_log_to_console": null,
+      "require_model_config_json": null,
+      "start_if_stopped": null,
+      "create_if_missing": null,
+      "stop_after_run": null,
+      "stop_timeout_s": null,
+      "python_bin_in_container": null,
+      "container_name": null,
+      "workdir": null,
+      "trace_output_name": null,
+      "vllm_rewrite": {
+        "remove_args": null,
+        "keep_unknown_args": null
+      },
+      "profile": {
+        "profiler_dir": null,
+        "host_output_dir": null,
+        "wait_after_stop_profile_s": null,
+        "profile_request_count": null,
+        "profiler_config": {
+          "profiler": null,
+          "torch_profiler_dir": null,
+          "torch_profiler_with_stack": null,
+          "torch_profiler_record_shapes": null
+        },
+        "trace_output_name": null,
+        "trace_wait_timeout_s": null,
+        "trace_poll_interval_s": null
+      },
+      "timeouts": {
+        "ready_s": null,
+        "http_request_s": null,
+        "vllm_stop_s": null
+      },
+      "requests": {
+        "warmup": {
+          "endpoint": null,
+          "payload": {
+            "model": null,
+            "prompt": null,
+            "max_tokens": null,
+            "ignore_eos": null
+          }
+        },
+        "profile": {
+          "endpoint": null,
+          "payload": {
+            "model": null,
+            "prompt": null,
+            "max_tokens": null,
+            "ignore_eos": null
+          }
+        }
+      },
+      "logging": {
+        "host_log_dir": null,
+        "stream_vllm_log_to_console": null
+      },
+      "precheck": {
+        "require_model_config_json": null
+      },
+      "container": {
+        "name": null,
+        "start_if_stopped": null,
+        "create_if_missing": null,
+        "stop_after_run": null,
+        "stop_timeout_s": null
+      },
+      "runtime": {
+        "workdir": null,
+        "python_bin_in_container": null
+      },
+      "override": {
+        "model_path": null,
+        "served_model_name": null,
+        "host": null,
+        "port": null,
+        "client_host": null
+      },
+      "trace_wait_timeout_s": null,
+      "trace_poll_interval_s": null
+    },
+    "gems": {
+      "model_path": null,
+      "served_model_name": null,
+      "host": null,
+      "client_host": null,
+      "port": null,
+      "host_output_dir": null,
+      "host_log_dir": null,
+      "warmup_prompt": null,
+      "profile_prompt": null,
+      "max_tokens": null,
+      "profile_request_count": null,
+      "wait_after_stop_profile_s": null,
+      "ready_s": null,
+      "http_request_s": null,
+      "vllm_stop_s": null,
+      "stream_vllm_log_to_console": null,
+      "require_model_config_json": null,
+      "start_if_stopped": null,
+      "create_if_missing": null,
+      "stop_after_run": null,
+      "stop_timeout_s": null,
+      "python_bin_in_container": null,
+      "container_name": null,
+      "workdir": null,
+      "trace_output_name": null,
+      "vllm_rewrite": {
+        "remove_args": null,
+        "keep_unknown_args": null
+      },
+      "profile": {
+        "profiler_dir": null,
+        "host_output_dir": null,
+        "wait_after_stop_profile_s": null,
+        "profile_request_count": null,
+        "profiler_config": {
+          "profiler": null,
+          "torch_profiler_dir": null,
+          "torch_profiler_with_stack": null,
+          "torch_profiler_record_shapes": null
+        },
+        "trace_output_name": null,
+        "trace_wait_timeout_s": null,
+        "trace_poll_interval_s": null
+      },
+      "timeouts": {
+        "ready_s": null,
+        "http_request_s": null,
+        "vllm_stop_s": null
+      },
+      "requests": {
+        "warmup": {
+          "endpoint": null,
+          "payload": {
+            "model": null,
+            "prompt": null,
+            "max_tokens": null,
+            "ignore_eos": null
+          }
+        },
+        "profile": {
+          "endpoint": null,
+          "payload": {
+            "model": null,
+            "prompt": null,
+            "max_tokens": null,
+            "ignore_eos": null
+          }
+        }
+      },
+      "logging": {
+        "host_log_dir": null,
+        "stream_vllm_log_to_console": null
+      },
+      "precheck": {
+        "require_model_config_json": null
+      },
+      "container": {
+        "name": null,
+        "start_if_stopped": null,
+        "create_if_missing": null,
+        "stop_after_run": null,
+        "stop_timeout_s": null
+      },
+      "runtime": {
+        "workdir": null,
+        "python_bin_in_container": null
+      },
+      "override": {
+        "model_path": null,
+        "served_model_name": null,
+        "host": null,
+        "port": null,
+        "client_host": null
+      },
+      "trace_wait_timeout_s": null,
+      "trace_poll_interval_s": null
+    }
+  },
+  "trace_wait_timeout_s": null,
+  "trace_poll_interval_s": null
+}

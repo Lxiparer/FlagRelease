@@ -1,0 +1,17 @@
+# Generated run artifacts — do NOT commit
+traceSource_both/
+profile_logs/
+output/
+*.pt.trace.json.gz
+*.log
+nohup.out
+__pycache__/
+*.pyc
+*.zip
+
+# Per-run output folders are named after release_name and live under --task-dir
+# (kept outside this repo by default). If you ever run inside the repo, ignore them too.
+
+# NOTE: tools/probe/trace_processor_shell is committed ON PURPOSE (bundled binary
+# to avoid flaky runtime downloads). It is NOT ignored. Make sure the committed
+# file is the right platform build (Linux x86-64 for Hygon/NV servers).

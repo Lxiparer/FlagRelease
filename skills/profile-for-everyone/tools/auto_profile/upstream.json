@@ -1,0 +1,18 @@
+{
+  "schema_version": 3,
+  "release_name": "Qwen3-30B-A3B",
+  "targets": {
+    "vendor": {
+      "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+      "docker_run_file": "vendor_docker_run.sh",
+      "setup_file": "vendor_setup.sh",
+      "vllm_serve_file": "vendor_vllm_serve.sh"
+    },
+    "gems": {
+      "image": "flaggems/vllm:latest",
+      "docker_run_file": "gems_docker_run.sh",
+      "setup_file": "gems_setup.sh",
+      "vllm_serve_file": "gems_vllm_serve.sh"
+    }
+  }
+}
