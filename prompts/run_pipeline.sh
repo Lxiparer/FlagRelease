@@ -823,6 +823,84 @@ echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
 
+# ===== 段1 步骤3 完成性校验 =====
+SEG1_SVC_STATUS=$(check_seg_complete "${MODEL}" "03" "service")
+if [ "$SEG1_SVC_STATUS" != "complete" ]; then
+    echo ""
+    echo "  ⚠ 段1 步骤3（服务启动）未完成，重新执行步骤3..."
+    PROMPT_SEG1_RETRY="容器名: ${SEG_CTR}，模型名: ${MODEL}
+${COMMON_TOKENS}
+
+**前段状态（步骤1/2已完成，无需重做）**：
+- 容器 ${SEG_CTR} 已就绪，工具脚本已部署
+- env_type=${SEG_ENV}
+- 步骤1/2 已完成，**只需执行步骤3（服务启动）**
+
+**执行前**：
+1. 读取 skills/flagos-service-startup/SKILL.md 了解服务启动流程
+2. 读取容器内 /flagos-workspace/shared/context.yaml 获取模型路径、GPU 配置、FlagGems 状态
+
+按 CLAUDE.md 工作流定义执行步骤3。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**wait_for_service.sh 等待策略**：使用 Bash(timeout=600000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，600000ms = 10 分钟。
+
+完成步骤3后，通过 docker cp 同步 context 到宿主机：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+
+**⚠ 段边界**：只执行步骤3，完成后立即停止。"
+
+    claude -p "${PROMPT_SEG1_RETRY}" \
+        --permission-mode auto \
+        --output-format stream-json \
+        --verbose \
+        --debug-file "${DEBUG_FILE}.seg1_retry" \
+        --max-turns 500 \
+        2>&1 | tee -a "${LOG_FILE}" \
+             | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_retry_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
+
+    # 重试后重新同步 context
+    if [ -f "${SHARED_CTX}" ]; then
+        cp "${SHARED_CTX}" "${CTX_FILE}"
+    elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+    fi
+    echo "  段1 重试后 ledger 状态:"
+    print_ledger_summary "${CTX_FILE}"
+
+    # 二次校验
+    SEG1_SVC_STATUS2=$(check_seg_complete "${MODEL}" "03" "service")
+    if [ "$SEG1_SVC_STATUS2" != "complete" ]; then
+        echo "  ⚠ 段1 步骤3 第一次重试后仍未完成，再次重试..."
+        claude -p "${PROMPT_SEG1_RETRY}" \
+            --permission-mode auto \
+            --output-format stream-json \
+            --verbose \
+            --debug-file "${DEBUG_FILE}.seg1_retry2" \
+            --max-turns 500 \
+            2>&1 | tee -a "${LOG_FILE}" \
+                 | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+                 | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_retry2_cost.txt" --durations-file "${LOG_DIR}/seg1_durations.json" ${FILTER_FLAGS} || true
+
+        # 二次重试后同步 context
+        if [ -f "${SHARED_CTX}" ]; then
+            cp "${SHARED_CTX}" "${CTX_FILE}"
+        elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+        fi
+        echo "  段1 二次重试后 ledger 状态:"
+        print_ledger_summary "${CTX_FILE}"
+
+        # 最终校验
+        SEG1_SVC_STATUS3=$(check_seg_complete "${MODEL}" "03" "service")
+        if [ "$SEG1_SVC_STATUS3" != "complete" ]; then
+            echo "错误：段1 步骤3 两次重试后仍未完成，终止流程"
+            exit 1
+        fi
+    fi
+    echo "  ✓ 段1 步骤3 重试成功"
+fi
+
 # ===== 段1越界检测：如果段1执行了步骤4+的操作，回滚 context 中的越界状态 =====
 SEG1_OVERFLOW=$(python3 -c "
 import yaml, re
