@@ -209,6 +209,7 @@ def build_item(
     compiler_version: str = "",
     framework_version: str = "",
     comm_lib_version: str = "",
+    eval_status: str = "1",
 ) -> Dict[str, Any]:
     item = {
         "description": None,
@@ -232,7 +233,7 @@ def build_item(
         "chip_name": chip_name,
         "eval_result": eval_result or {"result": [], "isCredible": False},
         "model_owner": model_owner,
-        "eval_status": "1",
+        "eval_status": eval_status,
         "eval_tag": eval_tag,
         "cudagraph_mode": cudagraph_mode,
         "operator_mode": operator_mode,
@@ -364,7 +365,7 @@ def main():
             create_datetime=create_dt,
             release_time=release_date,
             model_owner=args.model_owner,
-            eval_tag=["自动发布", "原生基线"],
+            eval_tag=["自动化发布", "原生基线"],
             performance_result=perf_data,
             eval_result=eval_data,
             model_name=model_short,
@@ -402,7 +403,7 @@ def main():
         perf_data = extract_performance(gt_perf_json)
         eval_data = extract_eval_result(gt_gpqa_json) if gt_gpqa_json else {"result": [], "isCredible": False}
         perf_ok = workflow.get("performance_ok", False)
-        eval_tag = ["自动发布", "性能达标" if perf_ok else "性能不达标"]
+        eval_tag = ["自动化发布", "性能达标" if perf_ok else "性能不达标"]
         items.append(build_item(
             name=f"{model_short}_{vendor}_flagos{ts_suffix}",
             software_eco="flagos",
@@ -429,6 +430,7 @@ def main():
             compiler_version=flagtree_ver,
             framework_version=framework_ver,
             comm_lib_version=flagcx_ver,
+            eval_status="2",
         ))
         print(f"  ✓ gt 记录已构造 ({model_short}_{vendor}_flagos{ts_suffix}, {'达标' if perf_ok else '不达标'}, 数据源: {gt_perf_file})")
     else:
@@ -443,7 +445,7 @@ def main():
             perf_data = extract_performance(pl_perf_json)
             eval_data = extract_eval_result(pl_gpqa_json) if pl_gpqa_json else {"result": [], "isCredible": False}
             pl_perf_ok = plugin_wf.get("performance_ok", False)
-            eval_tag = ["自动发布", "性能达标" if pl_perf_ok else "性能不达标"]
+            eval_tag = ["自动化发布", "性能达标" if pl_perf_ok else "性能不达标"]
             items.append(build_item(
                 name=f"{model_short}_{vendor}_plugin{ts_suffix}",
                 software_eco="flagos",
@@ -470,6 +472,7 @@ def main():
                 compiler_version=flagtree_ver,
                 framework_version=framework_ver,
                 comm_lib_version=flagcx_ver,
+                eval_status="2",
             ))
             print(f"  ✓ pl 记录已构造 ({model_short}_{vendor}_plugin{ts_suffix}, {'达标' if pl_perf_ok else '不达标'})")
         else:
