@@ -333,6 +333,22 @@ PLAN_STEPS_EOF
 )
 
 
+# ========== 容器名确定性预生成（冲突必然追加时间戳，agent 只消费不判断） ==========
+if $IMAGE_MODE; then
+    MODEL_SHORT_FOR_NAME=$(echo "${MODEL}" | sed 's|.*/||')
+    CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos"
+    if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+        CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M)"
+        # 极端情况同一分钟内重跑：再冲突则加秒
+        if docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+            CONTAINER_NAME_PRE="${MODEL_SHORT_FOR_NAME}_flagos_$(date +%m%d_%H%M%S)"
+        fi
+        echo "[pre-flight] 同名容器已存在，本次容器名（强制新建）: ${CONTAINER_NAME_PRE}"
+    else
+        echo "[pre-flight] 本次容器名: ${CONTAINER_NAME_PRE}"
+    fi
+fi
+
 # ========== 根据模式构造步骤1 ==========
 if $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
