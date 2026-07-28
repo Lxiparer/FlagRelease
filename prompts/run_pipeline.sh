@@ -1849,11 +1849,11 @@ try:
 except: print('')
 " 2>/dev/null) || V1_VARIANT=""
 
-if [ "${V1_VARIANT}" = "v1.3" ]; then
+if [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; then
     SEG3_RELEASE_ARGS="--version-tag v2 --also-tag v3"
     SEG3_V13_NOTE="
-**V1=v1.3 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 v1.3（依赖 fl plugin），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤13：ledger 仍只更新 08_release，步骤 9-13（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
-    echo "[段3] V1=v1.3 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
+**V1=${V1_VARIANT} 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 ${V1_VARIANT}（依赖 fl plugin；none=三选均失败强依赖 flaggems，baseline_selector 已固化 VLLM_FL_PREFER_ENABLED=true 使 V2 走 plugin 路径），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤13：ledger 仍只更新 08_release，步骤 9-13（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
+    echo "[段3] V1=${V1_VARIANT} 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
 else
     SEG3_RELEASE_ARGS="--version-tag v2"
     SEG3_V13_NOTE=""
@@ -2081,13 +2081,13 @@ try:
 except: print('')
 " 2>/dev/null) || V1_VARIANT=""
 
-# V1=v1.3（2.2/3.2 同镜像）：V3 已由段3 --also-tag v3 双 tag 发布，段4 整段跳过
-if [ "${PLUGIN_ENTRY}" = "True" ] && [ "${V1_VARIANT}" = "v1.3" ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=v1.3（V2=V3 同镜像，3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-13）"
+# V1=v1.3/none（2.2/3.2 同镜像）：V3 已由段3 --also-tag v3 双 tag 发布，段4 整段跳过
+if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; }; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT}（V2=V3 同镜像，2.2/3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-13）"
     if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
         for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
             docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
-                --ledger-update ${STEP_KEY} --ledger-status skipped --ledger-notes 'V1=v1.3: V2=V3 同镜像，段3已双tag发布(2.2/3.2)' \
+                --ledger-update ${STEP_KEY} --ledger-status skipped --ledger-notes 'V1=${V1_VARIANT}: V2=V3 同镜像，段3已双tag发布(2.2/3.2)' \
                 --json" >/dev/null 2>&1 || true
         done
         docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
@@ -2292,8 +2292,8 @@ print('no')
     fi
 else
     echo ""
-    if [ "${PLUGIN_ENTRY}" = "True" ] && [ "${V1_VARIANT}" = "v1.3" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=v1.3 同镜像场景，段4 已跳过（V3 已随段3 双 tag 发布）"
+    if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "v1.3" ] || [ "${V1_VARIANT}" = "none" ]; }; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT} 同镜像场景，段4 已跳过（V3 已随段3 双 tag 发布）"
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] plugin_entry=${PLUGIN_ENTRY}（service_ok 未满足=服务起不来），跳过 Plugin 流程（步骤 9-13）"
     fi

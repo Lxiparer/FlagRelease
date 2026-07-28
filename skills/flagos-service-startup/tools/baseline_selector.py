@@ -131,6 +131,15 @@ def _persist_plugin_state(result: Dict[str, Any]) -> Dict[str, Any]:
             # 三选均失败（强依赖 flaggems）：不持久化空 VLLM_PLUGINS，
             # 保留 start_service.sh 的 auto-fl 兜底（V2 大概率需要 fl+flaggems 才能起）
             print("  - V1=none，跳过 VLLM_PLUGINS 持久化（保留 auto-fl 兜底）")
+            # V2 与 V3 强制走同一 plugin 调度路径（2.2 同镜像双 tag 前提）：
+            # 注入代码门为 `if VLLM_FL_PREFER_ENABLED is not None: pass`（inspect_env.py
+            # 判存在性、不判值），故此处确定性置 true 使注入代码 pass、算子控制完全交给
+            # plugin dispatch。消除 none 场景"V2 走注入还是 plugin 全凭准入镜像默认带没带
+            # 该变量"的不确定性，使 none 与 v1.3 同源——V2=V3 同镜像、走 2.2 双 tag，
+            # 避免 V2/V3 被拆成两次独立评测产生噪声跨比误判。
+            persist_env("VLLM_FL_PREFER_ENABLED", "true")
+            persisted["prefer_enabled"] = True
+            print("  ✓ V1=none：持久化 VLLM_FL_PREFER_ENABLED=true（V2 强制 plugin 路径，与 V3 同镜像）")
         else:
             persist_env("VLLM_PLUGINS", result["vllm_plugins"])
             persisted["vllm_plugins"] = True

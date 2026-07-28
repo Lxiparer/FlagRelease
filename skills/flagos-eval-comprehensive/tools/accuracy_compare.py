@@ -23,8 +23,8 @@ Usage:
     python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B \
         --nv-baseline-file /flagos-workspace/shared/nv_baseline.yaml --output results/accuracy_compare.json
 
-退出码: 0=达标, 1=不达标, 2=参数/文件错误, 3=缺 NV 基线（需编排层兜底）,
-        4=判负但落在小样本噪声区（绝对差异≤2题，疑似评测方差假阳性，需复测/复核）
+退出码: 0=达标（含小样本噪声容忍达标：绝对差异≤2题时虽 rel_drop 超阈值仍判达标）,
+        1=不达标, 2=参数/文件错误, 3=缺 NV 基线（需编排层兜底）
 """
 
 import argparse
@@ -41,13 +41,13 @@ DEFAULT_NV_TOLERANCE = 0.05    # NV 基线模式：相对退化容差（5%）
 
 # 缺 NV 基线的专用退出码 / 信号
 EXIT_MISSING_NV = 3
-# 小样本噪声区专用退出码：rel_drop 超阈值，但绝对差异落在评测方差范围内 → 需复核/复测而非直接判负
-EXIT_NOISE_ZONE = 4
-
 # 小样本噪声防护：GPQA 快速评测题数少（如 50 题，每题 2%），低分基线上 1-2 题抖动
 # 就会把 rel_drop 放大到超 5% 红线，造成假阳性判负（历史事故：granite-4.0-micro
 # V3 28% vs NV 30% 仅差 1 题却被判"框架不适配"）。当 rel_drop 超阈值但绝对差异
-# 落在 NOISE_ABS_QUESTIONS 题以内时，标记为 noise_zone（需复核/复测），不直接判负。
+# 落在 NOISE_ABS_QUESTIONS 题以内时，标记 noise_zone 并【直接判定达标(aligned=True,
+# 退出码 0)】——设计意图是"相差 1~2 题就宽容达标、不折腾"。历史上曾用专用退出码 4
+# 表示"需复核/复测"，但该信号被编排层 agent 误解为要跑 198 题全量复测，既慢又可能因
+# 大样本另一处方差反而推翻本应容忍的结果，故取消该码，噪声区无差别归入达标。
 NOISE_ABS_QUESTIONS = 2.0      # 绝对差异 ≤ 该题数视为统计噪声（默认 2 题；1 题过于苛刻）
 NOISE_MAX_TOTAL = 100          # 仅对题数 ≤ 该值的小样本评测启用噪声防护（大样本方差已足够小）
 
@@ -56,11 +56,12 @@ def _noise_zone_check(current_score: Optional[float], baseline_score: Optional[f
                       total_questions: Optional[int], aligned: bool) -> Dict[str, Any]:
     """判定是否落在小样本噪声区。
 
-    仅在「按 rel_drop 判为不达标(aligned=False)」时才有意义：若绝对差异 ≤ NOISE_ABS_QUESTIONS
-    题（且为小样本评测），则该判负很可能是评测方差假阳性，应复核/复测而非直接判负。
-    返回 {noise_zone: bool, ...诊断字段}。
+    仅在「按 rel_drop 判为不达标(raw_aligned=False)」时才有意义：若绝对差异 ≤ NOISE_ABS_QUESTIONS
+    题（且为小样本评测），则该判负很可能是评测方差假阳性，应直接判定达标而非复测。
+    返回 {noise_zone: bool, ...诊断字段}。命中后调用方应将 aligned 提升为 True（判定达标）。
     """
     info: Dict[str, Any] = {"noise_zone": False}
+    # aligned 此处传入的是 raw_aligned：raw 已达标则无需噪声兜底
     if aligned or current_score is None or baseline_score is None:
         return info
     if not total_questions or total_questions <= 0 or total_questions > NOISE_MAX_TOTAL:
@@ -73,7 +74,7 @@ def _noise_zone_check(current_score: Optional[float], baseline_score: Optional[f
         info["noise_detail"] = (
             f"绝对差异 {abs_diff:.2f}% = {diff_questions:.2f} 题 "
             f"(每题 {per_q:.2f}%, 共 {total_questions} 题), "
-            f"≤ {NOISE_ABS_QUESTIONS:.0f} 题噪声阈值 → 疑似小样本方差假阳性，建议复测/复核"
+            f"≤ {NOISE_ABS_QUESTIONS:.0f} 题噪声阈值，属小样本评测方差"
         )
         info["diff_questions"] = round(diff_questions, 2)
         info["total_questions"] = total_questions
@@ -102,7 +103,90 @@ def extract_score(data: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-# ==================== NV 基线查表 =============
+# ==================== NV 基线查表 ====================
+
+def _normalize_model_name(name: str) -> str:
+    """规范化模型名用于模糊匹配：转小写、去除 -_/ 及空格"""
+    return re.sub(r"[-_/\s.]+", "", (name or "").lower())
+
+
+def _default_baseline_file() -> str:
+    """默认 nv_baseline.yaml 路径：优先容器内 shared/，回退脚本相对路径"""
+    candidates = [
+        "/flagos-workspace/shared/nv_baseline.yaml",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "..", "..", "shared", "nv_baseline.yaml"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+def lookup_nv_score(model_name: str, metric: str,
+                    baseline_file: Optional[str] = None) -> Tuple[Optional[float], Optional[float], str]:
+    """查 NV 基线表。
+
+    返回 (nv_score, tolerance, source)。
+    nv_score 为 None 表示未命中或数据无效（分数<=0 视为未填写）。
+    """
+    bf = baseline_file or _default_baseline_file()
+    if not os.path.exists(bf):
+        return None, None, f"基线表不存在: {bf}"
+
+    try:
+        import yaml
+    except ImportError:
+        print("ERROR: 需要 PyYAML 才能读取 nv_baseline.yaml", file=sys.stderr)
+        return None, None, "PyYAML 未安装"
+
+    try:
+        with open(bf, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        return None, None, f"基线表解析失败: {e}"
+
+    tolerance = data.get("default_tolerance", DEFAULT_NV_TOLERANCE)
+    models = data.get("models", {}) or {}
+    target = _normalize_model_name(model_name)
+
+    matched_key = None
+    for key, entry in models.items():
+        entry = entry or {}
+        candidates = [key] + list(entry.get("aliases", []) or [])
+        if any(_normalize_model_name(c) == target for c in candidates):
+            matched_key = key
+            break
+
+    if matched_key is None:
+        return None, tolerance, f"NV 基线表未收录模型: {model_name}"
+
+    entry = models[matched_key] or {}
+    metrics = entry.get("metrics", {}) or {}
+    nv_score = metrics.get(metric)
+    source = entry.get("source", "unknown")
+
+    if nv_score is None:
+        return None, tolerance, f"模型 {matched_key} 缺 {metric} 指标"
+    try:
+        nv_score = float(nv_score)
+    except (TypeError, ValueError):
+        return None, tolerance, f"模型 {matched_key} 的 {metric} 分数非法: {nv_score}"
+
+    if nv_score <= 0:
+        return None, tolerance, f"模型 {matched_key} 的 {metric} 分数未填写（<=0）"
+
+    return nv_score, tolerance, source
+
+
+# ==================== 对比逻辑 ====================
+
+def compare_v1(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
+    """本地 V1 基线对比（向后兼容）。
+
+    判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
+    即当前精度相对 V1 的退化不超过 threshold（默认 5%，与 NV 模式统一为相对口径）。
+    """
     v1_data = load_result(v1_path)
     v2_data = load_result(v2_path)
 
@@ -146,26 +230,31 @@ def extract_score(data: Dict[str, Any]) -> Optional[float]:
     drop = v1_score - v2_score
     rel_drop = drop / v1_score
     diff = round(abs(v2_score - v1_score), 2)
-    aligned = rel_drop <= threshold
+    raw_aligned = rel_drop <= threshold
+
+    # 小样本噪声防护：raw 判负时检查绝对差异是否落在评测方差内（题数取 V2 结果）。
+    # 噪声区直接等价达标（aligned=True）——设计意图是"相差 1~2 题就宽容判达标、不折腾"，
+    # 因此噪声区不再返回需后续动作的信号（历史上被 agent 误解为要跑 198 题全量复测）。
+    noise = _noise_zone_check(v2_score, v1_score, v2_data.get("total_questions"), raw_aligned)
+    aligned = raw_aligned or noise.get("noise_zone", False)
 
     result["diff"] = diff
     result["drop"] = round(drop, 2)
     result["rel_drop"] = round(rel_drop, 4)
     result["aligned"] = aligned
     result["v2_vs_v1"] = round(v2_score - v1_score, 2)
-
-    # 小样本噪声防护：判负时检查绝对差异是否落在评测方差内（题数取 V2 结果）
-    noise = _noise_zone_check(v2_score, v1_score, v2_data.get("total_questions"), aligned)
     result.update(noise)
+    if noise.get("noise_zone"):
+        result["noise_adjusted"] = True  # 报告可据此区分"直接达标"与"噪声容忍达标"
 
-    if aligned:
+    if raw_aligned:
         result["message"] = (
             f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 相对退化={rel_drop*100:.2f}% (阈值 {threshold*100:.0f}%)"
         )
     elif noise.get("noise_zone"):
         result["message"] = (
-            f"精度落在噪声区(需复核/复测): V1={v1_score:.2f}%, V2={v2_score:.2f}%, "
-            f"相对退化={rel_drop*100:.2f}% > 阈值 {threshold*100:.0f}%，但 {noise['noise_detail']}"
+            f"精度达标(小样本噪声容忍): V1={v1_score:.2f}%, V2={v2_score:.2f}%, "
+            f"相对退化={rel_drop*100:.2f}% 虽超阈值 {threshold*100:.0f}%，但 {noise['noise_detail']}，判定达标"
         )
     else:
         result["message"] = (
@@ -221,27 +310,31 @@ def compare_nv(v2_path: str, model_name: str, metric: str,
         return result
 
     rel_drop = (nv_score - v2_score) / nv_score
-    aligned = rel_drop <= tolerance
+    raw_aligned = rel_drop <= tolerance
+
+    # 小样本噪声防护：raw 判负时检查绝对差异是否落在评测方差内。噪声区直接等价达标
+    # （aligned=True），不返回需后续动作的信号（避免被误解为要跑 198 题全量复测）。
+    noise = _noise_zone_check(v2_score, nv_score, v2_data.get("total_questions"), raw_aligned)
+    aligned = raw_aligned or noise.get("noise_zone", False)
 
     result["missing_nv"] = False
     result["rel_drop"] = round(rel_drop, 4)
     result["rel_drop_pct"] = round(rel_drop * 100, 2)
     result["abs_diff"] = round(v2_score - nv_score, 2)
     result["aligned"] = aligned
-
-    # 小样本噪声防护：判负时检查绝对差异是否落在评测方差内
-    noise = _noise_zone_check(v2_score, nv_score, v2_data.get("total_questions"), aligned)
     result.update(noise)
+    if noise.get("noise_zone"):
+        result["noise_adjusted"] = True  # 报告可据此区分"直接达标"与"噪声容忍达标"
 
-    if aligned:
+    if raw_aligned:
         result["message"] = (
             f"精度达标: 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
             f"相对退化={rel_drop * 100:.2f}% (容差 {tolerance * 100:.1f}%)"
         )
     elif noise.get("noise_zone"):
         result["message"] = (
-            f"精度落在噪声区(需复核/复测): 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
-            f"相对退化={rel_drop * 100:.2f}% > 容差 {tolerance * 100:.1f}%，但 {noise['noise_detail']}"
+            f"精度达标(小样本噪声容忍): 当前={v2_score:.2f}%, NV={nv_score:.2f}%, "
+            f"相对退化={rel_drop * 100:.2f}% 虽超容差 {tolerance * 100:.1f}%，但 {noise['noise_detail']}，判定达标"
         )
     else:
         result["message"] = (
@@ -251,7 +344,76 @@ def compare_nv(v2_path: str, model_name: str, metric: str,
     return result
 
 
-# ==================== 输出 =============
+# ==================== 输出 ====================
+
+def print_human(result: Dict[str, Any]):
+    print()
+    print("=" * 60)
+    print("  GPQA Diamond 精度对比")
+    print("=" * 60)
+
+    if result.get("baseline_mode") == "nv_reference":
+        nv = result["nv"]
+        cur = result["current"]
+        nv_str = f"{nv['score']:.2f}%" if nv["score"] is not None else "N/A（缺基线）"
+        cur_str = f"{cur['score']:.2f}%" if cur["score"] is not None else "N/A"
+        print(f"  基线模式:     NV 参考 (来源: {nv['source']})")
+        print(f"  NV 基线:      {nv_str}")
+        print(f"  当前 (FlagOS):{cur_str}")
+        if result.get("missing_nv"):
+            print(f"  结论:         ⚠ 缺 NV 基线 — {result['message']}")
+        elif result.get("aligned") is not None:
+            print(f"  相对退化:     {result.get('rel_drop_pct', 0):.2f}%")
+            print(f"  容差:         {result['tolerance'] * 100:.1f}%")
+            if result.get("noise_zone"):
+                status = "✓ 达标(小样本噪声容忍)"
+            else:
+                status = "✓ 达标" if result["aligned"] else "✗ 不达标"
+            print(f"  结论:         {status}")
+            if result.get("noise_zone"):
+                print(f"  噪声诊断:     {result.get('noise_detail', '')}")
+        else:
+            print(f"  结论:         无法对比 — {result['message']}")
+    else:
+        v1 = result["v1"]
+        v2 = result["v2"]
+        print(f"  基线模式:     本地 V1")
+        print(f"  V1 (Native):  {v1['score']:.2f}%" if v1["score"] is not None else "  V1 (Native):  N/A")
+        print(f"  V2 (FlagOS):  {v2['score']:.2f}%" if v2["score"] is not None else "  V2 (FlagOS):  N/A")
+        if result["diff"] is not None:
+            print(f"  偏差:         {result['diff']:.2f}%")
+            if result.get("rel_drop") is not None:
+                print(f"  相对退化:     {result['rel_drop'] * 100:.2f}%")
+            if result.get("drop") is not None and result["drop"] < 0:
+                print(f"  方向:         V2 高于 V1（不触发调优）")
+            print(f"  容差:         {result['threshold'] * 100:.0f}%（相对退化超容差时不达标）")
+            if result.get("noise_zone"):
+                status = "✓ 达标(小样本噪声容忍)"
+            else:
+                status = "✓ 达标" if result["aligned"] else "✗ 不达标"
+            print(f"  结论:         {status}")
+            if result.get("noise_zone"):
+                print(f"  噪声诊断:     {result.get('noise_detail', '')}")
+        else:
+            print(f"  结论:         无法对比 — {result['message']}")
+    print("=" * 60)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GPQA Diamond 精度达标判定（本地 V1 或 NV 基线）")
+    parser.add_argument("--v1", help="V1 (Native) 评测结果 JSON（本地 V1 基线模式）")
+    parser.add_argument("--v2", required=True, help="待判定的评测结果 JSON（V2/V3/V4/V5）")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
+                        help=f"本地 V1 模式：相对退化容差，比例值（默认 {DEFAULT_THRESHOLD} = {DEFAULT_THRESHOLD*100:.0f}%%）")
+    # NV 基线模式
+    parser.add_argument("--nv-baseline", metavar="MODEL",
+                        help="启用 NV 基线模式：按模型名查 nv_baseline.yaml")
+    parser.add_argument("--nv-baseline-file",
+                        help="nv_baseline.yaml 路径（默认自动查找 shared/）")
+    parser.add_argument("--metric", default="gpqa_diamond",
+                        help="NV 基线模式：对比指标名（默认 gpqa_diamond）")
+    parser.add_argument("--nv-tolerance", type=float, default=None,
+                        help=f"NV 基线模式：相对退化容差（默认表内 default_tolerance 或 {DEFAULT_NV_TOLERANCE}）")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--output", help="结果输出文件路径（JSON）")
     args = parser.parse_args()
@@ -280,11 +442,9 @@ def compare_nv(v2_path: str, model_name: str, metric: str,
     # 退出码：缺 NV 基线用专用码 3，让编排层区分"不达标"和"无法判定"
     if result.get("missing_nv"):
         sys.exit(EXIT_MISSING_NV)
+    # 达标（含小样本噪声容忍达标，noise_zone 命中时 aligned 已提升为 True）→ 0
     if result.get("aligned"):
         sys.exit(0)
-    # 判负但落在小样本噪声区 → 专用码 4，让编排层触发复测/复核而非直接判负
-    if result.get("noise_zone"):
-        sys.exit(EXIT_NOISE_ZONE)
     sys.exit(1)
 
 

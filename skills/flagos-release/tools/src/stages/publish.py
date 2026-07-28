@@ -969,6 +969,15 @@ class PublishStage(BaseStage):
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 
+        # plugin 版本（V3/V4）固化 VLLM_PLUGINS=fl 前缀：VLLM_PLUGINS=fl 由 start_service.sh
+        # 在环境变量层设置，从不进入 serve 命令字符串，导致 README（尤其事后单独补发 V3/V4 时）
+        # 偶发丢失该前缀、用户照抄命令起服务报错。此处按版本类型确定性补齐，与 context 中
+        # commands.serve_start 是否恰好带前缀彻底解耦。幂等：命令中已含 VLLM_PLUGINS= 则一律
+        # 不动（尊重已记录的值，避免重复/冲突）；仅在完全缺失时补 fl。
+        if self.config.version_tag in ("v3", "v4") and vars["serve_start_cmd"]:
+            if "VLLM_PLUGINS=" not in vars["serve_start_cmd"]:
+                vars["serve_start_cmd"] = "VLLM_PLUGINS=fl " + vars["serve_start_cmd"]
+
         # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
         if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
             print(f"  ⚠ 路径一致性警告: serve_start_cmd 中未包含 canonical_model_path ({canonical_path})")

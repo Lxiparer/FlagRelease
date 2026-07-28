@@ -452,6 +452,72 @@ def _find_score(d: dict, depth: int = 0) -> Optional[float]:
 
 
 # =============================================================================
+# 采样参数决策（模型配置驱动 + 失败回退默认）
+# =============================================================================
+
+# 从模型 generation_config.json 采纳的采样字段白名单。
+# 已在真实容器验证 evalscope GenerateConfig 原生支持这些键（不支持也会被
+# evalscope 自动挪入 extra_body 透传 vllm，不会报错）。刻意不含 max_tokens：
+# 模型配置里的 max_tokens 常偏小（如 1024）会导致截断、精度暴跌，max_tokens
+# 仍由 auto_max_tokens 基于 max_model_len 自适应计算 + 截断检测决定。
+_GEN_PARAM_WHITELIST = ("temperature", "top_p", "top_k", "repetition_penalty")
+
+
+def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
+    """构建 generation_config：优先采用模型自带 generation_config.json 的采样参数，
+    读取失败/文件缺失/字段非法时无声回退现有默认。
+
+    设计为纯增强层：任何一步异常都不 raise，最坏情况等价于改动前的固定默认，
+    确保绝不因本逻辑新增精度评测报错点（关系整体流程成功率）。
+
+    优先级：模型 generation_config.json 白名单字段 > 现有默认（标准 0.0 / thinking 0.6）。
+    stream/timeout/n 属评测框架控制项，不受模型配置影响。
+    """
+    # 1) 现有默认（回退基线，与改动前完全一致）
+    if is_thinking:
+        cfg = {'max_tokens': max_tokens, 'temperature': 0.6, 'top_p': 0.95,
+               'stream': True, 'timeout': 120000, 'n': 1}
+    else:
+        cfg = {'max_tokens': max_tokens, 'temperature': 0.0, 'top_p': 1.0,
+               'stream': True, 'timeout': 120000, 'n': 1}
+
+    # 2) best-effort 读模型配置覆盖采样字段（全程不 raise）
+    try:
+        import yaml as _yaml
+        import json as _json
+        import os as _os
+        ctx_path = "/flagos-workspace/shared/context.yaml"
+        with open(ctx_path) as f:
+            ctx = _yaml.safe_load(f) or {}
+        model_sec = ctx.get("model", {}) or {}
+        mp = model_sec.get("local_path") or model_sec.get("container_path")
+        if mp:
+            gc_path = _os.path.join(mp, "generation_config.json")
+            if _os.path.isfile(gc_path):
+                with open(gc_path) as f:
+                    gc = _json.load(f) or {}
+                applied = {}
+                for k in _GEN_PARAM_WHITELIST:
+                    v = gc.get(k)
+                    # 仅采纳合法非负数值，避免字符串/None/负值污染
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                        cfg[k] = v
+                        applied[k] = v
+                if applied:
+                    print(f"  [gen] 采用模型 generation_config.json 采样参数: {applied}")
+                else:
+                    print("  [gen] generation_config.json 无可用采样字段，沿用默认")
+            else:
+                print("  [gen] 未找到模型 generation_config.json，沿用默认采样参数")
+        else:
+            print("  [gen] context.yaml 无模型路径，沿用默认采样参数")
+    except Exception as e:  # 任何异常都静默回退，绝不影响评测
+        print(f"  [gen] 读取模型配置失败（{e}），回退默认采样参数")
+
+    return cfg
+
+
+# =============================================================================
 # 主流程
 # =============================================================================
 
@@ -499,25 +565,9 @@ def run_fast_gpqa(
         api_base, api_key, model_name, max_tokens, max_model_len,
     )
 
-    # Step 4: 构建 generation_config
-    if is_thinking:
-        gen_config = {
-            'max_tokens': max_tokens,
-            'temperature': 0.6,
-            'top_p': 0.95,
-            'stream': True,
-            'timeout': 120000,
-            'n': 1,
-        }
-    else:
-        gen_config = {
-            'max_tokens': max_tokens,
-            'temperature': 0.0,
-            'top_p': 1.0,
-            'stream': True,
-            'timeout': 120000,
-            'n': 1,
-        }
+    # Step 4: 构建 generation_config（优先采用模型自带 generation_config.json 的采样参数，
+    # 读取失败/缺失时无声回退现有默认；纯增强层，绝不新增评测报错点）
+    gen_config = resolve_gen_params(is_thinking, max_tokens)
 
     # Step 5: 构建 dataset_args
     dataset_args = {'gpqa_diamond': {'few_shot_num': 0}}
