@@ -101,6 +101,10 @@ class ModelInfo:
     flagrelease_name: str = ""
     flagrelease_name_pre: str = ""
     image_harbor_path: str = ""
+    # README 中 docker pull 命令展示的镜像地址覆盖：
+    # V4 发布时 README 仍推荐 V3(Max) 镜像（V4 是减算子实验版，交付推荐用 V3），
+    # 由 from_context 从 versions.v3.image_url 回填。为空则回退 image_harbor_path。
+    readme_image_override: str = ""
     container_run_cmd: str = ""
     serve_start_cmd: str = ""
     serve_infer_cmd: str = ""
@@ -336,6 +340,15 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     plugin_wf = ctx.get('plugin_workflow', {})
     if plugin_wf.get('accuracy_ok', False) or plugin_wf.get('qualified', False):
         config.plugin_qualified = True
+
+    # V4 发布时 README 仍推荐 V3(Max) 镜像：从 versions.v3 读取已发布的 V3 镜像地址存起来，
+    # 供 publish 阶段在 version_tag==v4 时覆盖 README 的 docker pull 命令。
+    # 此处 version_tag 尚未设置（main.py 在 from_context 之后才设），故无条件读取、
+    # 由 publish 侧按 version_tag 决定是否启用。字段名兼容 image_url / harbor_image。
+    v3_node = ctx.get('versions', {}).get('v3', {}) or {}
+    v3_image = str(v3_node.get('image_url', '') or v3_node.get('harbor_image', '') or '').strip()
+    if v3_image:
+        config.model_info.readme_image_override = v3_image
 
     return config
 

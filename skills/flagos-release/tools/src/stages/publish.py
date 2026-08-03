@@ -814,6 +814,25 @@ for k, v in result.items():
         return ok
 
     # ==================== README 生成 =============
+    def _readme_pull_image(self) -> str:
+        """README 中 docker pull 命令展示的镜像地址。
+
+        V4(Flag-express) 是在 V3 基础上减算子的实验版，交付推荐仍用 V3(Max)。
+        因此 version_tag==v4 且 context 提供了 V3 镜像地址(readme_image_override)时，
+        README 展示 V3 镜像（照常展示 flagrelease-project 私有地址，供 SVT 验收方 pull）。
+        其余版本（含 override 缺失兜底）沿用当前发布镜像 image_harbor_path。
+        """
+        model_info = self.config.model_info
+        current = model_info.image_harbor_path or self.config.publish.harbor_path or ""
+        if getattr(self.config, "version_tag", "") == "v4":
+            override = getattr(model_info, "readme_image_override", "") or ""
+            if override:
+                if override != current:
+                    print(f"  README 使用 V3(Max) 镜像（V4 减算子版交付推荐 V3）: {override}")
+                return override
+            print("  ⚠ V4 发布但 context 无 V3 镜像地址(versions.v3.image_url)，README 回退当前 V4 镜像")
+        return current
+
     def _generate_readme(self) -> Optional[str]:
         """生成 README"""
         publish_config = self.config.publish
@@ -1102,7 +1121,7 @@ for k, v in result.items():
             vars["flaggems_version"] = chip_config.gems_version or "N/A"
             vars["vllm_row"] = ""
 
-        vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
+        vars["image_harbor_path"] = self._readme_pull_image() or "N/A"
         image_harbor = vars["image_harbor_path"]
         vars["image_pull_cmd"] = f"docker pull {image_harbor}" if image_harbor != "N/A" else ""
 
@@ -1238,7 +1257,7 @@ for k, v in result.items():
         eval_table = self._generate_evaluation_table()
         docker_version = model_info.docker_version or "N/A"
         os_info = model_info.ubuntu_version or "Linux"
-        image_harbor = model_info.image_harbor_path or self.config.publish.harbor_path or ""
+        image_harbor = self._readme_pull_image()
         image_pull_cmd = f"docker pull {image_harbor}" if image_harbor else ""
         container_run_cmd = model_info.container_run_cmd or ""
         serve_start_cmd = self._ensure_plugin_prefix(model_info.serve_start_cmd or "")
