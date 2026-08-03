@@ -327,8 +327,84 @@ class PublishStage(BaseStage):
             message=summary
         ))
 
+    # vllm-plugin-FL 官方认可的算子/plugin 环境变量（逐字核对 vllm_fl/utils.py）。
+    # 固化进镜像 Config.Env，确保裸 docker run / vllm serve 也能读到，不再依赖
+    # /etc/environment(PAM) 或 .bashrc(登录 shell) —— 这两者 Docker 拉起进程都不加载。
+    _FLAGGEMS_COMMIT_ENV_KEYS = [
+        "USE_FLAGGEMS",
+        "VLLM_FL_PREFER_ENABLED",
+        "VLLM_PLUGINS",
+        "VLLM_FL_FLAGOS_BLACKLIST",
+        "VLLM_FL_FLAGOS_WHITELIST",
+        "FLAGGEMS_CONTROL_MODE",
+    ]
+
+    def _collect_flaggems_env_for_commit(self) -> dict:
+        """从容器内收集需要固化进镜像 Config.Env 的算子/plugin 环境变量。
+
+        来源优先级：/root/flaggems_op_config.json 的 env_vars（persist_op_config.py 记录，
+        最权威）> /etc/environment 兜底。返回 {KEY: VALUE}（仅非空）。
+
+        互斥约束（官方 utils.py:114 硬校验）：VLLM_FL_FLAGOS_BLACKLIST 与
+        VLLM_FL_FLAGOS_WHITELIST 不能同时存在，否则 plugin 启动即 ValueError。
+        二者都出现时保留 BLACKLIST（主流程语义），丢弃 WHITELIST 并告警。
+        """
+        keys = self._FLAGGEMS_COMMIT_ENV_KEYS
+        reader = f"""
+import json, os
+keys = {keys!r}
+result = {{}}
+# 1) 固化记录（最权威）
+try:
+    with open('/root/flaggems_op_config.json', 'r', encoding='utf-8') as f:
+        rec = json.load(f)
+    ev = rec.get('env_vars', {{}}) or {{}}
+    for k in keys:
+        v = ev.get(k)
+        if v is not None and str(v).strip():
+            result[k] = str(v).strip()
+except Exception:
+    pass
+# 2) /etc/environment 兜底（不覆盖已从记录取到的）
+try:
+    with open('/etc/environment', 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or '=' not in line or line.startswith('#'):
+                continue
+            k, _, v = line.partition('=')
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k in keys and v and k not in result:
+                result[k] = v
+except Exception:
+    pass
+for k, v in result.items():
+    print(f'{{k}}={{v}}')
+"""
+        script_b64 = base64.b64encode(reader.encode()).decode()
+        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        success, stdout, _ = self.run_command(
+            cmd=cmd, step_name="收集固化环境变量", timeout=60, in_container=True, check=False
+        )
+        env_map = {}
+        if success and stdout:
+            for line in stdout.splitlines():
+                line = line.strip()
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    v = v.strip()
+                    if k in keys and v:
+                        env_map[k] = v
+        # 互斥：blacklist 与 whitelist 不可并存
+        if "VLLM_FL_FLAGOS_BLACKLIST" in env_map and "VLLM_FL_FLAGOS_WHITELIST" in env_map:
+            print("  ⚠ 同时检测到 BLACKLIST 与 WHITELIST，保留 BLACKLIST 丢弃 WHITELIST（避免 plugin ValueError）")
+            env_map.pop("VLLM_FL_FLAGOS_WHITELIST", None)
+        return env_map
+
     def _commit_container(self) -> bool:
-        """将容器 commit 为镜像"""
+        """将容器 commit 为镜像（固化算子/plugin 环境变量进 Config.Env）"""
         container_name = self.config.container_name
         if not container_name:
             print("  x 容器名称未配置")
@@ -337,20 +413,60 @@ class PublishStage(BaseStage):
         model_name = self.config.model_info.output_name or "model"
         commit_image_name = f"flagrelease-commit-{container_name}:{model_name}".lower().replace("/", "-")
 
+        # 收集并固化算子/plugin 环境变量到镜像 Config.Env（治本：不依赖 shell 加载路径）
+        env_map = self._collect_flaggems_env_for_commit()
+        change_args = ""
+        if env_map:
+            print(f"  固化环境变量进镜像 Config.Env: {', '.join(env_map.keys())}")
+            change_args = " " + " ".join(f"--change 'ENV {k}={v}'" for k, v in env_map.items())
+        else:
+            print("  未检测到需固化的算子/plugin 环境变量（native 或全量默认，跳过 ENV 注入）")
+
         print(f"  正在将容器 {container_name} commit 为镜像 {commit_image_name}...")
 
-        cmd = f"docker commit {container_name} {commit_image_name}"
+        cmd = f"docker commit{change_args} {container_name} {commit_image_name}"
         success, stdout, stderr = self.run_command(
             cmd=cmd,
             step_name="容器 commit",
             timeout=600
         )
 
-        if success:
-            self.config.publish.image_source = commit_image_name
-            print(f"  + 容器已 commit 为镜像: {commit_image_name}")
+        if not success:
+            return False
 
-        return success
+        self.config.publish.image_source = commit_image_name
+        print(f"  + 容器已 commit 为镜像: {commit_image_name}")
+
+        # 硬对账：校验固化的环境变量确实写进了镜像 Config.Env
+        if env_map and not self._verify_committed_env(commit_image_name, env_map):
+            print("  x 镜像 Config.Env 固化校验失败（变量未生效），中止发布")
+            return False
+
+        return True
+
+    def _verify_committed_env(self, image_name: str, expected: dict) -> bool:
+        """docker inspect 校验镜像 Config.Env 确实包含固化的环境变量"""
+        cmd = f"docker inspect --format '{{{{json .Config.Env}}}}' {image_name}"
+        success, stdout, _ = self.run_command(
+            cmd=cmd, step_name="校验镜像 Config.Env", timeout=60, check=False
+        )
+        if not success or not stdout:
+            print("  ⚠ 无法读取镜像 Config.Env，跳过校验")
+            return True
+        try:
+            env_list = json.loads(stdout.strip()) or []
+        except Exception:
+            print("  ⚠ 解析 Config.Env 失败，跳过校验")
+            return True
+        image_env = dict(e.split("=", 1) for e in env_list if "=" in e)
+        ok = True
+        for k, v in expected.items():
+            if image_env.get(k) != v:
+                print(f"  x Config.Env 缺失/不符: {k}（期望={v}, 实际={image_env.get(k)}）")
+                ok = False
+        if ok:
+            print(f"  ✓ 镜像 Config.Env 固化校验通过（{len(expected)} 个变量）")
+        return ok
 
     def _tag_image(self) -> bool:
         """镜像打 tag"""
@@ -725,10 +841,10 @@ class PublishStage(BaseStage):
             "flagrelease_name_pre": model_info.flagrelease_name_pre,
             "image_harbor_path": model_info.image_harbor_path,
             "container_run_cmd": model_info.container_run_cmd,
-            "serve_start_cmd": model_info.serve_start_cmd,
+            "serve_start_cmd": self._ensure_plugin_prefix(model_info.serve_start_cmd or ""),
             "serve_infer_cmd": model_info.serve_infer_cmd,
             "canonical_model_path": model_info.canonical_model_path,
-            "new_model_introduction": model_info.new_model_introduction,
+            "new_model_introduction": model_info.new_model_introduction or "",
             "evaluation_table": self._generate_evaluation_table(),
         }
 
@@ -903,6 +1019,36 @@ class PublishStage(BaseStage):
 
         return output_dir
 
+    def _is_plugin_image(self) -> bool:
+        """判定当前发布目标是否为 plugin 镜像（README serve 命令需 VLLM_PLUGINS=fl 前缀）。
+
+        判据不能只看 version_tag——2.2 同镜像双 tag 场景（version_tag=v2 + also_tag=v3/v4）
+        主 tag 是 v2 但镜像本身是 plugin 镜像，同样需要 fl 前缀。满足以下任一即视为 plugin 镜像：
+          (a) version_tag ∈ {v3,v4}   —— 独立 plugin 版本
+          (b) also_tag    ∈ {v3,v4}   —— 2.2 同镜像双 tag（v2 主 tag，同镜像也发 v3/v4）
+          (c) plugin_image_mode       —— 兼容旧 --plugin-mode 别名
+        """
+        _plugin_versions = ("v3", "v4")
+        return (
+            self.config.version_tag in _plugin_versions
+            or getattr(self.config, "also_tag", "") in _plugin_versions
+            or bool(getattr(self.config, "plugin_image_mode", False))
+        )
+
+    def _ensure_plugin_prefix(self, serve_cmd: str) -> str:
+        """plugin 镜像的 serve 命令固化 VLLM_PLUGINS=fl 前缀。
+
+        VLLM_PLUGINS=fl 由 start_service.sh 在环境变量层设置，从不进入 serve 命令字符串，
+        导致 README 偶发丢失该前缀、用户照抄命令起服务报错。此处对所有 README 生成路径
+        （模板 / 内置 / 外部脚本）统一在源头补齐。幂等：命令已含 VLLM_PLUGINS= 则不动。
+        """
+        if not serve_cmd:
+            return serve_cmd
+        if self._is_plugin_image() and "VLLM_PLUGINS=" not in serve_cmd:
+            serve_cmd = "VLLM_PLUGINS=fl " + serve_cmd
+            print("  ✓ README serve 命令补齐 plugin 前缀 VLLM_PLUGINS=fl（plugin 镜像）")
+        return serve_cmd
+
     def _prepare_template_vars(self) -> dict:
         """准备模板变量"""
         model_info = self.config.model_info
@@ -913,7 +1059,7 @@ class PublishStage(BaseStage):
         vars["flagrelease_name"] = model_info.flagrelease_name or model_info.output_name
         vars["output_name"] = model_info.output_name
         vars["source_of_model_weights"] = model_info.source_of_model_weights
-        vars["new_model_introduction"] = model_info.new_model_introduction or "新模型介绍，待定...."
+        vars["new_model_introduction"] = model_info.new_model_introduction or ""
 
         if self.env_info and self.env_info.vendor:
             vars["vendor"] = self.env_info.vendor.value
@@ -969,14 +1115,8 @@ class PublishStage(BaseStage):
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 
-        # plugin 版本（V3/V4）固化 VLLM_PLUGINS=fl 前缀：VLLM_PLUGINS=fl 由 start_service.sh
-        # 在环境变量层设置，从不进入 serve 命令字符串，导致 README（尤其事后单独补发 V3/V4 时）
-        # 偶发丢失该前缀、用户照抄命令起服务报错。此处按版本类型确定性补齐，与 context 中
-        # commands.serve_start 是否恰好带前缀彻底解耦。幂等：命令中已含 VLLM_PLUGINS= 则一律
-        # 不动（尊重已记录的值，避免重复/冲突）；仅在完全缺失时补 fl。
-        if self.config.version_tag in ("v3", "v4") and vars["serve_start_cmd"]:
-            if "VLLM_PLUGINS=" not in vars["serve_start_cmd"]:
-                vars["serve_start_cmd"] = "VLLM_PLUGINS=fl " + vars["serve_start_cmd"]
+        # plugin 镜像固化 VLLM_PLUGINS=fl 前缀（统一走 _ensure_plugin_prefix，判据/幂等见该方法）
+        vars["serve_start_cmd"] = self._ensure_plugin_prefix(vars["serve_start_cmd"])
 
         # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
         if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
@@ -1094,14 +1234,14 @@ class PublishStage(BaseStage):
         vendor_display = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
         flagrelease_name = model_info.flagrelease_name or model_info.output_name or "model"
         canonical_model_path = model_info.canonical_model_path or f"/data/{flagrelease_name}"
-        new_model_intro = model_info.new_model_introduction or "新模型介绍，待定...."
+        new_model_intro = model_info.new_model_introduction or ""
         eval_table = self._generate_evaluation_table()
         docker_version = model_info.docker_version or "N/A"
         os_info = model_info.ubuntu_version or "Linux"
         image_harbor = model_info.image_harbor_path or self.config.publish.harbor_path or ""
         image_pull_cmd = f"docker pull {image_harbor}" if image_harbor else ""
         container_run_cmd = model_info.container_run_cmd or ""
-        serve_start_cmd = model_info.serve_start_cmd or ""
+        serve_start_cmd = self._ensure_plugin_prefix(model_info.serve_start_cmd or "")
         serve_infer_cmd = model_info.serve_infer_cmd or self._default_curl_cmd()
         source = model_info.source_of_model_weights or "xxx/xxxxxxxx"
 
@@ -1350,16 +1490,35 @@ if token:
     api.login(token)
 model_id = '{model_id}'
 print(f'检查 ModelScope 模型仓库: {{model_id}}')
+_private_ok = False
 try:
     api.get_model(model_id)
-    print('仓库已存在')
+    print('仓库已存在，强制设为私有...')
+    for fn in ('update_model_visibility', 'update_model'):
+        f = getattr(api, fn, None)
+        if f is None:
+            continue
+        try:
+            try:
+                f(model_id=model_id, visibility={visibility})
+            except TypeError:
+                f(model_id, {visibility})
+            print(f'  已通过 {{fn}} 设为私有')
+            _private_ok = True
+            break
+        except Exception as e:
+            print(f'  {{fn}} 失败: {{e}}')
 except Exception:
-    print('仓库不存在，创建中...')
+    print('仓库不存在，创建私有仓...')
     try:
         api.create_model(model_id=model_id, visibility={visibility})
         print('仓库创建成功 ({private_label})')
+        _private_ok = True
     except Exception as e:
-        print(f'创建仓库失败: {{e}}，继续尝试上传...')
+        print(f'创建仓库失败: {{e}}')
+if not _private_ok:
+    print('x 无法确保私有可见性，拒绝上传（不留公开口子）')
+    raise SystemExit(1)
 print('开始上传...')
 api.upload_folder(repo_id=model_id, folder_path='{container_upload_dir}')
 print(f'已发布到 ModelScope: {{model_id}}')
@@ -1427,6 +1586,75 @@ print(f'已发布到 ModelScope: {{model_id}}')
             print(f"  ⚠ 复制 README 到容器失败: {e}")
             return False
 
+    def _ensure_modelscope_private_repo(self, model_id: str, token: str, visibility: str = "private") -> bool:
+        """确保 ModelScope 仓库以【私有】存在。
+        upload 无可见性参数、自动建仓默认公开，故上传前必须保证私有仓已存在。
+        流程：CLI create --visibility private → 若失败（含已存在）用 SDK 建私有/翻私有兜底 → 校验私有。
+        返回 True 仅当能确认仓库存在且为私有。
+        """
+        token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
+        # 1) CLI 建私有仓
+        create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
+        print(f"  创建私有仓库: {model_id} ({visibility})")
+        result, _, _ = self.run_command(
+            cmd=create_cmd, step_name="创建 ModelScope 私有仓库",
+            timeout=60, in_container=True
+        )
+        # 2) 无论 create 成功或失败（可能已存在/公开），都用 SDK 强制建私有 + 翻私有兜底
+        sdk_script = f"""
+import os, sys
+from modelscope.hub.api import HubApi
+api = HubApi()
+token = os.environ.get('MODELSCOPE_API_TOKEN', '')
+if token:
+    api.login(token)
+model_id = '{model_id}'
+ok = False
+# 已存在则强制翻私有；不存在则建私有
+try:
+    api.get_model(model_id)
+    print('仓库已存在，强制设为私有...')
+    for fn in ('update_model_visibility', 'update_model'):
+        try:
+            f = getattr(api, fn, None)
+            if f is None:
+                continue
+            try:
+                f(model_id=model_id, visibility=1)
+            except TypeError:
+                f(model_id, 1)
+            print(f'  已通过 {{fn}} 设为私有')
+            ok = True
+            break
+        except Exception as e:
+            print(f'  {{fn}} 失败: {{e}}')
+    if not ok:
+        print('  ! 未能确认翻私有，视为失败')
+except Exception:
+    print('仓库不存在，创建私有仓...')
+    try:
+        api.create_model(model_id=model_id, visibility=1)
+        print('  私有仓创建成功')
+        ok = True
+    except Exception as e:
+        print(f'  创建私有仓失败: {{e}}')
+sys.exit(0 if ok else 1)
+"""
+        script_b64 = base64.b64encode(sdk_script.encode()).decode()
+        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        sdk_ok, _, _ = self.run_command(
+            cmd=cmd, step_name="确保 ModelScope 私有仓库（SDK 兜底）",
+            timeout=120, in_container=True
+        )
+        if sdk_ok:
+            print(f"  ✓ 已确保 ModelScope 私有仓库: {model_id}")
+            return True
+        # SDK 兜底失败：仅当 CLI create 明确成功（新建私有）时才放行
+        if result:
+            print(f"  ✓ CLI 已创建私有仓库，SDK 校验未通过但放行: {model_id}")
+            return True
+        return False
+
     def _publish_to_modelscope_cli(self, readme_path: Optional[str]) -> bool:
         """使用命令行发布到 ModelScope（容器内执行，避免宿主机 torch 崩溃）"""
         publish_config = self.config.publish
@@ -1452,16 +1680,13 @@ print(f'已发布到 ModelScope: {{model_id}}')
         print(f"  目标仓库: {model_id}")
         print(f"  容器内上传目录: {container_upload_dir}")
 
-        # 强制私有发布，不留公开口子
+        # 强制私有发布，不留公开口子。
+        # 关键：modelscope upload 无可见性参数，仓库不存在时会自动建【公开】仓。
+        # 因此上传前必须先确保【私有】仓库存在，否则宁可失败也不让 upload 裸建公开仓。
         visibility = "private"
-        create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
-        print(f"  创建/确认仓库: {model_id} ({visibility})")
-        result, stdout, stderr = self.run_command(
-            cmd=create_cmd, step_name="创建 ModelScope 仓库",
-            timeout=60, in_container=True
-        )
-        if not result:
-            print(f"    创建仓库失败（可能已存在），继续尝试上传...")
+        if not self._ensure_modelscope_private_repo(model_id, token, visibility):
+            print(f"  x 无法确保 ModelScope 私有仓库存在，中止上传（拒绝 upload 自动建公开仓）")
+            return False
 
         upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
 
@@ -1558,13 +1783,32 @@ if token:
 api = HfApi()
 repo_id = '{repo_id}'
 print(f'检查 HuggingFace 仓库: {{repo_id}}')
+_private_ok = False
 try:
     api.repo_info(repo_id=repo_id)
-    print('仓库已存在')
+    print('仓库已存在，强制设为私有...')
+    for fn in ('update_repo_settings', 'update_repo_visibility'):
+        f = getattr(api, fn, None)
+        if f is None:
+            continue
+        try:
+            f(repo_id=repo_id, private=True)
+            print(f'  已通过 {{fn}} 设为私有')
+            _private_ok = True
+            break
+        except Exception as e:
+            print(f'  {{fn}} 失败: {{e}}')
 except Exception:
-    print('仓库不存在，创建中...')
-    api.create_repo(repo_id=repo_id, private={private_flag}, exist_ok=True)
-    print('仓库创建成功')
+    print('仓库不存在，创建私有仓...')
+    try:
+        api.create_repo(repo_id=repo_id, private=True, exist_ok=True)
+        print('仓库创建成功（私有）')
+        _private_ok = True
+    except Exception as e:
+        print(f'创建仓库失败: {{e}}')
+if not _private_ok:
+    print('x 无法确保私有可见性，拒绝上传（不留公开口子）')
+    raise SystemExit(1)
 print('开始上传...')
 api.upload_folder(repo_id=repo_id, folder_path='{container_upload_dir}')
 print(f'已发布到 HuggingFace: {{repo_id}}')
@@ -1582,6 +1826,56 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
 
         print(f"  x SDK 发布到 HuggingFace 失败")
         return False
+
+    def _ensure_hf_private_repo(self, repo_id: str, token: str, hf_endpoint: str) -> bool:
+        """确保 HuggingFace 仓库以【私有】存在（SDK 执行，容器内）。
+        hf upload --private 不可靠（仅建仓生效、对已存在仓库无效），故上传前独立确保私有。
+        已存在则强制翻私有；不存在则 create_repo(private=True)。返回 True 仅当私有确认成功。
+        """
+        sdk_script = f"""
+import os, sys
+os.environ['HF_ENDPOINT'] = '{hf_endpoint}'
+from huggingface_hub import HfApi, login
+token = os.environ.get('HF_TOKEN', '')
+if token:
+    login(token=token)
+api = HfApi()
+repo_id = '{repo_id}'
+_private_ok = False
+try:
+    api.repo_info(repo_id=repo_id)
+    print('仓库已存在，强制设为私有...')
+    for fn in ('update_repo_settings', 'update_repo_visibility'):
+        f = getattr(api, fn, None)
+        if f is None:
+            continue
+        try:
+            f(repo_id=repo_id, private=True)
+            print(f'  已通过 {{fn}} 设为私有')
+            _private_ok = True
+            break
+        except Exception as e:
+            print(f'  {{fn}} 失败: {{e}}')
+except Exception:
+    print('仓库不存在，创建私有仓...')
+    try:
+        api.create_repo(repo_id=repo_id, private=True, exist_ok=True)
+        print('  私有仓创建成功')
+        _private_ok = True
+    except Exception as e:
+        print(f'  创建私有仓失败: {{e}}')
+sys.exit(0 if _private_ok else 1)
+"""
+        token_env = f"HF_TOKEN={token} " if token else ""
+        script_b64 = base64.b64encode(sdk_script.encode()).decode()
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        ok, _, _ = self.run_command(
+            cmd=cmd, step_name="确保 HuggingFace 私有仓库",
+            timeout=120, in_container=True
+        )
+        if ok:
+            print(f"  ✓ 已确保 HuggingFace 私有仓库: {repo_id}")
+        return ok
 
     def _publish_to_huggingface_cli(self, readme_path: Optional[str]) -> bool:
         """使用命令行发布到 HuggingFace（容器内执行）"""
@@ -1619,7 +1913,13 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not success:
                 return False
 
-        # 强制私有发布，不留公开口子
+        # 强制私有发布，不留公开口子。
+        # 关键：hf upload 的 --private 仅在自动建仓时生效，对已存在仓库无效，且不可靠。
+        # 因此上传前必须先用 SDK 独立确保【私有】仓库存在，否则宁可失败也不上传。
+        if not self._ensure_hf_private_repo(repo_id, token, hf_endpoint):
+            print(f"  x 无法确保 HuggingFace 私有仓库存在，中止上传（不留公开口子）")
+            return False
+
         private_flag = "--private "
         upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
 

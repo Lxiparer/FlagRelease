@@ -110,7 +110,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
 | **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
 
-- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.2 合成基线（全芯片统一标准；吞吐×1.2、延迟÷1.2），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` 标记），下游对比/调优/报告照常消费。80% 判据下等价于要求调优后性能 ≥ V2 初始的 0.96 倍
+- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.05 合成基线（全芯片统一标准；吞吐×1.05、延迟÷1.05），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` + `target_ratio_override=1.0` 标记），下游对比/调优/报告照常消费。合成基线场景达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
@@ -179,7 +179,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |
-| V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.2 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`） | 报告注明合成基线 |
+| V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.05 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`，达标线=V2初始×1.05） | 报告按 native 基线展示 |
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
 | pip 国内镜像 | `-i https://mirrors.aliyun.com/pypi/simple/` | pip 失败时自动加镜像重试 |
 | 服务端口 | 默认 8000，被占用则自动递增（+1 到 +10） | 不询问端口号 |
@@ -394,7 +394,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 21. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置
 22. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 23. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
-24. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
+24. **步骤7性能算子调优最多 2 轮**（`operator_search.py run --max-rounds 2`），elimination 策略，每轮 benchmark 使用 quick 模式，达标即停；2 轮内未达标**不阻塞流程**，标 `performance_ok=false` 尊重实测结果继续下一步（性能不达标不是终止理由，见约束18）。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
 25. **每次服务启动前必须清理 Triton/FlagGems 编译缓存**。`start_service.sh` 已内置此逻辑。手动启动时也必须执行 `rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保每次启动在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
 
 ### 算子控制约束

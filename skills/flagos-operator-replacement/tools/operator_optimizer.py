@@ -515,6 +515,21 @@ def init_optimization(ops_file: str, native_throughput: float,
         init_enabled = sorted(all_ops)
         init_disabled = []
 
+    # 合成基线（无 V1 场景）覆盖达标比率：synthesize_perf_baseline.py 在 _meta 写入
+    # target_ratio_override（=1.0），使达标线 = 合成基线 ×1.0 = V2 首测 ×1.05。
+    # 实测 V1 基线无此字段 → 保持 CLI 传入的 target_ratio（0.8），零影响。
+    effective_target_ratio = target_ratio
+    if native_benchmark:
+        try:
+            with open(native_benchmark, "r", encoding="utf-8") as _f:
+                _meta = (json.load(_f) or {}).get("_meta", {}) or {}
+            _override = _meta.get("target_ratio_override")
+            if isinstance(_override, (int, float)) and not isinstance(_override, bool) and _override > 0:
+                effective_target_ratio = float(_override)
+                print(f"检测到合成基线 target_ratio_override={_override} → 达标比率覆盖为 {effective_target_ratio}")
+        except Exception as _e:
+            print(f"读取 native benchmark _meta 失败（{_e}），沿用默认 target_ratio={target_ratio}")
+
     state = {
         "all_ops": all_ops,
         "registered_ops": registered_ops,
@@ -523,7 +538,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         "disabled_ops": init_disabled,
         "native_throughput": native_throughput,
         "native_throughputs": _extract_native_throughputs(native_benchmark) if native_benchmark else {},
-        "target_ratio": target_ratio,
+        "target_ratio": effective_target_ratio,
         "current_ratio": 0.0,
         "search_log": [],
         "status": "in_progress",
@@ -569,7 +584,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         for gname, gops in groups.items():
             print(f"  {gname}: {len(gops)} 个算子 ({', '.join(gops[:5])}{'...' if len(gops) > 5 else ''})")
     print(f"原生吞吐量: {native_throughput:.2f} tok/s")
-    print(f"目标吞吐量: {native_throughput * target_ratio:.2f} tok/s")
+    print(f"目标吞吐量: {native_throughput * effective_target_ratio:.2f} tok/s")
 
     return state
 

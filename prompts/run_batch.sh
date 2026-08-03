@@ -98,6 +98,92 @@ sys.exit(0 if ctx.get('workflow',{}).get('all_done') is True else 1)
 }
 
 # ========== 分支/版本信息提取（用于汇总列，读 context_snapshot.yaml）===
+task_branch_versions() {
+    local model="$1"
+    local ctx="/data/flagos-workspace/${model}/config/context_snapshot.yaml"
+    [ -f "$ctx" ] || { echo "-|-"; return; }
+    python3 -c "
+import yaml, sys
+try:
+    with open(sys.argv[1]) as f:
+        ctx = yaml.safe_load(f) or {}
+except Exception:
+    print('-|-'); sys.exit(0)
+wf = ctx.get('workflow', {}) or {}
+branch = wf.get('pipeline_branch') or '-'
+# 不适配任务优先标注
+if wf.get('incompatible'):
+    print(f'{branch}|不适配'); sys.exit(0)
+versions = ctx.get('versions', {}) or {}
+baseline = ctx.get('baseline', {}) or {}
+built = []
+for v in ('v1','v2','v3','v4','v5'):
+    node = versions.get(v, {}) or {}
+    if node.get('built'):
+        label = v.upper()
+        # V1 附带变体，V3 附带 =V2 标记
+        if v == 'v1':
+            variant = baseline.get('v1_variant') or ''
+            if variant and variant not in ('native',):
+                label += f'({variant})'
+        if v == 'v3' and (node.get('equals_v2') or node.get('branch') == 'v3.2'):
+            label += '(=V2)'
+        built.append(label)
+print(f'{branch}|{\",\".join(built) if built else \"-\"}')
+" "$ctx" 2>/dev/null || echo "-|-"
+}
+
+# ========== 报告汇聚（复制每个模型的报告到本批次统一目录）===
+# 目录位于项目下 batch_reports_<批次时间戳>/，文件名沿用「厂商_模型名_时间戳」。
+# 成功/失败/超时/跳过均尝试汇聚已有报告；缺失则记录一条提示，不阻塞批次。
+aggregate_model_report() {
+    local model="$1"
+    local results_dir="/data/flagos-workspace/${model}/results"
+    local src_md="${results_dir}/report.md"
+    local src_json="${results_dir}/report.json"
+    if [ ! -f "$src_md" ] && [ ! -f "$src_json" ]; then
+        echo "  ⚠ 报告缺失，跳过汇聚: ${model}（未找到 report.md/report.json）"
+        return 0
+    fi
+    mkdir -p "${BATCH_REPORTS_DIR}" 2>/dev/null || true
+    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）
+    local base
+    base=$(python3 -c "
+import yaml, sys, re
+from datetime import datetime
+ctx_path = sys.argv[1]
+model = sys.argv[2]
+vendor = 'unknown'; name = model.rsplit('/',1)[-1]; ts = ''
+try:
+    with open(ctx_path) as f:
+        ctx = yaml.safe_load(f) or {}
+    vendor = (ctx.get('gpu',{}) or {}).get('vendor','') or 'unknown'
+    name = ((ctx.get('model',{}) or {}).get('name','') or model).rsplit('/',1)[-1]
+    versions = ctx.get('versions',{}) or {}; release = ctx.get('release',{}) or {}
+    for vk in ('v4','v3','v2','v1'):
+        vc = versions.get(vk,{}) or {}
+        img = release.get(f'{vk}_harbor_image','') or vc.get('image_url','') or vc.get('harbor_image','') or vc.get('image','')
+        m = re.search(r':(\d{12})', img or '')
+        if m: ts = m.group(1); break
+except Exception:
+    pass
+if not ts:
+    ts = datetime.now().strftime('%Y%m%d%H%M')
+raw = f'{vendor}_{name}_{ts}'
+print(re.sub(r'[^\w.\-]', '_', raw))
+" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" 2>/dev/null)
+    [ -z "$base" ] && base=$(echo "${model}" | sed 's#/#_#g')
+    local copied=0
+    if [ -f "$src_md" ]; then
+        cp -f "$src_md" "${BATCH_REPORTS_DIR}/${base}.md" 2>/dev/null && copied=1
+    fi
+    if [ -f "$src_json" ]; then
+        cp -f "$src_json" "${BATCH_REPORTS_DIR}/${base}.json" 2>/dev/null && copied=1
+    fi
+    [ "$copied" = "1" ] && echo "  ✓ 报告已汇聚: ${BATCH_REPORTS_DIR}/${base}.md"
+    return 0
+}
+
 # ========== 预扫描任务数 ==========
 TOTAL=0
 while IFS='|' read -r T M || [ -n "$T" ]; do
@@ -115,6 +201,8 @@ fi
 BATCH_START_TS=$(date +%s)
 BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BATCH_LOG="/data/flagos-workspace/batch_${BATCH_TIMESTAMP}.log"
+# 报告汇聚目录：放在项目目录下（当前执行任务目录，便于统一管理），非 workspace
+BATCH_REPORTS_DIR="${PROJECT_ROOT}/batch_reports_${BATCH_TIMESTAMP}"
 SUMMARY_FILE=""
 REPORT_FILE=""
 IDX=0; PASS=0; FAIL=0; SKIP=0
@@ -200,6 +288,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         echo "[${IDX}/${TOTAL}] ${MODEL} — 已完成，跳过"
         ((SKIP++))
         RESULTS+=("⊘ | ${MODEL} | ${TARGET} | ${BV%%|*} | ${BV#*|} | - | skipped")
+        aggregate_model_report "$MODEL"
         progress_emit_detached skip-model \
             --batch-id "${BATCH_TIMESTAMP}" \
             --workspace /data/flagos-workspace \
@@ -240,6 +329,9 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     # 提取分支/版本信息（context_snapshot.yaml 由 run_pipeline.sh 兜底同步写入）
     BV=$(task_branch_versions "$MODEL")
     BRANCH="${BV%%|*}"; VERS="${BV#*|}"
+
+    # 汇聚本模型报告到批次统一目录（成功/失败/超时均尝试，缺失则提示不阻塞）
+    aggregate_model_report "$MODEL"
 
     if [ $EXIT_CODE -eq 124 ]; then
         ((FAIL++))
@@ -334,5 +426,13 @@ SUMMARY_FILE="/data/flagos-workspace/batch_summary_${BATCH_TIMESTAMP}.txt"
     echo "---- | ------------------------------ | -------------------------------------------------- | ------ | ---------------------------- | ---------- | ------"
     for r in "${RESULTS[@]}"; do echo "$r"; done
 } > "$SUMMARY_FILE" 2>/dev/null && echo "汇总文件: ${SUMMARY_FILE}" || true
+
+# 报告汇聚目录提示
+if [ -d "${BATCH_REPORTS_DIR}" ]; then
+    RPT_COUNT=$(find "${BATCH_REPORTS_DIR}" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
+    echo "报告汇聚目录: ${BATCH_REPORTS_DIR}/ （${RPT_COUNT} 份报告）"
+else
+    echo "报告汇聚目录: 未生成（本批次无可汇聚的报告）"
+fi
 
 # ========== 批量执行退出码 ===

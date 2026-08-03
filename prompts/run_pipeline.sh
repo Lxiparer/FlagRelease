@@ -1127,7 +1127,7 @@ if [ "${SKIP_SEG2}" = "false" ]; then
 # 双 pipeline 分支指令：据段1路由结果注入，指引下游会话按对应 pipeline 定义执行
 case "${PIPELINE_BRANCH}" in
     A)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底；性能基线在 V1 完全不可用时按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.2，synthesize_perf_baseline.py）兜底。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底；性能基线在 V1 完全不可用时按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.05，synthesize_perf_baseline.py）兜底。"
         ;;
     B)
         BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按新流程 v3.1 工作流执行（共4版本）：V1(步骤1-3,三选baseline_selector.py确定v1.1/v1.2/v1.3/none+V1精度观察+性能基线) → V2(步骤4-5, 2.1代码注入精度+性能调优 或 2.2仅精度;精度达标发harbor+MS/HF) → V3(步骤6-7, 3.1清注入或3.2免清+plugin全量+仅精度;达标发flagrelease-project交付) → V4(步骤8-9,随机选1~3算子只开+≤2轮;达标发harbor+更新README)。精度基线统一用 NV（nv_baseline.yaml），性能基线 V1 实测或 V2.2 路径下 V2 首测×1.05。"
@@ -1179,9 +1179,9 @@ ${SEG2_CTX_SUMMARY}
 - 执行（此时算子集为步骤3幸存的初始状态，尚未被步骤5削减，正是合成基线要求的\"使能 flaggems 后首次可正常启动\"口径）：
   1. 以 flagos 模式启动 V2 服务（当前算子集，不做任何调优改动）
   2. quick 模式测一轮：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance
-  3. 合成基线：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json（全芯片统一 ×1.2：吞吐×1.2、延迟÷1.2；脚本拒绝覆盖已存在的实测 V1 基线）
-  4. 更新 context：update_context.py --set 'baseline.perf_baseline_source=v2_initial_x1.2'，并停止服务释放 GPU，再进入步骤4
-- 合成基线落盘为 native_performance.json 标准格式（_meta.synthetic=true 标记），步骤6/7 及 operator_optimizer init 照常把它当 V1 基线消费，**无需任何特殊处理**；步骤6 **跳过 V1 性能测试**（无 V1 可测），只测 V2 与合成基线对比
+  3. 合成基线：PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json（全芯片统一 ×1.05：吞吐×1.05、延迟÷1.05；脚本拒绝覆盖已存在的实测 V1 基线）
+  4. 更新 context：update_context.py --set 'baseline.perf_baseline_source=v2_initial_x1.05'，并停止服务释放 GPU，再进入步骤4
+- 合成基线落盘为 native_performance.json 标准格式（_meta.synthetic=true + target_ratio_override=1.0 标记），步骤6/7 及 operator_optimizer init 照常把它当 V1 基线消费——**达标线 = 基线×1.0 = V2 首测×1.05**（脚本 _meta 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）；步骤6 **跳过 V1 性能测试**（无 V1 可测），只测 V2 与合成基线对比
 - V1 可用时**严禁**执行本节任何操作
 
 **算子调优**：
@@ -1204,7 +1204,7 @@ ${SEG2_CTX_SUMMARY}
     --state-path /flagos-workspace/results/operator_config.json \\
     --perf-config /flagos-workspace/scripts/config/perf_config.yaml \\
     --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
-    --max-rounds 20\"
+    --max-rounds 2\"
 - operator_search.py 已封装 next→配置→重启→benchmark→update 全流程，含 GPU 显存释放验证和可用性前置检查
 - 步骤5精度算子调优：通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮按实际控制方式应用（/etc/environment 有 VLLM_FL_PREFER_ENABLED=true → env_inline 内联重启；否则写控制文件经 start_service.sh）+ 重启服务 + fast_gpqa.py 评测；轮次上限=分组数（绝对上限 8）
 
@@ -1714,7 +1714,7 @@ if [ "${IS_NATIVE:-false}" != "true" ]; then
                     --state-path /flagos-workspace/results/operator_config.json \
                     --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
                     --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
-                    --max-rounds 20" 2>&1 | tee -a "${LOG_FILE}" || true
+                    --max-rounds 2" 2>&1 | tee -a "${LOG_FILE}" || true
                 # 同步搜索产出回宿主机
                 if [ -f "${SHARED_CTX}" ]; then
                     cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
@@ -2225,6 +2225,15 @@ ${SEG4_CTX_SUMMARY}
 - **算子控制必须用 env（VLLM_FL_FLAGOS_BLACKLIST），禁止写控制文件**：plugin 下 VLLM_FL_PREFER_ENABLED=true 使注入代码 pass，/root/flaggems_ops_control.json 无效。用 apply_op_config.py --mode custom --flagos-blacklist '禁用算子逗号分隔' 生成 env_inline 作启动前缀。
 
 **进度输出**：步骤开始/完成时输出 [步骤N] 标记，关键命令后输出 ✓/✗ 结果摘要。
+
+**执行等待策略（硬性）**：
+本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部必须**前台阻塞执行**：
+- **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
+- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志或 ps/docker exec 检查进程状态。脚本内部已自带日志监控/进度/失败检测，无需外部干预；命令前台阻塞返回退出码后才继续。
+- **精度评测**：必须通过 eval_wrapper.py 前台执行（会阻塞直到评测完成或异常退出，无需轮询）。使用 Bash(timeout=7260000) 前台执行，不要用后台任务（Bash timeout 单位毫秒，7260000ms = 121 分钟，覆盖脚本 --max-timeout 7200s/2h + 60s 余量）。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。
+- **服务等待**：wait_for_service.sh 使用 Bash(timeout=5820000) 前台执行（5820000ms = 97 分钟，覆盖脚本上限 5760s/1.6h + 60s 余量），禁止 TaskOutput 轮询。
+- **性能/调优**：benchmark_runner.py 与 operator_search.py --plugin-mode 使用 Bash(timeout=7260000) 前台执行，脚本自带完整循环，禁止手动轮询其进度。
+- **注意**：Bash 工具的 timeout 参数单位是毫秒。设置过小会导致命令被转为后台任务，进而诱发 TaskOutput 轮询空转、反复全量重发上下文、烧掉大量 token。宁可 timeout 设大也不要设小。
 
 - Issue 模板：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\

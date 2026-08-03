@@ -137,12 +137,19 @@ def main():
         print("no_data")
         return
 
+    # 合成基线（无 V1）在 _meta 写 target_ratio_override（=1.0）→ 达标线 = 基线×1.0 = V2首测×1.05。
+    # 实测 V1 基线无此字段 → 沿用 --target 默认 0.8。
+    target = args.target
+    _override = ((baseline or {}).get("_meta", {}) or {}).get("target_ratio_override")
+    if isinstance(_override, (int, float)) and not isinstance(_override, bool) and _override > 0:
+        target = float(_override)
+
     ratio = compute_min_ratio(flagos, baseline)
     if ratio is None:
         print("no_data")
         return
 
-    if ratio >= args.target:
+    if ratio >= target:
         print("ok")
         return
 

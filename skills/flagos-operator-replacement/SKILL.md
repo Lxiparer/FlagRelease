@@ -718,7 +718,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --max-rounds 3
 ```
 
-**非 Plugin 场景**：
+**非 Plugin 场景**（步骤7 V2 性能调优，最多 2 轮，达标即停；2 轮未达标不阻塞流程）：
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --state-path /flagos-workspace/results/operator_config.json \
@@ -726,7 +726,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --capabilities "yaml_config,only_enable" \
   --gems-txt-path ${GEMS_TXT_PATH} \
-  --max-rounds 3
+  --max-rounds 2
 ```
 
 搜索阶段每轮 benchmark **始终使用 quick**（只跑 `4k_input_1k_output` + max，`num_prompts=concurrency`），无需配置。quick 足以判断单算子对性能的影响。
