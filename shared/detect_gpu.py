@@ -425,6 +425,10 @@ def main():
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
     parser.add_argument("--check-free", action="store_true", help="检测 per-GPU 显存占用")
     parser.add_argument("--vendor", help="指定厂商（跳过自动探测）")
+    # 结果本就以 JSON 打到 stdout；--json/--output-json 为无操作兼容项，
+    # 容忍编排层手拼命令时误加，避免 argparse 退出码2 导致 GPU 检测静默失败
+    parser.add_argument("--json", "--output-json", dest="json_compat",
+                        action="store_true", help="兼容项（默认即输出 JSON，无额外效果）")
     args = parser.parse_args()
 
     if args.check_free:
