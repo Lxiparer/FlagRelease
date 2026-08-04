@@ -638,6 +638,19 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
+# ===== 段末确定性兜底：主动生成/刷新报告（不依赖 Claude 是否记得执行） =====
+# 方案A：每段 claude 调用完成后，脚本主动补跑一次 generate_report。
+# 即便 Claude 在段内漏做（上下文压缩遗忘/中途中断/API 抖动），段末也一定刷新一次报告。
+# 全部 || true 兜底，失败不阻断主流程；无 context 时 generate_report 自身安全退出、不覆盖旧报告。
+regenerate_report() {
+    local ctr="$1"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+    docker exec "${ctr}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md" >/dev/null 2>&1 || true
+    docker exec "${ctr}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --json --output /flagos-workspace/results/report.json" >/dev/null 2>&1 || true
+    echo "  ✓ 报告已刷新（段末兜底）"
+}
+
 # ===== 平台上传（脚本退出时自动执行） =====
 upload_to_platform_on_exit() {
     [ -z "${MODEL:-}" ] && return 0
@@ -727,6 +740,13 @@ pipeline_on_exit() {
     local elapsed_seconds=0
     local ended_at=0
     local outcome="failed"
+
+    # 退出前最后一次刷新报告：所有退出路径（正常结束/exit 1/超时被 SIGTERM 杀/异常）
+    # 都必经 EXIT trap，这里是"保证产出报告"的唯一兜底点——即便 Claude 全程没生成过、
+    # 或某段跑超时被 run_batch.sh 的 timeout --signal=TERM 杀掉，也能在拷回宿主机前补一份。
+    # 必须在 upload_to_platform_on_exit（其内部 docker cp results/ 回宿主机）之前执行。
+    # 容器解析与 upload_to_platform_on_exit 保持一致；全程 || true，不影响退出码。
+    regenerate_report "${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}" || true
 
     # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
     upload_to_platform_on_exit || true
@@ -911,6 +931,9 @@ echo "  容器名: ${SEG_CTR}"
 echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
+
+# 段1末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
 
 # ===== 段1越界检测：如果段1【本次会话】执行了步骤4+的操作，回滚 context 中的越界状态 =====
 # 关键：按 finished_at 时间戳区分——只有 finished_at 晚于本次段1会话起始(seg1_start_ts)
@@ -1325,6 +1348,9 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || {
 }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
+
+# 段2末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
 
 # ===== 分支 B V1 三选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
 # 动机：baseline_selector.py 全程无 shell 强制调用点，Claude 可能自起服务测一下就把
@@ -1837,6 +1863,9 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 - 宿主机路径: {ws.get('host_path','')}''')
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
+# 段2 全部补跑（retry/step7 闸门）结束后，用最新 context 再刷新一次报告
+regenerate_report "${SEG_CTR}"
+
 # ===== 段3: 5 (V2 发布) =====
 # V1=v1.3 场景（分支 B 2.2/3.2）：V2 经 plugin 方式使能，V2 镜像=V3 镜像，
 # 段3 一次 commit 双 tag 发布(--also-tag v3)，段4 整段跳过（不重复 plugin 验证）
@@ -2017,6 +2046,9 @@ fi
 CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || { echo "错误：段3未更新 context_snapshot.yaml 或解析失败，终止"; exit 1; }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
+
+# 段3末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
 
 # 读取 qualified 状态（含兜底计算：如果 qualified 字段未设置但三个条件都满足，自动判定为 True）
 # 注意（用户 2026-07 定稿）：QUALIFIED（含 performance_ok）已**不再门控**任何段，仅作发布标签/日志参考。
@@ -2570,6 +2602,9 @@ if [ -f "${SHARED_CTX}" ]; then
 elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
     docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
 fi
+
+# 段4末确定性兜底刷新报告
+regenerate_report "${SEG_CTR}"
 
 else
     if [ "${QUALIFIED_CORE_V3}" != "True" ]; then
