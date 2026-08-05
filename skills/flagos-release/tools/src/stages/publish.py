@@ -175,8 +175,17 @@ class PublishStage(BaseStage):
                 success = self._update_repo_readme(
                     publish_config.base_modelscope_model_id, "modelscope", readme_path)
                 if not success:
-                    ms_failed = True
-                    print("  ⚠ 更新 ModelScope README 失败，继续执行 HuggingFace")
+                    # 情形(a) 失败：可能是存量 context 的幽灵 URL(V2 不达标时记录了
+                    # 未建仓库的 URL)导致 base 字段误判"已有仓库"。允许发布时降级
+                    # full-publish(ensure 私有仓库幂等，存在则复用、不存在则创建)，
+                    # 而不是直接放弃。
+                    if publish_config.publish_modelscope:
+                        print("  ⚠ 更新 README 失败(仓库可能不存在)，降级 full-publish 补发")
+                        success = self._with_proxy_fallback(
+                            "ModelScope", self._publish_to_modelscope, readme_path)
+                    if not success:
+                        ms_failed = True
+                        print("  ⚠ 更新 ModelScope README 失败，继续执行 HuggingFace")
             elif publish_config.publish_modelscope:
                 # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
                 print("  ℹ 步骤8未建 ModelScope 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
@@ -204,8 +213,14 @@ class PublishStage(BaseStage):
                 success = self._update_repo_readme(
                     publish_config.base_huggingface_repo_id, "huggingface", readme_path)
                 if not success:
-                    hf_failed = True
-                    print("  ⚠ 更新 HuggingFace README 失败")
+                    # 同 ModelScope：存量幽灵 URL 时降级 full-publish(ensure 私有仓库幂等)
+                    if publish_config.publish_huggingface:
+                        print("  ⚠ 更新 HuggingFace README 失败(仓库可能不存在)，降级 full-publish 补发")
+                        success = self._with_proxy_fallback(
+                            "HuggingFace", self._publish_to_huggingface, readme_path)
+                    if not success:
+                        hf_failed = True
+                        print("  ⚠ 更新 HuggingFace README 失败")
             elif publish_config.publish_huggingface:
                 # 情形(b)：V2 未建仓但 V3 达标 → full-publish 补发
                 print("  ℹ 步骤8未建 HuggingFace 仓库(V2 精度不达标)，V3 达标 → full-publish 补发对外仓库")
@@ -244,12 +259,19 @@ class PublishStage(BaseStage):
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name or ""
         ms_model_id = publish_config.modelscope_model_id or (f"FlagRelease/{model_name}" if model_name else "")
         hf_repo_id = publish_config.huggingface_repo_id or (f"FlagRelease/{model_name}" if model_name else "")
+        # 只有实际执行发布且成功(publish_*_publish=True 且未失败)才记录对外 URL。
+        # 步骤8 V2 精度不达标时 publish_modelscope=False → 不写 URL(仓库未创建)，
+        # 否则 config.py:578 无条件填充的 ms_model_id 会产出"幽灵 URL"写进 context，
+        # 步骤13 会误判"已有仓库"走更新 README(对不存在仓库 upload 必失败)，
+        # 而非 full-publish 补发(创建仓库+权重+README)。
+        ms_published = publish_config.publish_modelscope and not ms_failed
+        hf_published = publish_config.publish_huggingface and not hf_failed
         release_summary = {
             "harbor_image": publish_config.harbor_path or "",
-            "modelscope_model_id": ms_model_id if not ms_failed else "",
-            "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and not ms_failed else "",
-            "huggingface_repo_id": hf_repo_id if not hf_failed else "",
-            "huggingface_url": f"https://huggingface.co/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
+            "modelscope_model_id": ms_model_id if ms_published else "",
+            "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and ms_published else "",
+            "huggingface_repo_id": hf_repo_id if hf_published else "",
+            "huggingface_url": f"https://huggingface.co/{hf_repo_id}" if hf_repo_id and hf_published else "",
         }
         print(f"\n[RELEASE_SUMMARY]{json.dumps(release_summary, ensure_ascii=False)}[/RELEASE_SUMMARY]")
 

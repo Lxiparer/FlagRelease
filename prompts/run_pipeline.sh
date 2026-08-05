@@ -2880,10 +2880,11 @@ if summary:
     with open('${CONTEXT_SNAP}') as f:
         ctx = yaml.safe_load(f) or {}
     release = ctx.setdefault('release', {})
-    if summary.get('modelscope_url'):
-        release['modelscope_url'] = summary['modelscope_url']
-    if summary.get('huggingface_url'):
-        release['huggingface_url'] = summary['huggingface_url']
+    # 无条件覆盖(允许清空)：修复前 V2 精度不达标时可能写入"未建仓库的幽灵 URL"，
+    # 若仅非空才写，存量幽灵 URL 无法清除，步骤13 仍会误判"已有仓库"走更新 README
+    # 而非 full-publish 补发。summary 解析失败时 summary=None 不会进本分支，安全。
+    release['modelscope_url'] = summary.get('modelscope_url', '')
+    release['huggingface_url'] = summary.get('huggingface_url', '')
     with open('${CONTEXT_SNAP}', 'w') as f:
         yaml.dump(ctx, f, default_flow_style=False, allow_unicode=True)
     print('  ✓ context release 字段已更新')
