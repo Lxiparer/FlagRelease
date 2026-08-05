@@ -690,6 +690,40 @@ upload_to_platform_on_exit() {
         2>&1 && echo "  ✓ 数据已上传到 FlagRelease 平台" || echo "  ⚠ 数据上传失败（不影响流程结果）"
 }
 
+# ===== evalscope 评测明细归档（脚本退出时自动执行） =====
+# 将容器内 evalscope 生成的 predictions/reviews 汇聚到宿主机的跨模型固定目录，
+# 按模型名分子目录。容器是"每模型一份独立挂载"，看不到别的模型的地盘，
+# 因此集中汇聚只能在宿主机编排层用 docker cp 完成（容器内脚本做不到）。
+# 固定目录：/data/flagos-workspace/_eval_details/<model>/
+#   （_ 前缀与各模型工作目录并列但不冲突；模型名不会取 _eval_details）
+archive_eval_details_on_exit() {
+    [ -z "${MODEL:-}" ] && return 0
+
+    # 容器解析与 upload_to_platform_on_exit 保持一致
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+
+    # 评测 CWD 为 /flagos-workspace/scripts，evalscope 输出落在 scripts/outputs/gpqa_diamond/
+    local src="/flagos-workspace/scripts/outputs/gpqa_diamond"
+    docker exec "${ctr}" test -d "${src}" 2>/dev/null || return 0
+
+    local dest="/data/flagos-workspace/_eval_details/${MODEL}"
+    mkdir -p "${dest}"
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 归档评测明细 (predictions/reviews) → ${dest}/"
+    # 整目录汇聚：含各轮 (V1/V2/V3) 的 predictions/reviews/reports/configs，按 timestamp 天然分隔
+    if docker cp "${ctr}:${src}/." "${dest}/" 2>/dev/null; then
+        local n_pred n_rev
+        n_pred=$(find "${dest}" -type d -name predictions 2>/dev/null | wc -l)
+        n_rev=$(find "${dest}" -type d -name reviews 2>/dev/null | wc -l)
+        echo "  ✓ 已归档 (predictions 目录 ${n_pred} 份, reviews 目录 ${n_rev} 份)"
+    else
+        echo "  ⚠ 评测明细归档失败（不影响流程结果）"
+    fi
+}
+
 # ===== GPU 服务清理（脚本退出时自动执行） =====
 cleanup_gpu_services() {
     local ctr=""
@@ -750,6 +784,8 @@ pipeline_on_exit() {
 
     # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
     upload_to_platform_on_exit || true
+    # 评测明细归档必须在 cleanup_gpu_services（可能停容器）之前，趁容器还活着 docker cp。
+    archive_eval_details_on_exit || true
     cleanup_gpu_services || true
 
     # 批量模式由 run_batch.sh 投递模型事件，避免重复通知。
