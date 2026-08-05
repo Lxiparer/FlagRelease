@@ -1233,3 +1233,127 @@ models:
       gpqa_diamond: 73
     source: "NV 实测"
     updated_at: "2026-07-17"
+
+  # ---- 批次补充 2026-08-05（NV 实测，源数据为 0-1 小数，已 ×100 转百分比）----
+
+  Tongyi-DeepResearch-30B-A3B:
+    aliases:
+      - Alibaba-NLP/Tongyi-DeepResearch-30B-A3B
+      - tongyi-deepresearch-30b-a3b
+      - tongyi_deepresearch_30b_a3b
+    metrics:
+      gpqa_diamond: 57
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  GLM-4.7-Flash:
+    aliases:
+      - zai-org/GLM-4.7-Flash
+      - glm-4.7-flash
+      - glm_4_7_flash
+    metrics:
+      gpqa_diamond: 55
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  TinyR1-32B-Preview:
+    aliases:
+      - qihoo360/TinyR1-32B-Preview
+      - tinyr1-32b-preview
+      - tinyr1_32b_preview
+    metrics:
+      gpqa_diamond: 64
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  DeepSeek-R1-Distill-Qwen-32B-Japanese:
+    aliases:
+      - cyberagent/DeepSeek-R1-Distill-Qwen-32B-Japanese
+      - deepseek-r1-distill-qwen-32b-japanese
+      - deepseek_r1_distill_qwen_32b_japanese
+    metrics:
+      gpqa_diamond: 62
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  gpt-oss-20b:
+    aliases:
+      - openai/gpt-oss-20b
+      - gpt-oss-20b
+      - gpt_oss_20b
+    metrics:
+      gpqa_diamond: 63
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  GLM-4-32B-0414:
+    aliases:
+      - zai-org/GLM-4-32B-0414
+      - glm-4-32b-0414
+      - glm_4_32b_0414
+    metrics:
+      gpqa_diamond: 55
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Seed-OSS-36B-Instruct:
+    aliases:
+      - ByteDance-Seed/Seed-OSS-36B-Instruct
+      - seed-oss-36b-instruct
+      - seed_oss_36b_instruct
+    metrics:
+      gpqa_diamond: 79
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3_3-Nemotron-Super-49B-v1_5:
+    aliases:
+      - nvidia/Llama-3_3-Nemotron-Super-49B-v1_5
+      - llama-3_3-nemotron-super-49b-v1_5
+      - llama-3.3-nemotron-super-49b-v1.5
+      - llama_3_3_nemotron_super_49b_v1_5
+    metrics:
+      gpqa_diamond: 68
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3_3-Nemotron-Super-49B-v1:
+    aliases:
+      - nvidia/Llama-3_3-Nemotron-Super-49B-v1
+      - llama-3_3-nemotron-super-49b-v1
+      - llama-3.3-nemotron-super-49b-v1
+      - llama_3_3_nemotron_super_49b_v1
+    metrics:
+      gpqa_diamond: 51
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3.3-70B-Instruct:
+    aliases:
+      - meta-llama/Llama-3.3-70B-Instruct
+      - llama-3.3-70b-instruct
+      - llama_3_3_70b_instruct
+    metrics:
+      gpqa_diamond: 53
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Llama-3.1-Nemotron-70B-Instruct-HF:
+    aliases:
+      - nvidia/Llama-3.1-Nemotron-70B-Instruct-HF
+      - llama-3.1-nemotron-70b-instruct-hf
+      - llama_3_1_nemotron_70b_instruct_hf
+    metrics:
+      gpqa_diamond: 52
+    source: "NV 实测"
+    updated_at: "2026-08-05"
+
+  Hunyuan-A13B-Instruct:
+    aliases:
+      - tencent/Hunyuan-A13B-Instruct
+      - hunyuan-a13b-instruct
+      - hunyuan_a13b_instruct
+    metrics:
+      gpqa_diamond: 68
+    source: "NV 实测"
+    updated_at: "2026-08-05"
