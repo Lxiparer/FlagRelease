@@ -267,6 +267,13 @@ fi
 # 公共部分：tokens、执行模式、进度输出要求、步骤2-6
 COMMON_TOKENS=$(cat <<TOKENS_EOF
 
+**宿主机凭证注入（重要，2026-08-05 发布事故修复）**：
+  HARBOR_USER/HARBOR_PASSWORD/MODELSCOPE_TOKEN/HF_TOKEN 已由编排层 export 到本
+  Claude 进程的环境变量，宿主机直接执行的 python3 命令【禁止添加 env VAR=...、
+  /opt/conda/bin/python3、nohup 等前缀】，直接按标准形态执行即可：
+    python3 skills/flagos-release/tools/main.py --from-context ...
+  （仅容器内命令才需要 docker exec -e 传凭证，见下）
+
 **容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
   MODELSCOPE_TOKEN=${MODELSCOPE_TOKEN}
   HF_TOKEN=${HF_TOKEN}
@@ -724,6 +731,63 @@ archive_eval_details_on_exit() {
     fi
 }
 
+# ===== 发布一致性校验 + 自动重试（批处理结束兜底） =====
+# 2026-08-05 Mistral-Small V3 发布事故：发布命令因 env/绝对路径前缀未命中 Bash
+# 白名单被 headless 自动拒绝，main.py 未执行但流程继续 → 静默未发布。
+# 白名单已加兜底规则（settings.local.json），本函数是最后一道防线：
+# 校验发布 trace 与 context 镜像一致性，失败则从 context 推断版本自动重试一次
+# （main.py 幂等，已发布部分自动跳过）。
+verify_and_retry_release() {
+    [ -z "${MODEL:-}" ] && return 0
+    local ctr="${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}"
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+
+    local host_base="/data/flagos-workspace/${MODEL}"
+    local ctx_file="${host_base}/config/context_snapshot.yaml"
+    [ ! -f "${ctx_file}" ] && return 0
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 发布一致性校验..."
+    if python3 skills/flagos-release/tools/verify_release_consistency.py \
+        --host-base "${host_base}" --container "${ctr}" 2>&1 | tail -6; then
+        return 0
+    fi
+
+    # 校验失败 → 从 context 推断应发布的版本并自动重试一次
+    local retry_tag
+    retry_tag=$(python3 -c "
+import yaml
+try:
+    ctx = yaml.safe_load(open('${ctx_file}')) or {}
+except Exception:
+    print('v2'); raise SystemExit
+versions = ctx.get('versions', {}) or {}
+plugin_wf = ctx.get('plugin_workflow', {}) or {}
+def v(k):
+    node = versions.get(k, {}) or {}
+    return node.get('harbor_image') or node.get('image_url') or ''
+if v('v4'): print('v4')
+elif v('v3') or plugin_wf.get('triggered'): print('v3')
+else: print('v2')
+" 2>/dev/null || echo "v2")
+
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 发布一致性校验失败，自动重试发布 (--version-tag ${retry_tag})..."
+    if python3 skills/flagos-release/tools/main.py \
+        --from-context "${ctx_file}" --container-name "${ctr}" \
+        --version-tag "${retry_tag}" 2>&1 | tail -12; then
+        echo "  ✓ 自动重试发布成功"
+        docker cp "${ctr}:/flagos-workspace/shared/context.yaml" "${ctx_file}" 2>/dev/null || true
+        # 重试后二次校验（仍失败仅告警，不再循环）
+        python3 skills/flagos-release/tools/verify_release_consistency.py \
+            --host-base "${host_base}" --container "${ctr}" 2>&1 | tail -3 || true
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ 自动重试发布仍失败，请人工检查（traces/ 发布 trace 与线上 README tag）" \
+            >> "${host_base}/logs/pipeline.log" 2>/dev/null || true
+    fi
+}
+
 # ===== GPU 服务清理（脚本退出时自动执行） =====
 cleanup_gpu_services() {
     local ctr=""
@@ -786,6 +850,8 @@ pipeline_on_exit() {
     upload_to_platform_on_exit || true
     # 评测明细归档必须在 cleanup_gpu_services（可能停容器）之前，趁容器还活着 docker cp。
     archive_eval_details_on_exit || true
+    # 发布一致性校验+自动重试：同样需容器活着（main.py 要 docker exec），放清理之前。
+    verify_and_retry_release || true
     cleanup_gpu_services || true
 
     # 批量模式由 run_batch.sh 投递模型事件，避免重复通知。
