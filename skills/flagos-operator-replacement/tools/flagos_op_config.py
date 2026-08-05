@@ -32,6 +32,59 @@ ETC_ENVIRONMENT = "/etc/environment"
 
 
 # =============================================================================
+# 算子变体展开（治本：调优阶段就展开，确保测试配置与固化配置一致）
+# =============================================================================
+
+def expand_operator_variants(ops: List[str]) -> List[str]:
+    """展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
+
+    Memory 教训（flaggems-blacklist-variant-matching）：
+    plugin 模式 VLLM_FL_FLAGOS_BLACKLIST 按函数 __name__ 精确匹配，
+    禁 addmm 只禁 base 变体，实际 dispatch 的 addmm_out 仍启用 → 调优空转。
+
+    必须在调优阶段就展开变体，让测试配置与固化配置一致，避免：
+    - 调优测试：BLACKLIST=addmm（未展开，无效）
+    - 固化/发布：BLACKLIST=addmm,addmm_out,...（自动展开，未经验证）
+    → 发布的镜像配置与调优验证的不一致
+
+    Args:
+        ops: 算子基础名列表（如 ["addmm", "softmax"]）
+
+    Returns:
+        展开后的完整变体列表（如 ["addmm", "addmm_out", "addmm_dtype", ...]）
+    """
+    if not ops:
+        return []
+
+    try:
+        import flag_gems
+        if not hasattr(flag_gems, 'FULL_CONFIG_BY_FUNC'):
+            print("  WARN: flag_gems.FULL_CONFIG_BY_FUNC 不可用，跳过变体展开")
+            return sorted(set(ops))
+
+        all_funcs = set(flag_gems.FULL_CONFIG_BY_FUNC.keys())
+        expanded = set()
+
+        for op in ops:
+            # 查找该 op 的所有变体：op 本身 + op_* 后缀（如 addmm_out, addmm_dtype）
+            variants = [f for f in all_funcs if f == op or f.startswith(op + '_')]
+            if variants:
+                expanded.update(variants)
+            else:
+                # 保底：即使在 FULL_CONFIG_BY_FUNC 中找不到，也保留原始名
+                expanded.add(op)
+
+        result = sorted(expanded)
+        if len(result) != len(ops):
+            print(f"  算子变体展开: {len(ops)} → {len(result)} 个")
+        return result
+
+    except Exception as e:
+        print(f"  WARN: 算子变体展开失败，使用原始列表: {e}")
+        return sorted(set(ops))
+
+
+# =============================================================================
 # env 构建（唯一实现，替代 4-5 份重复的 env_to_inline / generate）
 # =============================================================================
 
@@ -54,13 +107,18 @@ def build_op_env(mode: str = "custom",
                  enabled_ops: Optional[List[str]] = None,
                  disabled_ops: Optional[List[str]] = None,
                  oot_blacklist: Optional[List[str]] = None,
-                 per_op: Optional[str] = None) -> Dict[str, str]:
+                 per_op: Optional[str] = None,
+                 expand_variants: bool = True) -> Dict[str, str]:
     """构建 plugin 场景的算子控制 env dict（唯一实现）。
 
     mode:
       "native" -> USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false（全关）
       "full"   -> USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true（全量）
       "custom" -> 白名单优先（enabled_ops→WHITELIST），否则黑名单（disabled_ops→BLACKLIST）
+
+    expand_variants: 是否自动展开算子变体（默认 True）
+      - True: addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out
+      - False: 保持原样（仅用于特殊场景，如已经展开过的数据）
 
     仅生成 env，不落盘不重启。调用方决定是内联启动（瞬时）还是 persist_env（持久化）。
     """
@@ -77,11 +135,17 @@ def build_op_env(mode: str = "custom",
     env["USE_FLAGGEMS"] = "1"
     env["VLLM_FL_PREFER_ENABLED"] = "true"
     if oot_blacklist:
+        if expand_variants:
+            oot_blacklist = expand_operator_variants(oot_blacklist)
         env["VLLM_FL_OOT_BLACKLIST"] = ",".join(sorted(oot_blacklist))
     if enabled_ops:
         # 白名单优先
+        if expand_variants:
+            enabled_ops = expand_operator_variants(enabled_ops)
         env["VLLM_FL_FLAGOS_WHITELIST"] = ",".join(sorted(enabled_ops))
     elif disabled_ops:
+        if expand_variants:
+            disabled_ops = expand_operator_variants(disabled_ops)
         env["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
     if per_op:
         env["VLLM_FL_PER_OP"] = per_op

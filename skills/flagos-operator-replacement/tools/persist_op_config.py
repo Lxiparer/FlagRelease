@@ -45,6 +45,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 导入变体展开函数
+from flagos_op_config import expand_operator_variants
+
 CONTEXT_YAML = "/flagos-workspace/shared/context.yaml"
 OP_CONFIG_JSON = "/flagos-workspace/results/operator_config.json"
 RECORD_FILE = "/root/flaggems_op_config.json"
@@ -226,7 +229,9 @@ def _persist_control_file_and_env(disabled_ops, enabled_ops):
         "FLAGGEMS_CONTROL_MODE": control_mode,
     }
     if disabled_ops:
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+        # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
+        disabled_ops_expanded = expand_operator_variants(disabled_ops)
+        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
     env_files = []
 
     try:
@@ -409,7 +414,9 @@ def persist_env_vars(disabled_ops):
         "VLLM_PLUGINS": "fl",
     }
     if disabled_ops:
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+        # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
+        disabled_ops_expanded = expand_operator_variants(disabled_ops)
+        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
 
     env_files = []
 

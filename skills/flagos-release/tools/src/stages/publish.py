@@ -123,7 +123,7 @@ class PublishStage(BaseStage):
             self.skip_step("镜像打 tag", "已有 Harbor 镜像")
             self.skip_step("推送 Harbor", "已有 Harbor 镜像")
         else:
-            # 0. 如果输入是容器，先 commit 为镜像
+            # 0. 如果输入是容器，先 commit 为镜像（内含强制固化检查）
             if self.config.input_type == 'container':
                 success = self._commit_container()
                 if not success:
@@ -403,11 +403,141 @@ for k, v in result.items():
             env_map.pop("VLLM_FL_FLAGOS_WHITELIST", None)
         return env_map
 
+    def _ensure_operator_config_persisted(self) -> bool:
+        """发布前强制确保算子配置已固化（治本：不依赖 PROMPT 调用时机）
+
+        检查逻辑：
+        1. 检查是否为需要固化的场景（env_type != native）
+        2. 检查 /root/flaggems_op_config.json 是否存在
+        3. 如果不存在，强制调用 persist_op_config.py --auto
+        4. 验证固化数据可读取
+
+        Returns:
+            True: 固化成功或不需要固化（native场景）
+            False: 固化失败
+        """
+        container_name = self.config.container_name
+        if not container_name:
+            print("  跳过固化检查（非容器输入）")
+            return True
+
+        print("\n[步骤 0.1] 检查算子配置固化状态")
+
+        # 检查是否为需要固化的场景
+        check_script = """
+import sys, yaml, os, json
+
+try:
+    # 1. 读取 env_type
+    with open('/flagos-workspace/shared/context.yaml', 'r', encoding='utf-8') as f:
+        ctx = yaml.safe_load(f)
+    env_type = ctx.get('env_type', '')
+
+    # native 场景跳过
+    if env_type == 'native':
+        print('skip_native')
+        sys.exit(0)
+
+    # 2. 检查固化记录
+    if not os.path.exists('/root/flaggems_op_config.json'):
+        print('missing')
+        sys.exit(0)
+
+    # 3. 读取记录验证可解析
+    with open('/root/flaggems_op_config.json', 'r', encoding='utf-8') as f:
+        rec = json.load(f)
+
+    timestamp = rec.get('timestamp', 'unknown')
+    method = rec.get('persist_method', 'unknown')
+    enabled_count = rec.get('enabled_count', 0)
+    disabled_count = rec.get('disabled_count', 0)
+
+    print(f'exists:{timestamp}:{method}:enabled={enabled_count}:disabled={disabled_count}')
+
+except Exception as e:
+    print(f'error:{str(e)}')
+    sys.exit(1)
+"""
+        import base64
+        script_b64 = base64.b64encode(check_script.encode()).decode()
+        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+
+        success, stdout, stderr = self.run_command(
+            cmd=cmd,
+            step_name="检查固化状态",
+            timeout=60,
+            in_container=True,
+            check=False
+        )
+
+        if not success:
+            print(f"  ✗ 检查失败: {stderr}")
+            return False
+
+        result = stdout.strip()
+
+        # native 场景，跳过固化
+        if "skip_native" in result:
+            print("  ✓ native 场景，无需固化算子配置")
+            return True
+
+        # 固化记录缺失，强制执行 persist_op_config.py
+        if "missing" in result:
+            print("  ⚠ 未检测到固化记录 (/root/flaggems_op_config.json)，强制执行固化")
+            need_persist = True
+        elif "error:" in result:
+            error_msg = result.split("error:", 1)[1] if ":" in result else result
+            print(f"  ⚠ 固化记录读取失败: {error_msg}，强制重新固化")
+            need_persist = True
+        else:
+            # 固化记录存在且可读
+            print(f"  ✓ 固化记录存在: {result.replace('exists:', '')}")
+            need_persist = False
+
+        # 执行固化
+        if need_persist:
+            print("  执行 persist_op_config.py --auto ...")
+            success, stdout, stderr = self.run_command(
+                cmd="PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto",
+                step_name="强制固化算子配置",
+                timeout=180,
+                in_container=True,
+                check=False
+            )
+
+            if not success:
+                print(f"  ✗ 固化失败: {stderr}")
+                # 读取错误日志
+                _, err_log, _ = self.run_command(
+                    cmd="cat /flagos-workspace/logs/_last_error.json 2>/dev/null || echo '{}'",
+                    step_name="读取固化错误日志",
+                    timeout=10,
+                    in_container=True,
+                    check=False
+                )
+                if err_log and err_log.strip() != '{}':
+                    print(f"  错误详情: {err_log[:500]}")
+                return False
+
+            print(f"  ✓ 固化完成")
+            # 打印固化结果摘要
+            if stdout:
+                for line in stdout.splitlines()[-10:]:
+                    if "✓" in line or "记录文件" in line or "算子" in line:
+                        print(f"    {line.strip()}")
+
+        return True
+
     def _commit_container(self) -> bool:
         """将容器 commit 为镜像（固化算子/plugin 环境变量进 Config.Env）"""
         container_name = self.config.container_name
         if not container_name:
             print("  x 容器名称未配置")
+            return False
+
+        # 步骤 0: 强制确保固化数据存在且最新（治本：不依赖 PROMPT 调用时机）
+        if not self._ensure_operator_config_persisted():
+            print("  x 算子配置固化失败，中止发布")
             return False
 
         model_name = self.config.model_info.output_name or "model"
