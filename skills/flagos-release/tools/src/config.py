@@ -17,6 +17,7 @@
 从 context.yaml 加载配置，并提供配置验证和自动填充
 """
 import os
+import sys
 import json
 import subprocess
 from dataclasses import dataclass, field
@@ -24,6 +25,19 @@ from typing import List
 import yaml
 
 from .chip_detector import ChipDetector, ChipVendor, VENDOR_NAMES, sanitize_docker_tag
+
+# 芯片厂商×型号统一规范表（项目 shared/ 目录）。用于命名后缀与厂商归一化。
+# 缺失时降级：naming_suffix 回退原 vendor 名，normalize 回退原值（不改变旧行为）。
+_chip_spec = None
+try:
+    _shared_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "shared")
+    )
+    if _shared_dir not in sys.path:
+        sys.path.insert(0, _shared_dir)
+    import chip_spec as _chip_spec  # type: ignore
+except Exception:
+    _chip_spec = None
 
 
 @dataclass
@@ -460,12 +474,25 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     # ==================== 模型名称 ====================
     model_name = _extract_model_name(config.model_info.source_of_model_weights)
     vendor_name = config.chip.vendor or "unknown"
+    # 厂商名归一到规范 key（huawei→ascend、tianshu→iluvatar 等），
+    # 再取规范命名后缀，保证命名/tag/报告三处统一。
+    if _chip_spec and vendor_name and vendor_name != "unknown":
+        try:
+            vendor_name = _chip_spec.normalize_vendor(vendor_name) or vendor_name
+        except Exception:
+            pass
+    config.chip.vendor = vendor_name  # 回写归一化结果，供后续 tag 生成复用
+    # 命名后缀：规范表可用则查表，否则回退归一化后的 vendor 名
+    naming_vendor = vendor_name
+    if _chip_spec and vendor_name and vendor_name != "unknown":
+        try:
+            naming_vendor = _chip_spec.naming_suffix(vendor_name) or vendor_name
+        except Exception:
+            pass
 
     if not config.model_info.output_name and model_name:
-        if vendor_name == "nvidia":
-            config.model_info.output_name = model_name
-        else:
-            config.model_info.output_name = f"{model_name}-{vendor_name}"
+        # 全部厂商统一 xxx-{vendor}-FlagOS（含 nvidia，按规范表要求）
+        config.model_info.output_name = f"{model_name}-{naming_vendor}"
 
     if not config.model_info.flagrelease_name and config.model_info.output_name:
         suffix = "-FlagOS"
@@ -502,8 +529,17 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
 
     if not config.publish.image_target_tag and config.chip.auto_generate_tag:
         from .chip_detector import ChipVersionInfo, generate_image_tag as _generate_tag
+        # ChipVendor 枚举可能未收录新增厂商(zhenwu/arm/sunrise/enflame)，构造失败时
+        # 兜底为 None——vendor_name 已显式传给 _generate_tag，info.vendor 仅作兜底不影响命名。
+        try:
+            _chip_vendor_enum = (
+                ChipVendor(vendor_name)
+                if vendor_name and vendor_name != "unknown" else None
+            )
+        except ValueError:
+            _chip_vendor_enum = None
         chip_info = ChipVersionInfo(
-            vendor=ChipVendor(vendor_name) if vendor_name and vendor_name != "unknown" else None,
+            vendor=_chip_vendor_enum,
             driver_version=config.chip.driver_version,
             sdk_version=config.chip.sdk_version,
             torch_backend=env_info.torch_backend if env_info and env_info.torch_backend else "",

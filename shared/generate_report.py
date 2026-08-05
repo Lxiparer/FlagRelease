@@ -43,6 +43,33 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# 芯片厂商×型号规范表（与本脚本同目录部署）。缺失时降级为恒等映射，不影响报告生成。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import chip_spec as _chip_spec
+except Exception:
+    _chip_spec = None
+
+
+def _vendor_display(vendor: str) -> str:
+    """厂商展示名：规范表可用则 "中文名(英文名)"，否则原值。"""
+    if _chip_spec and vendor:
+        try:
+            return _chip_spec.vendor_display(vendor)
+        except Exception:
+            pass
+    return vendor or "-"
+
+
+def _chip_display(vendor: str, gpu_model: str) -> str:
+    """芯片型号规范显示名：规范表可用则查表规范化，否则原值。"""
+    if _chip_spec and gpu_model:
+        try:
+            return _chip_spec.canonical_chip(vendor, gpu_model)
+        except Exception:
+            pass
+    return gpu_model or ""
+
 
 def read_json(path: str) -> Optional[dict]:
     try:
@@ -679,6 +706,12 @@ def build_report_basename(data, ext: str = ".md") -> str:
     """
     ctx = data.context or {}
     vendor = (ctx.get("gpu", {}) or {}).get("vendor", "") or "unknown"
+    # 文件名厂商归一到规范 key（huawei→ascend 等），与命名/报告展示保持一致
+    if _chip_spec and vendor and vendor != "unknown":
+        try:
+            vendor = _chip_spec.normalize_vendor(vendor) or vendor
+        except Exception:
+            pass
 
     model_name = (ctx.get("model", {}) or {}).get("name", "") or "model"
     if "/" in model_name:
@@ -928,15 +961,18 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| FlagGems版本 | {flag_pkgs.get('flaggems', '-')} |")
     lines.append(f"| Flagtree版本 | {env.get('flagtree_version', flag_pkgs.get('flagtree', '-'))} |")
     lines.append(f"| FlagCX版本 | {flag_pkgs.get('flagcx', '-')} |")
-    lines.append(f"| 厂商 | {gpu.get('vendor', '-')} |")
+    _vendor_raw = gpu.get("vendor", "")
+    lines.append(f"| 厂商 | {_vendor_display(_vendor_raw)} |")
     # 单卡显存：优先 context 采集值(nvidia-smi)，缺失时按型号查表兜底
     mem_gb = gpu.get("memory_gb") or ctx.get("gpu", {}).get("memory_gb")
     if not mem_gb:
         mem_gb = lookup_gpu_memory(gpu_type)
-    # 真实显卡型号：去掉软件识别的 -3e 后缀，并把 NVIDIA 与型号间的分隔符
-    # （_ 或 -）统一为空格（NVIDIA_H20-3e / NVIDIA-H20-3e → NVIDIA H20）
-    gpu_type_display = re.sub(r"-3e\b", "", gpu_type)
-    gpu_type_display = re.sub(r"^(NVIDIA)[\s_-]+", r"\1 ", gpu_type_display)
+    # 真实显卡型号：走统一规范表映射到规范显示名（如 A100 / H20-3e / 910B）。
+    # 规范表未命中或不可用时，回退旧的字符串清洗逻辑（去 -3e 后缀、统一 NVIDIA 分隔符）。
+    gpu_type_display = _chip_display(_vendor_raw, gpu_type)
+    if gpu_type_display == gpu_type:
+        gpu_type_display = re.sub(r"-3e\b", "", gpu_type)
+        gpu_type_display = re.sub(r"^(NVIDIA)[\s_-]+", r"\1 ", gpu_type_display)
     lines.append(f"| GPU | {gpu_type_display} : {gpu_count} x {str(mem_gb) + 'GB' if mem_gb else '-GB'} |")
     lines.append(f"| 容器 | {container.get('name', '-')} |")
     lines.append(f"| release自动化工具版本 | v0.1.0 |")
@@ -1131,7 +1167,7 @@ def generate_text_report(data: ReportData) -> str:
                      f"本报告所有以 V1 为基准的性能比均基于该合成基线。")
 
     model_name = model.get("name", "-")
-    vendor = gpu.get("vendor", "-")
+    vendor = _vendor_display(gpu.get("vendor", "")) if gpu.get("vendor") else "-"
 
     for ver_key in ["v1", "v2", "v3", "v4"]:
         ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))

@@ -1,11 +1,11 @@
 #!/bin/bash
 # 统一镜像名称生成脚本（压缩版）
 # 用法: bash get_image_name.sh <厂商> <容器名/模型名> [模型名]
-# 厂商: ascend, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro, zhenwu
+# 厂商: ascend, hygon, iluvatar, kunlunxin, metax, mthreads, nvidia, tsingmicro, zhenwu, arm, sunrise, enflame, cambricon
 
 set -euo pipefail
 
-VALID_VENDORS="ascend hygon iluvatar kunlunxin metax mthreads nvidia tsingmicro zhenwu"
+VALID_VENDORS="ascend hygon iluvatar kunlunxin metax mthreads nvidia tsingmicro zhenwu arm sunrise enflame cambricon"
 
 VENDOR="${1:-}"
 if [ -z "$VENDOR" ] || ! echo "$VALID_VENDORS" | grep -qw "$VENDOR"; then
@@ -226,5 +226,18 @@ case "$VENDOR" in
         DRIVER="${DRIVER:-none}"
         DV=$(cver "$DRIVER")
         echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-raisa${DV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        ;;
+    cambricon)
+        GPU="cambricon001"
+        DRIVER=$(run "cnmon 2>/dev/null | grep -oP 'Driver[^0-9]*\K[0-9.]+' | head -1")
+        DRIVER="${DRIVER:-none}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        ;;
+    arm|sunrise|enflame)
+        # 新增厂商：暂无专用 smi 采集逻辑，用通用命名（GPU 编码固定 001，驱动 none）。
+        # 后续接入真实检测时补对应分支即可。
+        GPU="${VENDOR}001"
+        DRIVER="none"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
 esac

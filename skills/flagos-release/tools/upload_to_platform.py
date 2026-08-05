@@ -30,6 +30,18 @@ except ImportError:
     print("错误: 缺少 pyyaml，请安装: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
+# 芯片厂商×型号统一规范表（项目 shared/ 目录）。缺失时降级为原值，不改变旧行为。
+_chip_spec = None
+try:
+    _shared_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "shared")
+    )
+    if _shared_dir not in sys.path:
+        sys.path.insert(0, _shared_dir)
+    import chip_spec as _chip_spec  # type: ignore
+except Exception:
+    _chip_spec = None
+
 
 DEFAULT_API_URL = "https://flagrelease.flagos.net/api/v1/offline/import/insert"
 
@@ -295,7 +307,21 @@ def main():
     model_short = extract_model_short(model_name)
     vendor = ctx.get("gpu", {}).get("vendor", "nvidia")
     gpu_type = ctx.get("gpu", {}).get("type", "")
-    chip_name = extract_chip_name(gpu_type, vendor)
+    # 厂商归一到规范 key（huawei→ascend 等），芯片名走规范表映射（NVIDIA A100-SXM4→A100）。
+    # 规范表不可用时回退旧的 extract_chip_name 前缀清洗逻辑。
+    if _chip_spec and vendor:
+        try:
+            vendor = _chip_spec.normalize_vendor(vendor) or vendor
+        except Exception:
+            pass
+    chip_name = ""
+    if _chip_spec and gpu_type:
+        try:
+            chip_name = _chip_spec.canonical_chip(vendor, gpu_type)
+        except Exception:
+            chip_name = ""
+    if not chip_name or chip_name == gpu_type:
+        chip_name = extract_chip_name(gpu_type, vendor)
     tp_size = ctx.get("runtime", {}).get("tp_size", 1)
     framework = (ctx.get("runtime", {}).get("framework", "vllm") or "vllm").upper()
     workflow_start = ctx.get("timing", {}).get("workflow_start", "")

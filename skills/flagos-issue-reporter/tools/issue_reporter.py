@@ -56,6 +56,19 @@ from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+# 芯片厂商规范表。容器内部署在同目录(scripts/)，宿主机在项目 shared/。
+# 两处候选都加入 sys.path，缺失时降级为原值。
+_chip_spec = None
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for _cand in (_here,
+                  os.path.abspath(os.path.join(_here, "..", "..", "..", "shared"))):
+        if os.path.isfile(os.path.join(_cand, "chip_spec.py")) and _cand not in sys.path:
+            sys.path.insert(0, _cand)
+    import chip_spec as _chip_spec  # type: ignore
+except Exception:
+    _chip_spec = None
+
 _ENV_FILE = "/flagos-workspace/.env"
 
 
@@ -311,8 +324,19 @@ def _load_environment(env_file: Optional[str], context_yaml: Optional[str]) -> D
             with open(context_yaml, "r") as f:
                 ctx = yaml.safe_load(f) or {}
             gpu = ctx.get("gpu", {})
-            env["hardware"] = gpu.get("vendor", "")
-            env["gpu_type"] = gpu.get("type", "")
+            _vendor_raw = gpu.get("vendor", "")
+            _gpu_type_raw = gpu.get("type", "")
+            # 厂商/芯片走统一规范表展示（huawei→华为(Ascend)、型号规范化），缺失时回退原值
+            if _chip_spec and _vendor_raw:
+                try:
+                    env["hardware"] = _chip_spec.vendor_display(_vendor_raw)
+                    env["gpu_type"] = _chip_spec.canonical_chip(_vendor_raw, _gpu_type_raw)
+                except Exception:
+                    env["hardware"] = _vendor_raw
+                    env["gpu_type"] = _gpu_type_raw
+            else:
+                env["hardware"] = _vendor_raw
+                env["gpu_type"] = _gpu_type_raw
             insp = ctx.get("inspection", {})
             core = insp.get("core_packages", {})
             env["pytorch"] = core.get("torch", "")

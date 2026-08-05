@@ -290,6 +290,9 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
     # 报告生成工具
     "shared/generate_report.py:scripts/generate_report.py"
+    # 芯片厂商×型号统一规范表（generate_report/issue_reporter 依赖，需与消费脚本同目录）
+    "shared/chip_spec.py:scripts/chip_spec.py"
+    "shared/chip_spec.yaml:scripts/chip_spec.yaml"
     # 越位执行数据清理工具
     "shared/rollback_overflow.py:scripts/rollback_overflow.py"
 )
