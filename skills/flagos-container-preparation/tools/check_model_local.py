@@ -147,6 +147,28 @@ def is_word_boundary_match(needle: str, haystack: str) -> bool:
     return False
 
 
+def hf_cache_snapshot_dirs(dir_path: str) -> list:
+    """HF cache 形态目录(models--<org>--<name>)下的权重目录 snapshots/<rev>/。
+
+    HF cache 顶层只有 refs/、blobs/、snapshots/ 三个子目录,权重软链在
+    snapshots/<revision>/ 下(目录名为 commit hash,与模型名无关)。
+    命中此类目录时,必须下探 snapshots 子目录才能完成权重校验——
+    否则顶层校验 weight_count=0 误报"无权重"(config 的 _name_or_path
+    为空时策略3 也救不回来)。
+    """
+    snap_dir = os.path.join(dir_path, "snapshots")
+    try:
+        if not os.path.isdir(snap_dir):
+            return []
+        return [
+            os.path.join(snap_dir, rev)
+            for rev in os.listdir(snap_dir)
+            if os.path.isdir(os.path.join(snap_dir, rev)) and not rev.startswith(".")
+        ]
+    except OSError:
+        return []
+
+
 def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> list:
     """在宿主机路径下搜索目录名匹配的模型目录。
 
@@ -187,8 +209,12 @@ def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> li
                 full_path = os.path.join(dirpath, d)
                 if d_lower == model_lower:
                     exact_matches.append(full_path)
+                    # HF cache 形态(models--org--name):顶层无权重,
+                    # 权重在 snapshots/<rev>/ 下,同步下探为候选
+                    exact_matches.extend(hf_cache_snapshot_dirs(full_path))
                 elif is_word_boundary_match(model_lower, d_lower):
                     contain_matches.append(full_path)
+                    contain_matches.extend(hf_cache_snapshot_dirs(full_path))
 
             # 策略 3：当前目录有 config.json + 权重文件，检查 config 内容
             # 仅对目录名未匹配的目录执行（避免重复）
