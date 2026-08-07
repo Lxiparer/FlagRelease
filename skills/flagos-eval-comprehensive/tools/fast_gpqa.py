@@ -30,6 +30,7 @@ import os
 import sys
 import time
 import traceback
+import zlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -64,6 +65,13 @@ except ImportError:
 # =============================================================================
 
 THINKING_PATTERNS = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
+
+# thinking 模型 max_tokens 上限。正常思考链输出一般几千~一万多 token 封顶，
+# 真正会吃满上限的几乎必然是 runaway 复读死循环（Qwen3-30B 事故: 24576 token
+# 复读在慢速芯片上拖了 70 分钟卡死评测收尾）。cap 20000 不截断正常答案，
+# 只收窄 runaway 的复读窗口。check_truncation 的翻倍重试同样受此约束
+# （防止翻倍后窗口回到 max_model_len 级）。
+THINKING_MAX_TOKENS_CAP = 20000
 
 
 def detect_thinking(model_name: str) -> bool:
@@ -126,7 +134,10 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
     """
     自动计算 max_tokens，基于服务端实际 max_model_len。
 
-    thinking 模型：max(max_model_len - 8192, 8192)，无上限 cap
+    thinking 模型：max(max_model_len - 8192, 8192)，cap THINKING_MAX_TOKENS_CAP
+       —— runaway 复读死循环会吃满 max_tokens，无上限会让一轮复读拖数十分钟
+       （慢速芯片 24576 token ≈ 70min）；正常思考链回答一般几千~一万多 token
+       封顶，cap 20000 不会截断正常答案，只收窄 runaway 复读窗口。
     标准模型：clamp(max_model_len - 8192, 4096, 32768)
 
     Returns:
@@ -137,6 +148,7 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
         tokens = max_model_len - 8192  # 预留 8K 给 prompt
         if is_thinking:
             tokens = max(tokens, 8192)
+            tokens = min(tokens, THINKING_MAX_TOKENS_CAP)
         else:
             tokens = max(tokens, 4096)
             tokens = min(tokens, 32768)
@@ -161,11 +173,14 @@ def check_truncation(
     model_name: str,
     max_tokens: int,
     max_model_len: Optional[int],
+    max_tokens_cap: Optional[int] = None,
 ) -> Tuple[bool, int]:
     """
     发一条样题检查 finish_reason 是否为 length（截断）。
 
-    如果截断，自动将 max_tokens 翻倍（在 max_model_len 允许范围内）。
+    如果截断，自动将 max_tokens 翻倍（在 max_model_len 允许范围内），
+    并遵守 max_tokens_cap（如 thinking 的 runaway 窗口 cap，防止翻倍
+    把防线1的窗口上限破坏掉）。
 
     Returns:
         (truncation_detected, adjusted_max_tokens)
@@ -201,6 +216,9 @@ def check_truncation(
                 if max_model_len:
                     cap = max_model_len - 2048  # 留 2K 给 prompt
                     new_tokens = min(new_tokens, cap)
+                if max_tokens_cap:
+                    # 翻倍也遵守 runaway 窗口 cap（防线1）
+                    new_tokens = min(new_tokens, max_tokens_cap)
                 new_tokens = max(new_tokens, max_tokens)  # 至少不降
                 if new_tokens > max_tokens:
                     print(f"[WARN] 自动调整 max_tokens: {max_tokens} → {new_tokens}")
@@ -211,6 +229,134 @@ def check_truncation(
         print(f"[WARN] 截断检测请求失败: {e}")
 
     return False, max_tokens
+
+
+# =============================================================================
+# runaway 复读检测（防线2：内容判别，判别性不干扰生成）
+# =============================================================================
+
+# 复读判定阈值（保守，宁漏勿误杀正常长推理）
+_RUNAWAY_MIN_TEXT_LEN = 500      # 低于此长度的文本不做判别（短答无统计意义）
+_RUNAWAY_NGRAM = 3               # n-gram 粒度
+_RUNAWAY_MAX_DIVERSITY = 0.10    # 3-gram 去重后独占比低于此值 → 高度重复
+_RUNAWAY_MAX_COMPRESS_RATIO = 0.15  # zlib 压缩比低于此值 → 高度可压缩（复读特征）
+# 注：diversity 对超长文本（>50K 字符）自然衰减（3-gram 空间饱和，真实长文本
+# 实测可低至 0.07），只适合中等长度区分；compress_ratio 对长度稳定（真实文本
+# 0.25~0.41，复读 <0.05），是唯一可靠的截断判据。故条件2（length 截断）只用
+# compress_ratio，不用 diversity。
+
+
+def _ngram_diversity(text: str, n: int = _RUNAWAY_NGRAM) -> float:
+    """n-gram 去重后独占比：复读文本的 grams 几乎全是同一个，独占比趋近 0。"""
+    if len(text) < n:
+        return 1.0
+    grams = [text[i:i + n] for i in range(len(text) - n + 1)]
+    if not grams:
+        return 1.0
+    return len(set(grams)) / len(grams)
+
+
+def _zlib_compress_ratio(text: str) -> float:
+    """zlib 压缩比：压缩后体积 / 原文体积。复读文本高度可压缩，比值趋近 0。"""
+    raw = text.encode("utf-8")
+    if not raw:
+        return 1.0
+    return len(zlib.compress(raw, level=6)) / len(raw)
+
+
+def detect_runaway(text: str, finish_reason: str = "") -> Tuple[bool, Dict]:
+    """判别回答是否为 runaway（垃圾复读死循环）。
+
+    判别特征（组合，非单一指标）：
+    1. 3-gram 去重后独占比 < 0.10 → 高度重复
+    2. zlib 压缩比 < 0.15 → 高度可压缩（复读文本高度冗余）
+    3. finish_reason=length + 独占比 < 0.15 → 截断且高重复（撞 max_tokens 的复读）
+
+    保守设计：任一单指标都可能误伤正常长推理（思考链也带一定重复度），
+    必须"双指标同时成立"或"length+高重复"才判定 runaway。
+
+    Returns:
+        (is_runaway, evidence_dict)
+        evidence = {"diversity": float, "compress_ratio": float, "text_len": int,
+                    "finish_reason": str, "reason": str}
+    """
+    text = (text or "").strip()
+    evidence = {
+        "diversity": 1.0,
+        "compress_ratio": 1.0,
+        "text_len": len(text),
+        "finish_reason": finish_reason or "",
+        "reason": "",
+    }
+    if len(text) < _RUNAWAY_MIN_TEXT_LEN:
+        evidence["reason"] = "text_too_short"
+        return False, evidence
+
+    diversity = _ngram_diversity(text)
+    compress_ratio = _zlib_compress_ratio(text)
+    evidence["diversity"] = round(diversity, 4)
+    evidence["compress_ratio"] = round(compress_ratio, 4)
+
+    # 条件1: 双指标同时成立 → 复读
+    if diversity < _RUNAWAY_MAX_DIVERSITY and compress_ratio < _RUNAWAY_MAX_COMPRESS_RATIO:
+        evidence["reason"] = "high_repeat_and_compressible"
+        return True, evidence
+    # 条件2: 撞 max_tokens 截断 + 高度可压缩 → runaway 截断（正常答案截断压缩比
+    # 仍 >0.25，复读截断 <0.05；不用 diversity——长文本 diversity 自然衰减会误判）
+    if finish_reason == "length" and compress_ratio < _RUNAWAY_MAX_COMPRESS_RATIO:
+        evidence["reason"] = "length_truncated_high_repeat"
+        return True, evidence
+
+    evidence["reason"] = "normal"
+    return False, evidence
+
+
+def analyze_predictions_runaway(work_dir: str, model_id: str) -> Dict:
+    """评测完成后扫描 predictions jsonl，标记 runaway 题。
+
+    evalscope 是黑盒（生成+判分在其内部完成），fast_gpqa 拿不到逐题文本；
+    本题逐题内容判别只能在评测完成后从 work_dir/predictions/ 后处理实现。
+    用途：标记 runaway 题 → 报告提示该轮分数可能被垃圾复读污染（不改分，
+    仅数据真实性提示；真正止血靠防线3 进程外看门狗）。
+
+    Returns:
+        {"checked": int, "runaway_count": int, "runaway_indices": [...]}
+        runaway_indices = [{"index": int, "reason": str, "diversity": float,
+                            "compress_ratio": float, "finish_reason": str}]
+    """
+    result = {"checked": 0, "runaway_count": 0, "runaway_indices": []}
+    pred_path = os.path.join(work_dir, "predictions", model_id, "gpqa_diamond_default.jsonl")
+    if not os.path.isfile(pred_path):
+        return result
+    try:
+        with open(pred_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                result["checked"] += 1
+                choices = (rec.get("model_output") or {}).get("choices") or []
+                if not choices:
+                    continue
+                content = (choices[0].get("message") or {}).get("content") or ""
+                stop_reason = choices[0].get("stop_reason") or ""
+                is_ra, ev = detect_runaway(content, stop_reason)
+                if is_ra:
+                    result["runaway_count"] += 1
+                    result["runaway_indices"].append({
+                        "index": rec.get("index"),
+                        "reason": ev["reason"],
+                        "diversity": ev["diversity"],
+                        "compress_ratio": ev["compress_ratio"],
+                        "finish_reason": ev["finish_reason"],
+                    })
+    except OSError:
+        pass
+    return result
 
 
 # =============================================================================
@@ -561,8 +707,10 @@ def run_fast_gpqa(
     print(f"  max_tokens: {max_tokens}")
 
     # Step 3: 截断检测 — 发样题检查 finish_reason
+    # thinking 模型翻倍重试受 THINKING_MAX_TOKENS_CAP 约束（防线1）
     truncation_detected, max_tokens = check_truncation(
         api_base, api_key, model_name, max_tokens, max_model_len,
+        max_tokens_cap=THINKING_MAX_TOKENS_CAP if is_thinking else None,
     )
 
     # Step 4: 构建 generation_config（优先采用模型自带 generation_config.json 的采样参数，
@@ -662,6 +810,13 @@ def run_fast_gpqa(
     minutes = int(total_elapsed // 60)
     seconds = round(total_elapsed % 60, 1)
 
+    # Step 8.5: runaway 复读检测（防线2，评测后逐题内容判别）
+    runaway_analysis = analyze_predictions_runaway(work_dir, model_id)
+    if runaway_analysis.get("runaway_count", 0) > 0:
+        print(f"[WARN] 检测到 {runaway_analysis['runaway_count']}/{runaway_analysis.get('checked', 0)} 题 runaway 复读: "
+              f"{[r['index'] for r in runaway_analysis['runaway_indices']]}")
+        print(f"[WARN] 这些题的截断垃圾可能污染分数，建议关注精度结果可信度")
+
     # Step 9: 输出报告
     report = {
         '_producer': 'fast_gpqa.py',
@@ -680,6 +835,7 @@ def run_fast_gpqa(
         'total_duration_seconds': total_elapsed,
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
         'work_dir': work_dir,
+        'runaway_detection': runaway_analysis,
     }
     if monitor and monitor.is_dead():
         reason = monitor.death_reason()
@@ -700,6 +856,7 @@ def run_fast_gpqa(
             'eval_duration_seconds': '实际评测阶段耗时（秒）',
             'total_duration_seconds': '总耗时（含探测，秒）',
             'work_dir': 'evalscope 原始输出目录（含预测、报告、日志）',
+            'runaway_detection': '防线2 复读检测：评测完成后扫描逐题回答，标记 runaway 复读题（checked/runaway_count/runaway_indices）；runaway_count>0 说明该轮分数可能被复读污染',
     }
 
     # 写 JSON 报告

@@ -28,11 +28,22 @@
   python3 eval_wrapper.py --eval-cmd "python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json" \
       --service-log /flagos-workspace/logs/startup_native.log \
       --stall-timeout 300 \
+      --progress-timeout 1800 \
       --max-timeout 7200
 
 输出约定:
   正常: 最后一行为 JSON (结果文件内容)，退出码 0
   异常: [EVAL_ERROR] 开头的结构化错误，退出码 1
+
+进度看门狗（防线3）:
+  从评测日志尾部解析 evalscope 的 tqdm 进度计数（如 "49/50"），按阶段区别对待：
+  - 收尾停滞（进度已到 total 且超过 --progress-timeout 不推进）= 收尾卡死
+    （判分/写结果死锁，Qwen3-30B 事故形态），终止评测进程并报错，
+    替代干等 max_timeout 总闸。
+  - 生成中停滞（进度 < total）= 当前题未完成，正常慢推理（慢芯片 + 长思考链
+    单题可达 20-40 分钟）与 runaway 在此阶段不可区分，只提示不杀；
+    runaway 的止血由 fast_gpqa 的 max_tokens cap 保证（复读会撞 cap 结束生成）。
+  "慢≠死"原则不变：生成中停滞一律等待；只有评测收尾停滞才杀。
 """
 
 import argparse
@@ -93,6 +104,35 @@ def scan_log_fatal(log_path: str, offset: int) -> tuple:
             if pat.search(s):
                 return new_offset, {"type": sig_type, "line": s[:300]}
     return new_offset, None
+
+
+def extract_progress_from_log(log_path: str, tail_bytes: int = 16384) -> Optional[tuple]:
+    """从评测日志尾部解析最近一次 evalscope 进度计数。
+
+    真实格式（evalscope INFO 行）:
+      Evaluating[gpqa_diamond] 100%| 50/50 [Elapsed: 00:40 < Remaining: 00:00,  3.30it/s]
+      Evaluating[gpqa_diamond]  50%| 25/50 [Elapsed: 01:00 < Remaining: 00:26,  1.04s/it]
+
+    Returns:
+        (done, total) 或 None（无进度信息：探测阶段 / 非 tqdm 评测）
+    """
+    try:
+        size = os.path.getsize(log_path)
+        if size <= 0:
+            return None
+        with open(log_path, "rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read().decode("utf-8", errors="replace")
+        # 同一行内匹配 "Evaluating[xx] ... N/M"，取最后一个出现（最新进度）
+        matches = re.findall(r"Evaluating\[[^\]]+\].*?(\d+)\s*/\s*(\d+)", tail)
+        if not matches:
+            return None
+        done, total = int(matches[-1][0]), int(matches[-1][1])
+        if total <= 0:
+            return None
+        return done, total
+    except OSError:
+        return None
 
 
 def get_eval_output_file(eval_cmd: str) -> Optional[str]:
@@ -211,6 +251,9 @@ def main():
                         help="API 地址（显式指定时优先级最高，否则从 context-yaml 读取 port）")
     parser.add_argument("--stall-timeout", type=int, default=300,
                         help="评测进程无新输出超过此秒数视为卡死 (默认 300s)")
+    parser.add_argument("--progress-timeout", type=int, default=1800,
+                        help="评测收尾（进度已到 total）停滞超过此秒数判定收尾卡死并终止；"
+                             "生成中停滞只提示不杀 (默认 1800s=30min)")
     parser.add_argument("--max-timeout", type=int, default=7200,
                         help="评测最大允许时间 (默认 7200s = 2h)")
     parser.add_argument("--check-interval", type=int, default=15,
@@ -220,6 +263,7 @@ def main():
     eval_cmd = args.eval_cmd
     service_log = args.service_log
     stall_timeout = args.stall_timeout
+    progress_timeout = args.progress_timeout
     max_timeout = args.max_timeout
     check_interval = args.check_interval
 
@@ -258,7 +302,7 @@ def main():
     # 启动评测进程，捕获 stdout/stderr 到临时文件
     eval_log = "/tmp/eval_wrapper_output.log"
     print(f"[WRAPPER] 启动评测: {eval_cmd}")
-    print(f"[WRAPPER] 监控参数: stall_timeout={stall_timeout}s, max_timeout={max_timeout}s")
+    print(f"[WRAPPER] 监控参数: stall_timeout={stall_timeout}s, progress_timeout={progress_timeout}s, max_timeout={max_timeout}s")
     if service_log:
         print(f"[WRAPPER] 服务日志: {service_log}")
     sys.stdout.flush()
@@ -278,6 +322,10 @@ def main():
     stall_extensions = 0
     service_dead_since = None
     grace_period = 60  # 前 60s 不检查服务（可能还在初始化）
+    # 进度看门狗状态（防线3）
+    last_progress = None          # 最近一次解析到的进度 (done, total)
+    last_progress_time = start_time
+    progress_watch_started = False
 
     try:
         while True:
@@ -325,6 +373,57 @@ def main():
                           f"第 {stall_extensions} 次提示，总耗时 {int(elapsed)}s / 上限 {max_timeout}s）")
                     sys.stdout.flush()
                     last_output_time = time.time()
+
+            # 3.5 进度看门狗（防线3）：按"生成中"与"收尾"两种停滞区别对待。
+            # 核心原则（与上面停滞检测同源）："慢"≠"死"。"进度不推进"本身不能
+            # 判死——evalscope 的 tqdm 是每题生成完成后才 +1，单题推理期间进度条
+            # 天然停滞，慢芯片 + 长思考链的正常单题可能 20-40 分钟（万 token 级
+            # 思考链 @ 5-10 token/s），若按时间阈值一律杀会误杀正常长推理。
+            # 分界信号是"评测处于哪个阶段"：
+            #   - 生成中（progress < total）：停滞 = 当前题未完成，可能是正常慢推理，
+            #     也可能是 runaway。二者在此阶段不可区分（runaway 时服务端也在
+            #     持续吐 token）。此时不杀——runaway 的止血由防线1（max_tokens cap）
+            #     保证：复读再长也会撞 cap 结束生成。只打印提示。
+            #   - 收尾（progress == total）：所有题生成完毕，evalscope 进入判分/聚合/
+            #     写结果阶段。判分是本地规则匹配，正常几分钟内完成，没有正当理由
+            #     停滞超过 progress_timeout —— 此时停滞 = 收尾卡死（Qwen3-30B 事故
+            #     形态），杀。
+            # 总闸仍有 max_timeout 兜底，任何阶段超 2h 一律终止。
+            progress = extract_progress_from_log(eval_log)
+            if progress is not None:
+                if not progress_watch_started:
+                    progress_watch_started = True
+                    last_progress = progress
+                    last_progress_time = time.time()
+                elif progress != last_progress:
+                    last_progress = progress
+                    last_progress_time = time.time()
+                    print(f"[WRAPPER] 评测进度推进: {last_progress[0]}/{last_progress[1]} (总耗时 {int(elapsed)}s)")
+                    sys.stdout.flush()
+                elif time.time() - last_progress_time > progress_timeout:
+                    if last_progress[0] >= last_progress[1]:
+                        # 收尾停滞 → 真卡死，终止
+                        print(f"[WRAPPER] 评测收尾停滞: 已到 {last_progress[0]}/{last_progress[1]} 但评测进程"
+                              f"停滞超过 {progress_timeout}s（判分/写结果不应这么久），判定收尾卡死，终止评测")
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        time.sleep(3)
+                        if proc.poll() is None:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        proc.wait()
+                        emit_error(
+                            "progress_stalled",
+                            f"评测进度已到 {last_progress[0]}/{last_progress[1]} 但收尾停滞超过 {progress_timeout}s"
+                            f"（疑似评测收尾卡死，如判分/写结果死锁）",
+                            get_tail(eval_log),
+                        )
+                        return 1
+                    else:
+                        # 生成中停滞 → 慢推理或 runaway，提示但不杀（cap 兜底）
+                        print(f"[WRAPPER] 评测进度在 {last_progress[0]}/{last_progress[1]} 停滞 {progress_timeout}s："
+                              f"单题长推理属正常（慢芯片/长思考链），继续等待；"
+                              f"若为 runaway 复读将由 max_tokens cap 兜底，收尾停滞才会终止")
+                        sys.stdout.flush()
+                        last_progress_time = time.time()
 
             # 4. 服务日志致命信号
             if service_log and elapsed > grace_period:
