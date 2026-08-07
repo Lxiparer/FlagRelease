@@ -19,7 +19,7 @@
 #   本脚本仅做批量调度，分支路由（A/B/native）由 run_pipeline.sh 内部按环境检测
 #   （inspect_env.py 输出的 entry_image_type）自动完成，任务列表无需指定分支。
 #     - gems_tree        → 分支 A（简单：V1裸启动→V2代码注入→V3切plugin→V4减算子→V5）
-#     - gems_tree_plugin → 分支 B（复杂：V1三选→V2(2.1/2.2)→V3(3.1/3.2)→V4→V5）
+#     - gems_tree_plugin → 分支 B（复杂：V1二选→V2→V3→V4→V5）
 #     - native           → native 简化流程（仅评测，不发多版本）
 #   汇总表额外展示每个任务实际走的分支与已产出版本（V1-V5，含 V1 变体/不适配标记），
 #   数据来自 /data/flagos-workspace/<model>/config/context_snapshot.yaml。

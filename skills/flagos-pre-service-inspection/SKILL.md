@@ -141,7 +141,7 @@ docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-worksp
 | entry_image_type | 判定条件 | 路由分支 |
 |------------------|---------|---------|
 | `gems_tree` | flaggems + flagtree，无 plugin | A（简单：V1裸启动→V2代码注入→V3切plugin→V4减算子→V5） |
-| `gems_tree_plugin` | flaggems + flagtree + plugin | B（复杂：V1三选→V2(2.1/2.2)→V3(3.1/3.2)→V4→V5） |
+| `gems_tree_plugin` | flaggems + flagtree + plugin | B（复杂：V1二选→V2→V3→V4→V5） |
 | `native` | 无 flaggems | native（仅评测，不发多版本） |
 
 

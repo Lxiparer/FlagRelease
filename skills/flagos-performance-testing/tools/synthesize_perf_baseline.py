@@ -2,7 +2,7 @@
 """
 synthesize_perf_baseline.py — 无 V1 场景的性能基线合成
 
-当 V1 基线性能完全缺失时（分支 B 三选=none 强依赖 flaggems、或 V1 启动/测试失败），
+当 V1 基线性能完全缺失时（分支 B 二选=none 强依赖 flaggems、或 V1 启动/测试失败），
 以 V2 使能 flaggems 后首次可正常启动状态的性能测试结果 ×1.05 合成性能基线。
 
 设计要点：

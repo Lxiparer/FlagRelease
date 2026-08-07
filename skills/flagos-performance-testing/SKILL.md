@@ -165,7 +165,7 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 
 **前置条件**：关闭 FlagGems，以 native 模式启动服务。
 
-**无 V1 场景（V1 性能基线完全缺失）**：分支 B 三选=none（强依赖 flaggems）或 V1 服务无法启动时，跳过本步骤，改用合成基线（编排层在步骤4之前生成，全芯片统一标准）：
+**无 V1 场景（V1 性能基线完全缺失）**：分支 B 二选=none（强依赖 flaggems）或 V1 服务无法启动时，跳过本步骤，改用合成基线（编排层在步骤4之前生成，全芯片统一标准）：
 
 ```bash
 # 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
