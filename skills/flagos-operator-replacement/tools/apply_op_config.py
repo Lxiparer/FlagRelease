@@ -49,8 +49,8 @@ def generate(mode, oot_blacklist=None, flagos_blacklist=None, flagos_whitelist=N
     生成环境变量字典（仅 plugin 场景使用）。
 
     mode:
-      "native"  -> USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false
-      "full"    -> USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true
+      "native"  -> USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference
+      "full"    -> USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos
       "custom"  -> 按 whitelist/blacklist 自定义（白名单优先）
     """
     if mode not in ("native", "full", "custom"):

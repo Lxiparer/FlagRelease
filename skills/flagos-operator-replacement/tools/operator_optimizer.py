@@ -611,8 +611,8 @@ def get_next_action_oot(state: Dict[str, Any], state_path: Optional[str] = None)
 
             env_vars = {
                 "USE_FLAGGEMS": "1",
-                "VLLM_FL_PREFER_ENABLED": "true",
-                "VLLM_FL_OOT_BLACKLIST": ",".join(oot_blacklist),
+                "SGLANG_FL_PREFER": "flagos",
+                "SGLANG_FL_OOT_BLACKLIST": ",".join(oot_blacklist),
             }
             return {
                 "action": "test_oot_cumulative",
@@ -638,8 +638,8 @@ def get_next_action_oot(state: Dict[str, Any], state_path: Optional[str] = None)
 
     env_vars = {
         "USE_FLAGGEMS": "1",
-        "VLLM_FL_PREFER_ENABLED": "true",
-        "VLLM_FL_OOT_BLACKLIST": current_op,
+        "SGLANG_FL_PREFER": "flagos",
+        "SGLANG_FL_OOT_BLACKLIST": current_op,
     }
 
     return {
@@ -1039,19 +1039,19 @@ def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
     # Plugin 模式：在 action 中附加环境变量信息
     if state.get("plugin_mode") and action.get("action") not in ("completed", "failed", "error"):
         oot_bl = state.get("oot_blacklist", [])
-        env_vars = {"USE_FLAGGEMS": "1", "VLLM_FL_PREFER_ENABLED": "true"}
+        env_vars = {"USE_FLAGGEMS": "1", "SGLANG_FL_PREFER": "flagos"}
         if oot_bl:
-            env_vars["VLLM_FL_OOT_BLACKLIST"] = ",".join(oot_bl)
+            env_vars["SGLANG_FL_OOT_BLACKLIST"] = ",".join(oot_bl)
 
         test_disabled = action.get("test_disabled_ops", [])
         if state.get("use_whitelist"):
             whitelist = _compute_enabled_whitelist(state, test_disabled)
             if whitelist:
-                env_vars["VLLM_FL_FLAGOS_WHITELIST"] = ",".join(whitelist)
+                env_vars["SGLANG_FL_FLAGOS_WHITELIST"] = ",".join(whitelist)
         else:
             blacklist = _compute_full_blacklist(state, test_disabled)
             if blacklist:
-                env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(blacklist)
+                env_vars["SGLANG_FL_FLAGOS_BLACKLIST"] = ",".join(blacklist)
 
         action["env_vars"] = env_vars
         action["env_inline"] = env_to_inline(env_vars)

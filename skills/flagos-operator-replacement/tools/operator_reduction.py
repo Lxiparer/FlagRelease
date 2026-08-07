@@ -172,9 +172,9 @@ def restart_and_wait(service_cmd: str, wait_script: str, port: int = 8000,
                      model_name: str = "", timeout: int = 300,
                      max_timeout: int = 5760) -> bool:
     """重启服务并等待就绪，返回是否成功"""
-    # 用 pkill -9 强杀所有 vllm 及其 worker 进程
+    # 用 pkill -9 强杀所有 sglang 及其 worker 进程
     subprocess.run(
-        "pkill -9 -f 'vllm|multiprocessing.spawn' 2>/dev/null; sleep 3",
+        "pkill -9 -f 'sglang|multiprocessing.spawn' 2>/dev/null; sleep 3",
         shell=True, capture_output=True
     )
     # 等待端口释放
@@ -385,7 +385,7 @@ def run_reduction(
             probed_rounds.append(rec)
             state["probed_rounds"] = probed_rounds
             save_json(state, state_path)
-            subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+            subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
             time.sleep(5)
             continue
 
@@ -398,7 +398,7 @@ def run_reduction(
             probed_rounds.append(rec)
             state["probed_rounds"] = probed_rounds
             save_json(state, state_path)
-            subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+            subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
             time.sleep(5)
             continue
 
@@ -410,7 +410,7 @@ def run_reduction(
         )
         rec["score"] = round(gscore, 2)
         rec["accuracy_ok"] = guard_ok
-        subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+        subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
         time.sleep(5)
         if guard_ok:
             print(f"    ✓ 精度达标 (score={gscore:.1f}%) → 采纳该组合为 V4")
@@ -438,7 +438,7 @@ def run_reduction(
         final_ops = list(start_ops) if start_ops else list(v3_ops)
 
     # 最终配置固化 + 收尾评测
-    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
     time.sleep(5)
     write_control_file(final_ops)
     oplist_path = os.path.join(output_dir, "v4_oplist.txt")
@@ -488,7 +488,7 @@ def run_reduction(
         else:
             print("  ⚠ 缺精度基线（accuracy_baseline<=0），无法进行 V4 精度终检 "
                   "→ 精度状态标记为未验证，编排层需以 NV 基线兜底后重判")
-    subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+    subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
 
     # 达标基准：只要相对优化基线有性能提升即可（不追求超越 V3 绝对值）
     beats_baseline = final_composite > perf_baseline
@@ -673,7 +673,7 @@ def main():
         ok0, o0, t0 = measure_config(start_ops, args.service_startup_cmd, args.wait_script,
                                      args.benchmark_script, args.output_dir, "start_intersection",
                                      port, model_name, args.max_timeout)
-        subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
+        subprocess.run("pkill -f 'sglang' 2>/dev/null", shell=True, capture_output=True)
         time.sleep(5)
         if not ok0:
             print("错误: 起点交集配置服务无法启动，V4 无法确立优化基线")

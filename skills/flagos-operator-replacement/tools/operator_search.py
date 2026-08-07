@@ -87,11 +87,11 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-# 必须同时匹配 EngineCore worker 子进程：vLLM v1 的 worker 进程名是 "VLLM::EngineCore"
-# （大写，且不含 "serve"/"entrypoints"），旧命令只 kill API server，遗漏的 EngineCore
+# sglang 分支：必须同时匹配 API server 与 multiproc_worker 子进程（sglang 的
+# worker 进程名是 "multiproc_worker"，旧命令只 kill API server，遗漏的 worker
 # 会作为孤儿进程继续独占 GPU 显存，导致后续每一轮重启都因显存不足而"崩溃"，
-# 被误判为算子必需。用 -i 大小写不敏感，并显式覆盖 EngineCore。
-SERVICE_STOP_CMD = "pkill -9 -i -f 'vllm.entrypoints|vllm serve|vllm.serve|VLLM::EngineCore|EngineCore'"
+# 被误判为算子必需。
+SERVICE_STOP_CMD = "pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang|multiproc_worker'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 60       # GPU 显存释放等待超时（秒）
@@ -365,7 +365,7 @@ def _apply_plugin_config(action: Dict[str, Any],
 
     if not env_vars:
         print("  WARN: action 无 env_vars 信息，使用 full 模式默认值")
-        env_vars = {"USE_FLAGGEMS": "1", "VLLM_FL_PREFER_ENABLED": "true"}
+        env_vars = {"USE_FLAGGEMS": "1", "SGLANG_FL_PREFER": "flagos"}
 
     # 构建内联字符串
     env_inline = action.get("env_inline", "")
@@ -407,127 +407,8 @@ def _detect_flaggems_capabilities() -> List[str]:
     return caps
 
 
-OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
-FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
 ETC_ENVIRONMENT = "/etc/environment"
-
-
-def _persist_control_mode(control_mode: str):
-    """持久化 FLAGGEMS_CONTROL_MODE + USE_FLAGGEMS 到 /etc/environment
-
-    _apply_via_control_file() 只在 FlagGems 启用路径调用，所以 USE_FLAGGEMS=1 始终正确。
-    同时写入避免中断恢复场景下 /etc/environment 残留 USE_FLAGGEMS=0。
-    """
-    try:
-        existing = ""
-        if os.path.isfile(ETC_ENVIRONMENT):
-            with open(ETC_ENVIRONMENT, 'r', encoding='utf-8') as f:
-                existing = f.read()
-        lines = [l for l in existing.split('\n')
-                 if not l.startswith("FLAGGEMS_CONTROL_MODE=") and not l.startswith("USE_FLAGGEMS=")]
-        lines.append(f"USE_FLAGGEMS=1")
-        lines.append(f"FLAGGEMS_CONTROL_MODE={control_mode}")
-        with open(ETC_ENVIRONMENT, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(l for l in lines if l is not None) + '\n')
-    except Exception as e:
-        print(f"  WARN: 持久化环境变量失败: {e}")
-
-
-def _normalize_ops_for_control_file(ops: List[str]) -> List[str]:
-    """将算子名从大写显示名或 debug 行格式转换为 FlagGems 注册键名（供控制文件使用）"""
-    if not ops:
-        return ops
-    if all(op == op.lower() and ' ' not in op and 'flag_gems' not in op for op in ops):
-        return ops
-    import re
-    # Load FlagGems keys for validation
-    fg_keys = set()
-    try:
-        import flag_gems
-        if hasattr(flag_gems, 'FULL_CONFIG_BY_FUNC'):
-            fg_keys = set(flag_gems.FULL_CONFIG_BY_FUNC.keys())
-    except Exception:
-        pass
-
-    result = []
-    for op in ops:
-        # Handle [DEBUG] flag_gems.ops.X.Y: GEMS Z format
-        m = re.match(r'\[DEBUG\]\s*flag_gems\.ops\.(\w+)\.(\w+):', op, re.IGNORECASE)
-        if m:
-            module_name = m.group(1)
-            func_name = m.group(2)
-            # Try func_name first, then module_name, then prefix match
-            if func_name in fg_keys:
-                result.append(func_name)
-            elif module_name in fg_keys:
-                result.append(module_name)
-            elif fg_keys:
-                pfx = [k for k in fg_keys if k.startswith(func_name)]
-                if pfx:
-                    result.extend(pfx)
-                else:
-                    pfx2 = [k for k in fg_keys if k.startswith(module_name + '_') or k == module_name + '_']
-                    result.extend(pfx2) if pfx2 else result.append(func_name)
-            else:
-                result.append(func_name)
-            continue
-        # Fallback: display name format (e.g., "GEMS ADD", "ADD")
-        s = re.sub(r'\s*\(.*?\)', '', op)
-        s = s.split(',')[0].strip()
-        s = re.sub(r'^GEMS\s+', '', s, flags=re.IGNORECASE)
-        s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
-        s = s.replace('.STABLE', '_stable')
-        s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
-        s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
-        s = s.lower().replace(' ', '_')
-        if s.startswith('_'):
-            s = s[1:]
-        result.append(s)
-    return list(dict.fromkeys(result))
-
-
-def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
-                             control_mode: str) -> bool:
-    """已注入场景：写控制文件 + 设置环境变量，不改源码"""
-    # 将大写显示名转换为小写函数名
-    test_enabled = _normalize_ops_for_control_file(test_enabled)
-    test_disabled = _normalize_ops_for_control_file(test_disabled)
-
-    data = {}
-    if control_mode == "only_enable":
-        data["include"] = sorted(test_enabled)
-        os.environ["FLAGGEMS_CONTROL_MODE"] = "only_enable"
-    else:
-        data["unused"] = sorted(test_disabled)
-        os.environ["FLAGGEMS_CONTROL_MODE"] = "unused"
-
-    # 持久化到 /etc/environment，确保 start_service.sh 启动的新进程能读到
-    _persist_control_mode(control_mode)
-
-    save_json(data, OPS_CONTROL_FILE)
-    print(f"  [env_control] mode={control_mode}, 控制文件: {OPS_CONTROL_FILE}")
-    if control_mode == "only_enable":
-        print(f"    include: {len(test_enabled)} 个算子")
-    else:
-        print(f"    unused: {len(test_disabled)} 个算子")
-    return True
-
-
-def _is_code_injected() -> bool:
-    """检查源码是否已注入环境变量驱动代码"""
-    try:
-        from toggle_flaggems import find_model_runner_files
-        files = find_model_runner_files()
-        for f in files:
-            try:
-                content = Path(f).read_text(encoding="utf-8", errors="ignore")
-                if FLAGGEMS_INJECT_MARKER in content:
-                    return True
-            except Exception:
-                continue
-    except ImportError:
-        pass
-    return False
+# sglang 分支：无代码注入控制文件机制（OPS_CONTROL_FILE / FLAGGEMS_INJECT_MARKER 已废弃）
 
 
 def _apply_non_plugin_config(action: Dict[str, Any],
@@ -535,9 +416,14 @@ def _apply_non_plugin_config(action: Dict[str, Any],
                               gems_txt_path: Optional[str],
                               all_ops: Optional[List[str]] = None,
                               registered_ops: Optional[List[str]] = None) -> bool:
-    """非 plugin 场景：优先使用环境变量驱动（已注入），否则 Layer 1-4 分层降级"""
-    test_enabled = action.get("test_enabled_ops", [])
-    test_disabled = action.get("test_disabled_ops", [])
+    """sglang 分支：无代码注入态，非 plugin 路径（flag_gems 层降级链）不适用。
+
+    正常流程编排层恒传 plugin_mode=True（env 控制）；误走此路径直接拒绝，
+    避免写 yaml/exclude 等 flag_gems 层文件造成无法预期的修改。
+    """
+    print("  ERROR: sglang 分支算子控制仅支持 plugin 路径（SGLANG_FL_* env 控制），"
+          "请以 plugin_mode=True 调用 apply_operator_config")
+    return False
 
     # 已注入环境变量驱动代码 → 只写控制文件
     if _is_code_injected():
@@ -687,7 +573,7 @@ def restart_service(stop_cmd: str, startup_cmd: str,
             break
     else:
         print(f"  WARNING: 端口 {svc_port} 仍被占用，强制 kill...")
-        run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang' 2>/dev/null", check=False)
         time.sleep(5)
     port_wait_elapsed = time.time() - port_wait_start
     if port_wait_elapsed > 5:
@@ -697,12 +583,12 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     required_gpus = _read_gpu_count()
     if not wait_gpu_memory_release(required_free=required_gpus):
         print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
-        run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
+        run_cmd("pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang' 2>/dev/null", check=False)
         time.sleep(5)
         if not wait_gpu_memory_release(timeout=15, required_free=required_gpus):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
-    # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
+    # 启动（后台执行，避免 sglang 等服务进程阻塞脚本）
     # 清除旧启动日志，避免 wait_for_service.sh 误判残留服务
     run_cmd("rm -f /flagos-workspace/logs/startup_flagos.log /flagos-workspace/logs/startup_search.log 2>/dev/null", check=False)
     nohup_log = "/flagos-workspace/logs/startup_search.log"
@@ -876,7 +762,7 @@ def preflight_framework_check(service_startup_cmd: str,
     """
     Plugin 模式搜索前预检：验证 plugin 框架本身是否有性能开销。
 
-    以 USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false 启动服务（禁用所有 FlagGems 算子），
+    以 USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference 启动服务（禁用所有 FlagGems 算子），
     运行 quick benchmark 与 native_throughput 对比。
 
     返回:
@@ -887,7 +773,7 @@ def preflight_framework_check(service_startup_cmd: str,
     print("=" * 60)
 
     # 以 USE_FLAGGEMS=0 启动（完全禁用 FlagGems，仅保留 plugin 框架）
-    env_inline = "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false"
+    env_inline = "USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference"
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
                            env_inline=env_inline, port=svc_port,
@@ -1201,7 +1087,7 @@ def run_full_search(state_path: str, perf_config: str,
             if not gpu_check["available"]:
                 # 尝试清理残留进程
                 print("  尝试清理残留推理进程...")
-                run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
+                run_cmd("pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang' 2>/dev/null", check=False)
                 time.sleep(10)
                 gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
@@ -1278,7 +1164,7 @@ def run_full_search(state_path: str, perf_config: str,
                     search_log[-1]["decision"] = "essential_keep"
                     search_log[-1]["op_name"] = crashed_op
                     # Kill any leftover processes before next round
-                    run_cmd("pkill -9 -i -f 'vllm|EngineCore' 2>/dev/null", check=False)
+                    run_cmd("pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang' 2>/dev/null", check=False)
                     time.sleep(5)
                     continue
             break

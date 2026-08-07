@@ -65,9 +65,9 @@ BACKUP_SUFFIX = ".flaggems_backup"
 
 
 def detect_plugin_mode():
-    """检测是否为 plugin 场景"""
+    """检测是否为 plugin 场景（sglang 分支：sglang_fl 可导入即 plugin）"""
     try:
-        import vllm_fl
+        import sglang_fl
         return True
     except ImportError:
         return False
@@ -78,10 +78,10 @@ def generate_env_vars(action):
     env = {}
     if action == "enable":
         env["USE_FLAGGEMS"] = "1"
-        env["VLLM_FL_PREFER_ENABLED"] = "true"
+        env["SGLANG_FL_PREFER"] = "flagos"
     elif action == "disable":
         env["USE_FLAGGEMS"] = "0"
-        env["VLLM_FL_PREFER_ENABLED"] = "false"
+        env["SGLANG_FL_PREFER"] = "reference"
     return env
 
 
@@ -95,9 +95,9 @@ def find_model_runner_files():
     ]
     # 也通过 Python 路径查找
     try:
-        import vllm
-        vllm_path = Path(vllm.__path__[0])
-        search_dirs.append(str(vllm_path.parent))
+        import sglang_fl
+        sglang_fl_path = Path(sglang_fl.__file__).parent
+        search_dirs.append(str(sglang_fl_path.parent))
     except ImportError:
         pass
     for search_dir in search_dirs:
@@ -668,21 +668,20 @@ def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
     if not files:
         files = find_model_runner_files()
 
-    # plugin 场景守卫（步骤3崩溃恢复等路径）：plugin dispatch 的 worker 只读 VLLM_FL_* env、
-    # 不读控制文件（VLLM_FL_PREFER_ENABLED=true 使注入代码 pass），写控制文件会导致
-    # 禁用不生效、崩溃重试空转。此处改走 blacklist env 持久化（崩溃恢复已知禁用列表，
-    # 黑名单无需全量算子列表）。共享实现见 flagos_op_config（容器内同目录可 import）。
+    # plugin 场景守卫（步骤3崩溃恢复等路径）：sglang 分支无代码注入控制文件机制，
+    # 算子配置统一走 SGLANG_FL_* env。此处改走 blacklist env 持久化（崩溃恢复已知
+    # 禁用列表，黑名单无需全量算子列表）。共享实现见 flagos_op_config（容器内同目录可 import）。
     if disabled_ops and detect_plugin_mode():
         try:
             from flagos_op_config import persist_env, clear_env
             merged = set(normalize_ops_to_func_names(disabled_ops))
-            existing = os.environ.get("VLLM_FL_FLAGOS_BLACKLIST", "")
+            existing = os.environ.get("SGLANG_FL_FLAGOS_BLACKLIST", "")
             merged |= {op for op in existing.split(",") if op}
-            clear_env("VLLM_FL_FLAGOS_WHITELIST")  # 黑名单生效需清除冲突的白名单
+            clear_env("SGLANG_FL_FLAGOS_WHITELIST")  # 黑名单生效需清除冲突的白名单
             persist_env("USE_FLAGGEMS", "1")
-            persist_env("VLLM_FL_PREFER_ENABLED", "true")
-            persist_env("VLLM_FL_FLAGOS_BLACKLIST", ",".join(sorted(merged)))
-            print(f"  [plugin] 禁用算子经 VLLM_FL_FLAGOS_BLACKLIST 持久化: {sorted(merged)}")
+            persist_env("SGLANG_FL_PREFER", "flagos")
+            persist_env("SGLANG_FL_FLAGOS_BLACKLIST", ",".join(sorted(merged)))
+            print(f"  [plugin] 禁用算子经 SGLANG_FL_FLAGOS_BLACKLIST 持久化: {sorted(merged)}")
             return {
                 "action": "modify-enable",
                 "capabilities": caps,
@@ -964,13 +963,13 @@ def main():
 
     if is_plugin and args.action == "status":
         # Plugin 模式下检查环境变量
-        prefer = os.environ.get("VLLM_FL_PREFER_ENABLED", "not_set")
+        prefer = os.environ.get("SGLANG_FL_PREFER", "not_set")
         use_flaggems = os.environ.get("USE_FLAGGEMS", "not_set")
         result = {
             "mode": "plugin",
             "USE_FLAGGEMS": use_flaggems,
-            "VLLM_FL_PREFER_ENABLED": prefer,
-            "status": "enabled" if prefer == "true" else ("disabled" if prefer == "false" else "unknown"),
+            "SGLANG_FL_PREFER": prefer,
+            "status": "enabled" if prefer in ("flagos", "vendor") else ("disabled" if prefer == "reference" else "unknown"),
         }
         if args.json:
             print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -978,7 +977,7 @@ def main():
             print(f"\nFlagGems Toggle — status (Plugin 模式)")
             print("=" * 50)
             print(f"  USE_FLAGGEMS: {use_flaggems}")
-            print(f"  VLLM_FL_PREFER_ENABLED: {prefer}")
+            print(f"  SGLANG_FL_PREFER: {prefer}")
         return
 
     # 非 plugin 模式

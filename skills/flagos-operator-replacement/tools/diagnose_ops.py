@@ -53,12 +53,11 @@ from ops_constants import OOT_OPERATORS, OPERATOR_GROUPS
 # 场景 1：崩溃日志解析
 # =============================================================================
 
-# vLLM 日志前缀清理：
-#   完整格式: (EngineCore pid=711) ERROR 04-23 03:21:46 [core.py:1108] ...
-#   简短格式: (APIServer pid=331) RuntimeError: ...
-VLLM_PREFIX_RE = re.compile(
-    r'^\([^)]+\)\s+'
-    r'(?:(?:ERROR|INFO|WARNING)\s+\S+\s+\S+\s+\[\S+\] ?)?'
+# sglang 日志前缀清理：
+#   完整格式: [2026-08-07 08:27:05 TP2] Load weight begin. ...
+#   简短格式: [rank0]:[W807 08:30:39 ...] Warning: ...
+SGLANG_PREFIX_RE = re.compile(
+    r'^\[[^]]+\](?::\[[^]]+\])?\s*'
 )
 
 # 已知错误模式（对应 SKILL.md 5 个已知模式 + 扩展）
@@ -157,8 +156,11 @@ OP_EXTRACT_PATTERNS_TRUSTED = [
     re.compile(r"flag_gems.*?(?:backend|runtime).*?[/.](\w+)\.py"),
     # File "xxx/flag_gems/xxx/softmax.py"
     re.compile(r'File\s+"[^"]*flag_gems[^"]*?/(\w+)\.py"'),
-    # vllm_fl.ops.oot.xxx
-    re.compile(r"vllm_fl[./]ops[./](?:oot[./])?(\w+)"),
+    # sglang_fl.dispatch.bridge.xxx / sglang_fl.dispatch.manager.xxx
+    re.compile(r"sglang_fl[./]dispatch[./](?:\w+[./])?(\w+)"),
+    # [DISPATCH] Op 'xxx' -> 'vendor.ascend' / Op 'xxx' using 'vendor.ascend'
+    re.compile(r"\[DISPATCH\]\s+Op\s+'(\w+)'"),
+    re.compile(r"Op\s+'(\w+)'\s+using\s+'[^']+'"),
 ]
 
 OP_EXTRACT_PATTERNS_HEURISTIC = [
@@ -275,14 +277,14 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
 
     log_lines = log_content.split("\n")
 
-    # 提取 traceback 块（支持 vLLM 带前缀的日志格式）
+    # 提取 traceback 块（支持 sglang 带前缀的日志格式）
     # RuntimeError 的多行内容也纳入 traceback 块
     traceback_blocks = []
     current_tb = []
     in_traceback = False
     in_error_body = False
     for i, line in enumerate(log_lines):
-        stripped = VLLM_PREFIX_RE.sub('', line)
+        stripped = SGLANG_PREFIX_RE.sub('', line)
         is_tb_start = "Traceback" in stripped and "most recent call" in stripped.lower()
         # 新 traceback 开始时，先保存当前块
         if is_tb_start:
@@ -345,7 +347,7 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
 
     # 也扫描非 traceback 区域的单行错误
     for i, line in enumerate(log_lines):
-        stripped = VLLM_PREFIX_RE.sub('', line)
+        stripped = SGLANG_PREFIX_RE.sub('', line)
         for cp in CRASH_PATTERNS:
             if cp["pattern"].search(stripped):
                 ops_found = extract_ops_from_text(stripped, known_ops)
@@ -567,10 +569,8 @@ def generate_accuracy_groups(
     # 基线 = 全量启用（即步骤4的 V2 配置，已有精度数据）
     baseline_env = {
         "USE_FLAGGEMS": "1",
-        "VLLM_FL_PREFER_ENABLED": "true",
+        "SGLANG_FL_PREFER": "flagos",
     }
-
-    OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
 
     return {
         "total_ops": len(all_ops),
@@ -579,7 +579,7 @@ def generate_accuracy_groups(
         "dropped_count": len(dropped),
         "other_fuse_warning": other_warning,
         "baseline_env": baseline_env,
-        "baseline_env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
+        "baseline_env_inline": "USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos",
         "test_procedure": (
             "1. baseline: 全量启用（V2 配置）→ 已有步骤4的 V2 精度数据\n"
             "2. 逐组累积禁用: 第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C → 每轮 fast_gpqa.py 评测\n"
@@ -587,13 +587,11 @@ def generate_accuracy_groups(
             "4. 问题组内逐个算子排查（可选，缩小禁用范围）"
         ),
         "apply_method": (
-            "plugin 场景（本工具 plugin_mode=True）：每轮使用 cumulative_test_env.env_inline "
-            "（含 VLLM_FL_FLAGOS_BLACKLIST/VLLM_FL_OOT_BLACKLIST）作为启动命令内联前缀重启服务，"
+            "sglang 分支：每轮使用 cumulative_test_env.env_inline "
+            "（含 SGLANG_FL_FLAGOS_BLACKLIST/SGLANG_FL_OOT_BLACKLIST）作为启动命令内联前缀重启服务，"
             "与性能调优 operator_search.py 走相同的 env_inline 路径。"
-            "**禁止写控制文件**：plugin 下 VLLM_FL_PREFER_ENABLED=true 使控制文件完全无效，写它会导致调优空转。"
-            f"非 plugin 场景才使用 cumulative_test_env.control_file 写入 {OPS_CONTROL_FILE} + FLAGGEMS_CONTROL_MODE=only_enable。"
+            "无代码注入控制文件机制（FLAGGEMS_CONTROL_MODE 不适用），算子配置统一走 SGLANG_FL_* env。"
         ),
-        "control_file_path": OPS_CONTROL_FILE,
     }
 
 
@@ -658,7 +656,7 @@ def run_profile(
 ) -> Dict[str, Any]:
     """通过 torch.profiler 采集算子级耗时，定位性能热点
 
-    方案：设置 VLLM_TORCH_PROFILER_DIR 后重启服务，
+    方案：设置 SGLANG_TORCH_PROFILER_DIR 后重启服务，
     发送请求触发 profiling，然后解析 trace 文件。
     如果 profiler 不可用，fallback 到请求级延迟对比。
     """
@@ -695,7 +693,7 @@ def run_profile(
             with open(baseline_log, "r") as f:
                 baseline = json.load(f)
             result["method"] = "baseline_comparison"
-            result["note"] = "无法采集 profiler 数据，需配合 VLLM_TORCH_PROFILER_DIR 使用"
+            result["note"] = "无法采集 profiler 数据，需配合 SGLANG_TORCH_PROFILER_DIR 使用"
             return result
         except (json.JSONDecodeError, OSError):
             pass
@@ -703,7 +701,7 @@ def run_profile(
     # 方案 D：Fallback — 提供配置指引
     result["method"] = "manual_setup_required"
     result["setup_instructions"] = {
-        "step1": "设置环境变量 VLLM_TORCH_PROFILER_DIR=/flagos-workspace/traces/profiler",
+        "step1": "设置环境变量 SGLANG_TORCH_PROFILER_DIR=/flagos-workspace/traces/profiler",
         "step2": "重启服务",
         "step3": "发送少量请求触发 profiling",
         "step4": f"重新运行: python3 diagnose_ops.py profile --profiler-dir /flagos-workspace/traces/profiler --port {port} --model-name {model_name}",
@@ -816,7 +814,7 @@ def _collect_with_torch_profiler(
         req = urllib.request.Request(f"{base_url}/start_profile", method="POST")
         urllib.request.urlopen(req, timeout=5)
     except Exception:
-        raise RuntimeError("服务不支持 /start_profile API，需手动配置 VLLM_TORCH_PROFILER_DIR")
+        raise RuntimeError("服务不支持 /start_profile API，需手动配置 SGLANG_TORCH_PROFILER_DIR")
 
     # 发送请求
     for i in range(num_requests):
@@ -849,7 +847,7 @@ def _collect_with_torch_profiler(
         return _parse_profiler_traces(default_dir)
 
     # 尝试其他常见路径
-    for d in ["/tmp/vllm_profile", "/tmp/profile", "/root/profile"]:
+    for d in ["/tmp/sglang_profile", "/tmp/profile", "/root/profile"]:
         if os.path.isdir(d):
             return _parse_profiler_traces(d)
 

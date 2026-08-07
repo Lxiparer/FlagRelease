@@ -21,16 +21,14 @@ persist_op_config.py — 算子配置固化工具
 镜像拉下来直接启动服务即为最终达标的算子配置。
 
 固化方式（按 env_type 自动选择）：
-- vllm_flaggems：修改源码中 flag_gems.enable() 调用，写入最终算子列表
-- vllm_plugin_flaggems：将环境变量持久化到 /etc/environment + /root/.bashrc
+- sglang_plugin_flaggems：将 SGLANG_FL_* 环境变量持久化到 /etc/environment + /root/.bashrc
 
 两种场景都在 /root/flaggems_op_config.json 记录修改详情。
 
 Usage:
     python persist_op_config.py --auto
     python persist_op_config.py --auto --verify
-    python persist_op_config.py --env-type vllm_plugin_flaggems
-    python persist_op_config.py --env-type vllm_flaggems --disabled-ops fused_moe,softmax
+    python persist_op_config.py --env-type sglang_plugin_flaggems
 """
 
 import argparse
@@ -113,6 +111,24 @@ def read_runtime_oplist():
                 return ops, path
             except Exception:
                 continue
+
+    # sglang 分支：无 txt 机制，从服务日志 [GEMS] 行提取运行时算子列表
+    for log_path in ["/flagos-workspace/logs/startup_flagos.log",
+                     "/flagos-workspace/logs/startup_default.log",
+                     "/flagos-workspace/logs/startup_native.log"]:
+        if os.path.isfile(log_path):
+            try:
+                ops = []
+                with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        m = re.search(r"\[GEMS\]\s+(\S+)", line)
+                        if m:
+                            ops.append(m.group(1))
+                if ops:
+                    print(f"  运行时算子列表(日志 [GEMS]): {log_path} ({len(ops)} 个)")
+                    return ops, log_path
+            except Exception:
+                continue
     return None, None
 
 
@@ -151,218 +167,8 @@ def get_excluded_ops_from_context():
 
 
 # =========================================================================
-# 非 Plugin 场景：修改源码
+# sglang 分支：无代码注入/控制文件机制，算子配置统一 SGLANG_FL_* env 固化
 # =========================================================================
-
-OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
-FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
-
-
-def _normalize_ops_for_persist(ops):
-    """将算子名从大写显示名转换为小写函数名"""
-    if not ops:
-        return ops
-    if all(op == op.lower() and ' ' not in op for op in ops):
-        return ops
-    try:
-        from toggle_flaggems import normalize_ops_to_func_names
-        return normalize_ops_to_func_names(ops)
-    except ImportError:
-        result = []
-        for op in ops:
-            s = re.sub(r'\s*\(.*?\)', '', op)
-            s = s.split(',')[0].strip()
-            s = re.sub(r'-hopper$', '', s, flags=re.IGNORECASE)
-            s = s.replace('.STABLE', '_stable')
-            s = re.sub(r'\s+FORWARD$', '', s, flags=re.IGNORECASE)
-            s = re.sub(r'\s+BACKWARD$', '', s, flags=re.IGNORECASE)
-            s = s.lower().replace(' ', '_')
-            if s.startswith('_'):
-                s = s[1:]
-            result.append(s)
-        return result
-
-
-def _is_code_injected():
-    """检查源码是否已注入环境变量驱动代码"""
-    try:
-        from toggle_flaggems import find_model_runner_files
-    except ImportError:
-        sys.path.insert(0, "/flagos-workspace/scripts")
-        from toggle_flaggems import find_model_runner_files
-    files = find_model_runner_files()
-    for f in files:
-        try:
-            content = Path(f).read_text(encoding='utf-8', errors='ignore')
-            if FLAGGEMS_INJECT_MARKER in content:
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _persist_control_file_and_env(disabled_ops, enabled_ops):
-    """已注入场景：持久化控制文件和环境变量"""
-    print("\n[环境变量驱动固化] 持久化控制文件和环境变量...")
-
-    # 将大写显示名转换为小写函数名
-    enabled_ops = _normalize_ops_for_persist(enabled_ops)
-    disabled_ops = _normalize_ops_for_persist(disabled_ops)
-
-    # 确定 control_mode：有禁用算子 → only_enable（白名单）；全开 → unused
-    if disabled_ops:
-        control_mode = "only_enable"
-        data = {"include": sorted(enabled_ops) if enabled_ops else []}
-    else:
-        control_mode = "unused"
-        data = {"unused": []}
-
-    # 写入控制文件
-    Path(OPS_CONTROL_FILE).parent.mkdir(parents=True, exist_ok=True)
-    with open(OPS_CONTROL_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"  ✓ 控制文件: {OPS_CONTROL_FILE} (mode={control_mode})")
-
-    # 持久化环境变量到 /etc/environment + /root/.bashrc
-    env_vars = {
-        "USE_FLAGGEMS": "1",
-        "FLAGGEMS_CONTROL_MODE": control_mode,
-    }
-    if disabled_ops:
-        # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
-        disabled_ops_expanded = expand_operator_variants(disabled_ops)
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
-    env_files = []
-
-    try:
-        existing = ""
-        if os.path.isfile(ETC_ENVIRONMENT):
-            with open(ETC_ENVIRONMENT, 'r', encoding='utf-8') as f:
-                existing = f.read()
-        lines = [l for l in existing.split('\n')
-                 if not any(l.startswith(k + "=") for k in env_vars)]
-        for k, v in env_vars.items():
-            lines.append(f"{k}={v}")
-        with open(ETC_ENVIRONMENT, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(l for l in lines if l is not None) + '\n')
-        env_files.append(ETC_ENVIRONMENT)
-        print(f"  ✓ {ETC_ENVIRONMENT} 已更新")
-    except Exception as e:
-        print(f"  WARN: 写入 {ETC_ENVIRONMENT} 失败: {e}")
-
-    try:
-        existing = ""
-        if os.path.isfile(BASHRC):
-            with open(BASHRC, 'r', encoding='utf-8') as f:
-                existing = f.read()
-        if FLAGGEMS_BASHRC_MARKER in existing:
-            pattern = re.compile(
-                re.escape(FLAGGEMS_BASHRC_MARKER) + r".*?" + re.escape(FLAGGEMS_BASHRC_END),
-                re.DOTALL
-            )
-            existing = pattern.sub("", existing).strip()
-        block = f"\n{FLAGGEMS_BASHRC_MARKER}\n"
-        for k, v in env_vars.items():
-            block += f"export {k}={v}\n"
-        block += f"{FLAGGEMS_BASHRC_END}\n"
-        with open(BASHRC, 'w', encoding='utf-8') as f:
-            f.write(existing + block)
-        env_files.append(BASHRC)
-        print(f"  ✓ {BASHRC} 已更新")
-    except Exception as e:
-        print(f"  WARN: 写入 {BASHRC} 失败: {e}")
-
-    yaml_path = _persist_yaml_config(disabled_ops) if disabled_ops else None
-
-    return {
-        "success": len(env_files) > 0,
-        "method": "env_control_persist",
-        "control_mode": control_mode,
-        "control_file": OPS_CONTROL_FILE,
-        "env_vars": env_vars,
-        "env_files": env_files,
-        "yaml_config": yaml_path,
-    }
-
-
-def persist_source_code(disabled_ops, enabled_ops):
-    """固化算子配置到源码（或环境变量驱动模式）"""
-
-    # 已注入环境变量驱动代码 → 持久化控制文件和环境变量
-    if _is_code_injected():
-        return _persist_control_file_and_env(disabled_ops, enabled_ops)
-
-    # 未注入 → 原有源码修改逻辑
-    print("\n[源码固化] 修改 flag_gems.enable() 调用...")
-
-    try:
-        from toggle_flaggems import modify_enable_call, find_model_runner_files, analyze_flaggems_code
-    except ImportError:
-        sys.path.insert(0, "/flagos-workspace/scripts")
-        from toggle_flaggems import modify_enable_call, find_model_runner_files, analyze_flaggems_code
-
-    files = find_model_runner_files()
-    if not files:
-        print("  ERROR: 未找到包含 flag_gems 的源码文件")
-        return {"success": False, "error": "no_source_files"}
-
-    print(f"  找到 {len(files)} 个包含 flag_gems 的文件")
-
-    # 记录修改前的内容
-    before_states = {}
-    enable_pattern = re.compile(r"flag_gems\.\w*enable\w*\s*\(")
-    for f in files:
-        try:
-            content = Path(f).read_text(encoding='utf-8', errors='ignore')
-            for i, line in enumerate(content.split('\n'), 1):
-                if enable_pattern.search(line):
-                    before_states[f] = {"line": i, "content": line.strip()}
-                    break
-        except Exception:
-            pass
-
-    result = modify_enable_call(
-        files,
-        enabled_ops=enabled_ops if enabled_ops else None,
-        disabled_ops=disabled_ops,
-    )
-
-    modified_files = []
-    for r in result.get("results", []):
-        entry = {
-            "path": r.get("file", ""),
-            "method": r.get("method", "unknown"),
-            "success": r.get("success", False),
-        }
-        if r.get("backup"):
-            entry["backup"] = r["backup"]
-        before = before_states.get(r.get("file", ""))
-        if before:
-            entry["before"] = before["content"]
-        # 读取修改后的内容
-        try:
-            content = Path(r["file"]).read_text(encoding='utf-8', errors='ignore')
-            for line in content.split('\n'):
-                if enable_pattern.search(line):
-                    entry["after"] = line.strip()
-                    break
-        except Exception:
-            pass
-        modified_files.append(entry)
-        status = "✓" if r.get("success") else "✗"
-        print(f"  {status} {r.get('file', '?')} → {r.get('method', '?')}")
-
-    # 同时尝试 Layer 1 yaml 固化
-    yaml_path = _persist_yaml_config(disabled_ops)
-
-    success = any(r.get("success") for r in result.get("results", []))
-    return {
-        "success": success,
-        "method": "source_code_modify",
-        "modified_files": modified_files,
-        "yaml_config": yaml_path,
-        "capabilities": result.get("capabilities", []),
-    }
 
 
 def _persist_yaml_config(disabled_ops):
@@ -408,15 +214,15 @@ def persist_env_vars(disabled_ops):
 
     env_vars = {
         "USE_FLAGGEMS": "1",
-        "VLLM_FL_PREFER_ENABLED": "true",
-        # V3 起 plugin 状态推进为 fl：覆盖 V1 三选固化的厂商插件/空值，
-        # start_service.sh 未显式传 --vllm-plugins 时继承此值
-        "VLLM_PLUGINS": "fl",
+        "SGLANG_FL_PREFER": "flagos",
+        # sglang 分支：插件经 entry_points 自动加载；显式指定 SGLANG_PLUGINS
+        # 用于多插件过滤与基线纯净场景（start_service.sh 未显式传 --sglang-plugins 时继承此值）
+        "SGLANG_PLUGINS": "sglang_fl",
     }
     if disabled_ops:
         # 自动展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
         disabled_ops_expanded = expand_operator_variants(disabled_ops)
-        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
+        env_vars["SGLANG_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops_expanded))
 
     env_files = []
 
@@ -524,7 +330,7 @@ def verify_config(expected_count):
 
     # 停止服务
     print("  停止服务...")
-    subprocess.run("pkill -f 'vllm' 2>/dev/null",
+    subprocess.run("pkill -f 'sglang' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     time.sleep(5)
 
@@ -566,7 +372,7 @@ def verify_config(expected_count):
         verified, count = False, actual_count
 
     # 停止服务释放 GPU
-    subprocess.run("pkill -f 'vllm' 2>/dev/null",
+    subprocess.run("pkill -f 'sglang' 2>/dev/null",
                     shell=True, capture_output=True, timeout=10)
     return verified, count
 
@@ -626,15 +432,8 @@ def run_persist(env_type=None, disabled_ops_override=None, do_verify=False):
     if disabled_ops:
         print(f"  禁用列表: {', '.join(sorted(disabled_ops))}")
 
-    # 3. 根据场景执行固化
-    if env_type == "vllm_plugin_flaggems":
-        persist_result = persist_env_vars(disabled_ops)
-    elif env_type == "vllm_flaggems":
-        persist_result = persist_source_code(disabled_ops, enabled_ops)
-    else:
-        # 未知场景，两种都尝试
-        print(f"  WARN: 未知 env_type={env_type}，尝试源码修改")
-        persist_result = persist_source_code(disabled_ops, enabled_ops)
+    # 3. 根据场景执行固化（sglang 分支：统一 env 固化）
+    persist_result = persist_env_vars(disabled_ops)
 
     if not persist_result.get("success"):
         print("\n  ✗ 配置固化失败")
@@ -672,7 +471,7 @@ def main():
     parser = argparse.ArgumentParser(description="算子配置固化工具")
     parser.add_argument("--auto", action="store_true",
                         help="自动检测场景并固化")
-    parser.add_argument("--env-type", choices=["vllm_flaggems", "vllm_plugin_flaggems", "native"],
+    parser.add_argument("--env-type", choices=["sglang_plugin_flaggems", "native"],
                         help="指定场景（不指定则从 context.yaml 读取）")
     parser.add_argument("--disabled-ops",
                         help="禁用算子列表（逗号分隔，不指定则从 context/config 读取）")

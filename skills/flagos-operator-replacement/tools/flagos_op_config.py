@@ -6,7 +6,7 @@ flagos_op_config.py — 算子配置应用的统一共享模块（半程收敛�
 toggle_flaggems 中的重复实现，作为唯一权威来源：
 
   1. env 构建与内联字符串：build_op_env() / env_to_inline()
-  2. 双路应用（plugin→WHITELIST env / 非plugin→控制文件）：write_op_config()
+  2. 应用并持久化（SGLANG_FL_* WHITELIST env）：write_op_config()
   3. 环境探测与持久化 helper：is_plugin_env() / persist_env() / clear_env() / env_has()
 
 设计边界（半程收敛，刻意不做）：
@@ -14,10 +14,9 @@ toggle_flaggems 中的重复实现，作为唯一权威来源：
     （该链路已经正确且经真机验证，动它是负收益，见 unified-op-config-refactor-plan）
   - 不统一三份 restart 实现，仅供 write/env 侧复用
 
-判定基准（CLAUDE.md 约束26）：
-  - plugin 场景（VLLM_FL_PREFER_ENABLED=true）：worker 只读 VLLM_FL_* env，
-    控制文件 /root/flaggems_ops_control.json 完全无效，必须写 WHITELIST/BLACKLIST env
-  - 非 plugin 场景：控制文件 + FLAGGEMS_CONTROL_MODE 是正确抓手
+判定基准（sglang 分支）：
+  - 无代码注入控制文件（FLAGGEMS_CONTROL_MODE / /root/flaggems_ops_control.json 均不适用），
+    算子控制统一走 SGLANG_FL_* env（WHITELIST/BLACKLIST/PREFER）
 
 部署：由 setup_workspace.sh 的 SCRIPT_MAP 部署到容器 /flagos-workspace/scripts/，
 同级工具通过 `from flagos_op_config import ...` 引用（扁平目录 import，已有先例）。
@@ -39,7 +38,7 @@ def expand_operator_variants(ops: List[str]) -> List[str]:
     """展开算子变体（addmm → addmm + addmm_out + addmm_dtype + addmm_dtype_out）
 
     Memory 教训（flaggems-blacklist-variant-matching）：
-    plugin 模式 VLLM_FL_FLAGOS_BLACKLIST 按函数 __name__ 精确匹配，
+    plugin 模式 SGLANG_FL_FLAGOS_BLACKLIST 按函数 __name__ 精确匹配，
     禁 addmm 只禁 base 变体，实际 dispatch 的 addmm_out 仍启用 → 调优空转。
 
     必须在调优阶段就展开变体，让测试配置与固化配置一致，避免：
@@ -112,8 +111,8 @@ def build_op_env(mode: str = "custom",
     """构建 plugin 场景的算子控制 env dict（唯一实现）。
 
     mode:
-      "native" -> USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false（全关）
-      "full"   -> USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true（全量）
+      "native" -> USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference（全关，参考实现）
+      "full"   -> USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos（全量）
       "custom" -> 白名单优先（enabled_ops→WHITELIST），否则黑名单（disabled_ops→BLACKLIST）
 
     expand_variants: 是否自动展开算子变体（默认 True）
@@ -125,30 +124,30 @@ def build_op_env(mode: str = "custom",
     env: Dict[str, str] = {}
     if mode == "native":
         env["USE_FLAGGEMS"] = "0"
-        env["VLLM_FL_PREFER_ENABLED"] = "false"
+        env["SGLANG_FL_PREFER"] = "reference"
         return env
     if mode == "full":
         env["USE_FLAGGEMS"] = "1"
-        env["VLLM_FL_PREFER_ENABLED"] = "true"
+        env["SGLANG_FL_PREFER"] = "flagos"
         return env
     # custom
     env["USE_FLAGGEMS"] = "1"
-    env["VLLM_FL_PREFER_ENABLED"] = "true"
+    env["SGLANG_FL_PREFER"] = "flagos"
     if oot_blacklist:
         if expand_variants:
             oot_blacklist = expand_operator_variants(oot_blacklist)
-        env["VLLM_FL_OOT_BLACKLIST"] = ",".join(sorted(oot_blacklist))
+        env["SGLANG_FL_OOT_BLACKLIST"] = ",".join(sorted(oot_blacklist))
     if enabled_ops:
         # 白名单优先
         if expand_variants:
             enabled_ops = expand_operator_variants(enabled_ops)
-        env["VLLM_FL_FLAGOS_WHITELIST"] = ",".join(sorted(enabled_ops))
+        env["SGLANG_FL_FLAGOS_WHITELIST"] = ",".join(sorted(enabled_ops))
     elif disabled_ops:
         if expand_variants:
             disabled_ops = expand_operator_variants(disabled_ops)
-        env["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+        env["SGLANG_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
     if per_op:
-        env["VLLM_FL_PER_OP"] = per_op
+        env["SGLANG_FL_PER_OP"] = per_op
     return env
 
 
@@ -165,8 +164,8 @@ def env_has(key: str) -> bool:
 
 
 def is_plugin_env() -> bool:
-    """判断当前是否为 plugin 控制环境（进程 env 或 /etc/environment 有 VLLM_FL_PREFER_ENABLED）"""
-    return os.environ.get("VLLM_FL_PREFER_ENABLED") == "true" or env_has("VLLM_FL_PREFER_ENABLED")
+    """sglang 分支：算子控制统一走 SGLANG_FL_* env，无控制文件场景 → 恒真"""
+    return True
 
 
 def persist_env(key: str, value: str):
@@ -203,7 +202,7 @@ def load_etc_environment():
             key, _, val = line.partition('=')
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            if key.startswith(('USE_FLAGGEMS', 'FLAGGEMS_', 'VLLM_FL_')):
+            if key.startswith(('USE_FLAGGEMS', 'FLAGGEMS_', 'SGLANG_FL_', 'SGLANG_PLUGINS')):
                 os.environ[key] = val
 
 
@@ -213,30 +212,19 @@ def load_etc_environment():
 
 def write_op_config(enabled_ops: List[str],
                     control_file: str = DEFAULT_CONTROL_FILE) -> str:
-    """按环境类型应用算子白名单配置并持久化，供 start_service.sh 重启后生效。
+    """应用算子白名单配置并持久化到 /etc/environment，供 start_service.sh 重启后生效。
 
-    plugin 环境：写 VLLM_FL_FLAGOS_WHITELIST 到 /etc/environment（清除冲突的 BLACKLIST）；
-                enabled_ops 为空时 USE_FLAGGEMS=0（plugin 仍可独立运行）。
-                ⚠ 不写控制文件——plugin 下 VLLM_FL_PREFER_ENABLED=true 使控制文件完全无效，
-                误写会导致算子调整静默不生效（历史 bug：v5-operator-expansion-whitelist-bug）。
-    非 plugin 环境：写控制文件 {"include": [...]} + FLAGGEMS_CONTROL_MODE=only_enable。
+    sglang 分支：无控制文件机制（FLAGGEMS_CONTROL_MODE 不适用），统一走
+    SGLANG_FL_FLAGOS_WHITELIST env。enabled_ops 为空时 USE_FLAGGEMS=0（全关）。
 
-    返回所走路径: "plugin_env" | "control_file"
+    返回所走路径: "plugin_env"
     """
-    if is_plugin_env():
-        clear_env("VLLM_FL_FLAGOS_BLACKLIST")
-        if enabled_ops:
-            persist_env("USE_FLAGGEMS", "1")
-            persist_env("VLLM_FL_FLAGOS_WHITELIST", ",".join(sorted(enabled_ops)))
-        else:
-            persist_env("USE_FLAGGEMS", "0")
-            persist_env("VLLM_FL_FLAGOS_WHITELIST", "")
-        persist_env("VLLM_FL_PREFER_ENABLED", "true")
-        return "plugin_env"
-    # 非 plugin：控制文件
-    persist_env("USE_FLAGGEMS", "1")
-    os.makedirs(os.path.dirname(control_file), exist_ok=True)
-    with open(control_file, 'w') as f:
-        json.dump({"include": sorted(enabled_ops)}, f, indent=2, ensure_ascii=False)
-    persist_env("FLAGGEMS_CONTROL_MODE", "only_enable")
-    return "control_file"
+    clear_env("SGLANG_FL_FLAGOS_BLACKLIST")
+    if enabled_ops:
+        persist_env("USE_FLAGGEMS", "1")
+        persist_env("SGLANG_FL_FLAGOS_WHITELIST", ",".join(sorted(enabled_ops)))
+        persist_env("SGLANG_FL_PREFER", "flagos")
+    else:
+        persist_env("USE_FLAGGEMS", "0")
+        persist_env("SGLANG_FL_FLAGOS_WHITELIST", "")
+    return "plugin_env"
