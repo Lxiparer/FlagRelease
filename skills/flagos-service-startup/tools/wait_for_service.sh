@@ -176,7 +176,7 @@ FATAL = [
     (re.compile(r'(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b', re.I), 'oom'),
     (re.compile(r'CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image is available', re.I), 'cuda_error'),
     (re.compile(r'Segmentation fault|SIGSEGV|SIGKILL', re.I), 'segfault'),
-    (re.compile(r'Killed\s+.*(?:vllm|sglang)|killed by signal', re.I), 'killed'),
+    (re.compile(r'Killed\s+.*(?:sglang)|killed by signal', re.I), 'killed'),
     (re.compile(r'Address already in use', re.I), 'port_conflict'),
     (re.compile(r'ModuleNotFoundError|ImportError:\s', re.I), 'import_error'),
     (re.compile(r'OSError.*(?:model|tokenizer).*not found|Cannot load model', re.I), 'model_not_found'),
@@ -219,7 +219,7 @@ for line in lines:
     # 注意：本段整体嵌在外层 python3 -c 的双引号内，此处务必用单引号；
     # 用内层双引号会提前闭合外层引号，使 bash 传给 python 的代码损坏、
     # NameError 非零退出，analyze_new_lines 走兜底分支导致进度信号恒丢失。
-    if 'vllm._C' in s or 'Failed to import from vllm._C' in s:
+    if 'sglang._C' in s or 'Failed to import from sglang._C' in s:
         continue
 
     # 致命信号
@@ -428,7 +428,7 @@ print_failure_diagnostics() {
     # 检查进程
     echo ""
     echo "进程状态:"
-    ps -ef | grep -E "vllm|flagscale|sglang" | grep -v grep || echo "  无相关进程"
+    ps -ef | grep -E "sglang" | grep -v grep || echo "  无相关进程"
 
     # 检查端口
     echo ""
@@ -632,10 +632,12 @@ except:
             # 残留服务检测：端口响应但本次启动无任何证据时才视为可疑。
             # 关键修正：区分"真残留"与"服务已起但日志无 service_ready 短语"。
             #   - 真残留 = 旧进程占端口、本次根本没有新服务启动 → PHASES_OBSERVED 为空（无任何进度信号）
-            #   - 国产厂商 vLLM 分支（vllm-ascend/寒武纪/海光等）或 vLLM+plugin 的 V1.3 常见情况 =
+            #   - 厂商定制分支常见情况（无标准就绪短语）=
             #     服务确实起来了（端口能响应、观测到 loading_weights/gpu_initialized/port_bound 等进度），
-            #     只是就绪日志短语与原生 vLLM 的 "Application startup complete" 不同，抓不到 service_ready。
+            #     只是就绪日志短语与原生框架的 "Application startup complete" 不同，抓不到 service_ready。
             # 因此：只要本次观测到任何 PROGRESS 信号（PHASES_OBSERVED 非空），端口响应即视为新服务就绪，放行。
+            # sglang 特例：/health 返回 503 时（CHECK 1.5）权威语义为"模型仍在加载"，
+            # 即使 /v1/models 已注册模型列表也必须继续等待，禁止放行（见下方 503 守卫）。
             if [ "$LOG_CONFIRMED_READY" = false ] && [ "$HEALTH_READY" != "true" ] && [ "$DYNAMIC_MODE" = true ] && [ -z "$PHASES_OBSERVED" ]; then
                 STALE_COUNT=$((STALE_COUNT + 1))
                 if [ "$STALE_COUNT" -ge 3 ]; then
@@ -643,7 +645,7 @@ except:
                     echo "=========================================="
                     echo "✗ 检测到残留服务（端口 ${PORT} 响应但本次启动无任何进度信号）"
                     echo "=========================================="
-                    echo "  原因: 旧 vLLM 进程仍占用端口，新服务未能启动（日志无 loading_weights/gpu_initialized 等进度）"
+                    echo "  原因: 旧 sglang 进程仍占用端口，新服务未能启动（日志无 loading_weights/gpu_initialized 等进度）"
                     echo "  修复: 先执行 docker restart \$CONTAINER && sleep 5，再重新启动服务"
                     echo "  推荐: 使用 safe_restart_service.sh 一体化重启"
                     echo "=========================================="
@@ -659,10 +661,12 @@ except:
                 ELAPSED=$((ELAPSED + INTERVAL))
                 continue
             fi
-            # 端口响应 + 本次观测到进度信号 或 /health 200（sglang 权威信号）→ 判为就绪
-            if [ "$LOG_CONFIRMED_READY" = false ] && { [ -n "$PHASES_OBSERVED" ] || [ "$HEALTH_READY" = true ]; }; then
+            # 端口响应 + /health 200（sglang 权威信号）→ 判为就绪（CHECK 1.5 已打印）
+            # /health 503 → 模型仍在加载，禁止放行（见下方 503 守卫）
+            # /health 无响应（HEALTH_CODE=000，厂商无 /health 端点）→ 兜底：端口响应 + 进度信号
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$HEALTH_READY" != "true" ] && [ "$HEALTH_CODE" = "000" ] && [ -n "$PHASES_OBSERVED" ]; then
                 echo "[${ELAPSED}s] 端口 ${PORT} 已响应，本次启动已观测到进度信号（${PHASES_OBSERVED}）"
-                echo "  日志无标准 service_ready 短语（厂商定制启动器常见），按端口响应判定就绪"
+                echo "  日志无标准 service_ready 短语、无 /health 端点（厂商定制启动器常见），按端口响应判定就绪"
             fi
 
             # 非动态模式下的瞬时响应警告：端口在首次轮询即响应，可能是残留服务
@@ -684,6 +688,15 @@ except:
     print('unknown')
 " 2>/dev/null || echo "unknown")
 
+            # sglang 权威守卫：/health 503 = 模型仍在加载（sglang 在权重加载阶段即注册
+            # /v1/models 模型列表，不能作为就绪信号），必须继续等待，禁止放行
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$HEALTH_READY" != "true" ] && [ "$HEALTH_CODE" = "503" ]; then
+                echo "[${ELAPSED}s] /health 503 — 模型仍在加载（/v1/models 已响应 ${MODEL_ID}），继续等待..."
+                sleep "$INTERVAL"
+                ELAPSED=$((ELAPSED + INTERVAL))
+                continue
+            fi
+
             report_success "$MODEL_ID" "$MAX_MODEL_LEN"
 
             # 自动写入 service_ok=true（消除对 LLM 记忆的依赖）
@@ -699,7 +712,7 @@ except:
 
     # === CHECK 3: 进程存活检测（仅动态模式，启动 10s 后） ===
     if [ "$DYNAMIC_MODE" = true ] && [ "$ELAPSED" -gt 10 ]; then
-        PROCESS_COUNT=$(ps -ef | grep -E "vllm|flagscale|sglang" | grep -v grep | wc -l)
+        PROCESS_COUNT=$(ps -ef | grep -E "sglang" | grep -v grep | wc -l)
         if [ "$PROCESS_COUNT" -eq 0 ]; then
             echo ""
             echo "=========================================="
