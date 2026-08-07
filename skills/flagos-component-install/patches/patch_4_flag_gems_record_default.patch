@@ -1,0 +1,27 @@
+# flagos-patch-4: flag_gems enable()/only_enable() 默认 record=True
+# 背景: 运行时算子调用记录（~/.flaggems/oplist.log）默认关闭，
+#       改为默认开启，保证算子列表记录机制在 sglang 场景可用
+#       （用户 2026-08-07 定稿：默认记录）。
+# 目标文件(相对 site-packages): flag_gems/__init__.py
+# 安装: cd <site-packages> && patch -p1 < 本文件
+# 幂等锚点 marker: flagos-patch-4-flag-gems-record-default
+--- a/flag_gems/__init__.py
++++ b/flag_gems/__init__.py
+@@ -577,7 +577,7 @@
+     lib=aten_lib,
+     unused=None,
+     registrar=registrar,
+-    record=False,
++    record=True,
+     once=False,
+     path=None,
+ ):
+@@ -616,7 +616,7 @@
+     lib=aten_lib,
+     include=None,
+     registrar=registrar,
+-    record=False,
++    record=True,
+     once=False,
+     path=None,
+ ):

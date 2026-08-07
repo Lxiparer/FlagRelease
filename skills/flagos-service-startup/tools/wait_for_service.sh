@@ -15,6 +15,8 @@
 # limitations under the License.
 
 # wait_for_service.sh — 统一的服务就绪检测（动态超时 + 日志监控）
+# sglang 分支：相位信号兼容 sglang 启动日志（[DISPATCH] 算子调度 / fired up and ready to roll），
+#             并新增 /health 三态判定（200=就绪 / 503=加载中 / 拒绝连接=等待）
 #
 # 核心改进：
 #   - 监控启动日志，检测进度信号（权重加载、CUDA graph 编译等）
@@ -33,6 +35,12 @@
 #   ./wait_for_service.sh --port 8000 --timeout 300
 
 set -euo pipefail
+
+# sglang 分支：确保目标 python 在 PATH（非 conda；PYTHON_BIN_DIR 可覆盖）
+PY_BIN_DIR="${PYTHON_BIN_DIR:-/usr/local/python3.11.14/bin}"
+if [ -x "${PY_BIN_DIR}/python3" ]; then
+    export PATH="${PY_BIN_DIR}:${PATH}"
+fi
 
 # 默认值
 PORT=8000
@@ -168,7 +176,7 @@ FATAL = [
     (re.compile(r'(?:CUDA\s+)?out\s+of\s+memory|torch\.cuda\.OutOfMemoryError|\bOOM\b', re.I), 'oom'),
     (re.compile(r'CUDA\s*(?:error|Error|ERROR)\s*:|CUDAError|no kernel image is available', re.I), 'cuda_error'),
     (re.compile(r'Segmentation fault|SIGSEGV|SIGKILL', re.I), 'segfault'),
-    (re.compile(r'Killed\s+.*(?:vllm)|killed by signal', re.I), 'killed'),
+    (re.compile(r'Killed\s+.*(?:vllm|sglang)|killed by signal', re.I), 'killed'),
     (re.compile(r'Address already in use', re.I), 'port_conflict'),
     (re.compile(r'ModuleNotFoundError|ImportError:\s', re.I), 'import_error'),
     (re.compile(r'OSError.*(?:model|tokenizer).*not found|Cannot load model', re.I), 'model_not_found'),
@@ -181,12 +189,12 @@ PROGRESS = [
     (re.compile(r'(?:CUDA|GPU)\s+(?:initialized|available|detected)|Number of GPUs', re.I), 'gpu_initialized'),
     (re.compile(r'Capturing.*CUDA\s*graph|cuda\s*graph\s*captur', re.I), 'cuda_graph_capture'),
     (re.compile(r'Graph capturing finished', re.I), 'cuda_graph_done'),
-    (re.compile(r'GEMS\s+\w+', re.I), 'flaggems_op_register'),
+    (re.compile(r'GEMS\s+\w+|\[DISPATCH\] Op|using \'[^\']*\' \(mode=', re.I), 'flaggems_op_register'),
     (re.compile(r'flag_gems\.enable|import flag_gems', re.I), 'flaggems_init'),
     (re.compile(r'triton.*(?:compil|autotuning|kernel\s*cache)', re.I), 'triton_compile'),
     (re.compile(r'(?<!disabling )torch\.compile|Dynamo.*(?:bytecode|transform)|profiling.*warmup|Compiling a graph for', re.I), 'torch_compile'),
     (re.compile(r'Uvicorn running on|Listening on|Serving on', re.I), 'port_bound'),
-    (re.compile(r'Application startup complete|Ready to serve', re.I), 'service_ready'),
+    (re.compile(r'Application startup complete|Ready to serve|The server is fired up and ready to roll', re.I), 'service_ready'),
 ]
 
 # Traceback 检测
@@ -285,7 +293,7 @@ check_process_activity() {
         fi
     fi
     if [ -z "$PID" ]; then
-        PID=$(ps -ef | grep -E "vllm.entrypoints|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
+        PID=$(ps -ef | grep -E "sglang.launch_server|sglang serve|multiproc_worker" | grep -v grep | awk '{print $2}' | head -1)
     fi
     if [ -z "$PID" ]; then
         echo "dead"
@@ -420,7 +428,7 @@ print_failure_diagnostics() {
     # 检查进程
     echo ""
     echo "进程状态:"
-    ps -ef | grep -E "vllm|flagscale" | grep -v grep || echo "  无相关进程"
+    ps -ef | grep -E "vllm|flagscale|sglang" | grep -v grep || echo "  无相关进程"
 
     # 检查端口
     echo ""
@@ -470,6 +478,8 @@ fi
 
 # 标记日志中是否观测到 service_ready 信号
 LOG_CONFIRMED_READY=false
+# sglang /health 三态：200=权威就绪信号（即使日志未抓到就绪短语）
+HEALTH_READY=false
 # 残留服务连续检测计数
 STALE_COUNT=0
 
@@ -553,6 +563,42 @@ print(json.dumps({
         fi
     fi
 
+    # === CHECK 1.5: sglang /health 三态判定（权威就绪信号） ===
+    # 200=模型加载完成可推理 / 503=仍在加载（继续等）/ 连接拒绝或超时=服务未起（老路径兜底）
+    if [ "$HEALTH_READY" != "true" ]; then
+        HEALTH_CODE=$(python3 -c "
+import urllib.request, urllib.error
+try:
+    r = urllib.request.urlopen('${BASE_URL}/health', timeout=3)
+    print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print('000')
+" 2>/dev/null || echo "000")
+        case "$HEALTH_CODE" in
+            200)
+                HEALTH_READY=true
+                echo "[${ELAPSED}s] /health 200 — sglang 服务已就绪"
+                # 即使日志未抓到 service_ready 短语也放行（权威信号）
+                if ! echo ",$PHASES_OBSERVED," | grep -q ",service_ready,"; then
+                    CURRENT_PHASE="service_ready"
+                    if [ -n "$PHASES_OBSERVED" ]; then
+                        PHASES_OBSERVED="${PHASES_OBSERVED},service_ready"
+                    else
+                        PHASES_OBSERVED="service_ready"
+                    fi
+                fi
+                ;;
+            503)
+                # sglang 语义：模型仍在加载，继续等待
+                ;;
+            *)
+                # 连接拒绝/超时：服务未起，继续走日志监控路径
+                ;;
+        esac
+    fi
+
     # === CHECK 2: 端点检查 ===
     RESPONSE=$(python3 -c "
 import urllib.request, urllib.error
@@ -590,7 +636,7 @@ except:
             #     服务确实起来了（端口能响应、观测到 loading_weights/gpu_initialized/port_bound 等进度），
             #     只是就绪日志短语与原生 vLLM 的 "Application startup complete" 不同，抓不到 service_ready。
             # 因此：只要本次观测到任何 PROGRESS 信号（PHASES_OBSERVED 非空），端口响应即视为新服务就绪，放行。
-            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ] && [ -z "$PHASES_OBSERVED" ]; then
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$HEALTH_READY" != "true" ] && [ "$DYNAMIC_MODE" = true ] && [ -z "$PHASES_OBSERVED" ]; then
                 STALE_COUNT=$((STALE_COUNT + 1))
                 if [ "$STALE_COUNT" -ge 3 ]; then
                     echo ""
@@ -613,8 +659,8 @@ except:
                 ELAPSED=$((ELAPSED + INTERVAL))
                 continue
             fi
-            # 端口响应 + 本次观测到进度信号但无 service_ready 短语（国产厂商常见）→ 判为就绪
-            if [ "$LOG_CONFIRMED_READY" = false ] && [ -n "$PHASES_OBSERVED" ]; then
+            # 端口响应 + 本次观测到进度信号 或 /health 200（sglang 权威信号）→ 判为就绪
+            if [ "$LOG_CONFIRMED_READY" = false ] && { [ -n "$PHASES_OBSERVED" ] || [ "$HEALTH_READY" = true ]; }; then
                 echo "[${ELAPSED}s] 端口 ${PORT} 已响应，本次启动已观测到进度信号（${PHASES_OBSERVED}）"
                 echo "  日志无标准 service_ready 短语（厂商定制启动器常见），按端口响应判定就绪"
             fi
@@ -642,7 +688,7 @@ except:
 
             # 自动写入 service_ok=true（消除对 LLM 记忆的依赖）
             if [ -f /flagos-workspace/scripts/update_context.py ]; then
-                PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/update_context.py \
+                python3 /flagos-workspace/scripts/update_context.py \
                     --set workflow.service_ok=true --json 2>/dev/null && \
                     echo "  [auto] workflow.service_ok=true 已写入 context.yaml" || true
             fi
@@ -653,7 +699,7 @@ except:
 
     # === CHECK 3: 进程存活检测（仅动态模式，启动 10s 后） ===
     if [ "$DYNAMIC_MODE" = true ] && [ "$ELAPSED" -gt 10 ]; then
-        PROCESS_COUNT=$(ps -ef | grep -E "vllm|flagscale" | grep -v grep | wc -l)
+        PROCESS_COUNT=$(ps -ef | grep -E "vllm|flagscale|sglang" | grep -v grep | wc -l)
         if [ "$PROCESS_COUNT" -eq 0 ]; then
             echo ""
             echo "=========================================="

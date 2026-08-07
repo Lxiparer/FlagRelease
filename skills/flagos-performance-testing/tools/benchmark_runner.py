@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-vLLM 性能基准测试工具
+sGLang 性能基准测试工具（sglang 分支：基于 sglang.bench_serving）
 
 两档测试策略:
 - quick: 只跑 4k_input_1k_output 并发 64，预热后单次测试（主流程默认）
@@ -113,7 +113,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 if not config["model"].get("tokenizer_path"):
                     config["model"]["tokenizer_path"] = ctx.get("model", {}).get("container_path", "")
                 if not config["model"].get("name"):
-                    # 优先 service.model_id（实际 served id，vLLM 只认这个）；
+                    # 优先 service.model_id（实际 served id，sglang 只认这个）；
                     # 回退 model.name（可能是含斜杠的仓库路径，会导致 404）
                     config["model"]["name"] = svc.get("model_id") or ctx.get("model", {}).get("name", "")
                 print(f"[INFO] 从 context.yaml 补充了缺失配置")
@@ -169,9 +169,65 @@ METRIC_PATTERNS = {
 }
 
 
-def parse_output(output: str) -> Dict[str, Any]:
-    """从 vllm bench 输出中提取指标"""
+# sglang.bench_serving 尾端 JSON block 的 key → 统一指标名映射
+# （bench_serving 打印格式为行式摘要 + 尾部 JSON，JSON 是权威指标源）
+SGLANG_JSON_KEYS = {
+    'output_throughput': 'Output token throughput (tok/s)',
+    'total_throughput': 'Total token throughput (tok/s)',
+    'request_throughput': 'Request throughput (req/s)',
+    'completed': 'Successful requests',
+    'failed': 'Failed requests',
+    'duration': 'Benchmark duration (s)',
+    'total_input_tokens': 'Total input tokens',
+    'total_output_tokens': 'Total generated tokens',
+    'mean_ttft_ms': 'Mean TTFT (ms)',
+    'median_ttft_ms': 'Median TTFT (ms)',
+    'p99_ttft_ms': 'P99 TTFT (ms)',
+    'mean_tpot_ms': 'Mean TPOT (ms)',
+    'median_tpot_ms': 'Median TPOT (ms)',
+    'p99_tpot_ms': 'P99 TPOT (ms)',
+    'mean_itl_ms': 'Mean ITL (ms)',
+    'median_itl_ms': 'Median ITL (ms)',
+    'p99_itl_ms': 'P99 ITL (ms)',
+}
+
+
+def _parse_sglang_json_block(output: str) -> Dict[str, Any]:
+    """从 bench_serving 输出的尾端 JSON block 提取指标（失败返回空 dict）"""
+    idx = output.rfind('{')
+    if idx < 0:
+        return {}
+    tail = output[idx:]
+    depth = 0
+    end = -1
+    for i, ch in enumerate(tail):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return {}
+    try:
+        data = json.loads(tail[:end])
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or 'output_throughput' not in data:
+        return {}
     metrics = {}
+    for json_key, metric_key in SGLANG_JSON_KEYS.items():
+        if json_key in data and data[json_key] is not None:
+            metrics[metric_key] = data[json_key]
+    return metrics
+
+
+def parse_output(output: str) -> Dict[str, Any]:
+    """从 sglang bench_serving 输出中提取指标（优先尾端 JSON block，回退行正则）"""
+    metrics = _parse_sglang_json_block(output)
+    if metrics:
+        return metrics
     for key, pattern in METRIC_PATTERNS.items():
         match = re.search(pattern, output)
         if match:
@@ -187,25 +243,22 @@ def parse_output(output: str) -> Dict[str, Any]:
 # =============================================================================
 
 def build_command(config: Dict[str, Any], test_case: Dict[str, Any]) -> List[str]:
-    """构建 vllm bench 命令"""
+    """构建 sglang bench_serving 命令（OpenAI 兼容后端，纯 HTTP 压测）"""
     server = config["server"]
     model = config["model"]
     bench = config.get("benchmark", {})
 
     cmd = [
-        "vllm", "bench", "serve",
-        "--host", server["host"],
-        "--port", str(server["port"]),
+        sys.executable, "-m", "sglang.bench_serving",
+        "--backend", "openai",
+        "--base-url", f"http://{server['host']}:{server['port']}",
         "--model", model["name"],
         "--tokenizer", model["tokenizer_path"],
         "--dataset-name", bench.get("dataset_name", "random"),
         "--random-input-len", str(test_case["input_len"]),
         "--random-output-len", str(test_case["output_len"]),
-        "--endpoint", bench.get("endpoint", "/v1/completions"),
     ]
 
-    if bench.get("ignore_eos", True):
-        cmd.append("--ignore-eos")
     if bench.get("trust_remote_code", True):
         cmd.append("--trust-remote-code")
 
@@ -213,24 +266,13 @@ def build_command(config: Dict[str, Any], test_case: Dict[str, Any]) -> List[str
 
 
 def _client_env() -> Dict[str, str]:
-    """为 vllm bench serve 客户端子进程构建隔离环境。
+    """为 sglang bench_serving 客户端子进程构建环境。
 
-    vllm bench serve 是纯 HTTP 压测客户端：构造请求→打到已启动的服务→统计吞吐/延迟，
-    自身不加载模型、不做推理。但 vllm CLI 启动时会无条件按 VLLM_PLUGINS 白名单加载
-    platform 插件。容器为服务端持久化了 VLLM_PLUGINS=fl（/etc/environment），子进程若
-    直接继承，会把 fl 激活为 current_platform；当镜像同时装有厂商 platform 插件
-    （如 ascend 的 vllm_ascend，同注册于 vllm.platform_plugins）时，两个 platform 插件
-    争抢 current_platform → 多插件加载冲突报错（仅厂商镜像偶发，纯 NV 镜像只有 fl 不冲突）。
-
-    客户端本就不需要任何插件（platform 用 CPU 都满足 bench 的"非 unspecified"要求），
-    故将 VLLM_PLUGINS 置空。注意：
-      - 空串语义是"禁用所有 vllm plugin"（见 start_service.sh 注释），vllm 会自动探测
-        真实 platform（如 cuda）；不能用 del，删除会退回自动发现、仍可能加载 fl。
-      - 仅改内存副本，不写 /etc/environment，不影响服务端启动时读取的持久化插件配置。
+    sglang.bench_serving 是纯 HTTP 压测客户端：构造请求→打到已启动的服务→统计吞吐/延迟，
+    自身不加载模型、不做推理。sglang_fl 插件只在 serve 进程经 entry_points 加载，
+    客户端无插件加载机制、无 platform 插件冲突问题，直接继承环境即可。
     """
-    env = os.environ.copy()
-    env["VLLM_PLUGINS"] = ""
-    return env
+    return os.environ.copy()
 
 
 def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[int] = None,
@@ -238,7 +280,7 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
     """执行单次基准测试"""
     full_cmd = cmd + ["--num-prompts", str(num_prompts)]
     if max_concurrency:
-        full_cmd += ["--max-concurrency", str(max_concurrency)]
+        full_cmd += ["--concurrency", str(max_concurrency)]
 
     if dry_run:
         print(f"  [DRY RUN] {' '.join(full_cmd)}")
@@ -493,7 +535,7 @@ def save_results(results: Dict[str, Any], config: Dict[str, Any],
 
     # 添加 _meta 说明
     data["_meta"] = {
-        "说明": "vLLM 性能基准测试结果",
+        "说明": "sGLang 性能基准测试结果 (sglang.bench_serving)",
         "格式": "{test_case: {concurrency: {metric: value}}}",
         "关键指标": "Output token throughput (tok/s) 和 Total token throughput (tok/s)",
         "mode": mode or "default",
@@ -569,7 +611,7 @@ def resolve_strategy(args) -> str:
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="vLLM 性能基准测试 (重构版)")
+    parser = argparse.ArgumentParser(description="sGLang 性能基准测试 (sglang 分支, 基于 sglang.bench_serving)")
     parser.add_argument("--config", help="配置文件路径")
     parser.add_argument("--test-case", help="运行指定测试用例")
     parser.add_argument("--dry-run", action="store_true", help="仅打印命令")

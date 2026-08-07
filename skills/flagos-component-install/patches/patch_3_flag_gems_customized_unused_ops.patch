@@ -1,0 +1,17 @@
+# flagos-patch-3: flag_gems CUSTOMIZED_UNUSED_OPS 加 cat/exponential_
+# 背景: Qwen3.6 在 flagtree ascend3.5 下跑 cat/exponential_ 报错，
+#       加入自定义未用算子黑名单（与上游 PR #5113 同思路）。
+# 目标文件(相对 site-packages): flag_gems/runtime/backend/_ascend/__init__.py
+# 安装: cd <site-packages> && patch -p1 < 本文件
+# 幂等锚点 marker: flagos-patch-3-customized-unused-ops
+--- a/flag_gems/runtime/backend/_ascend/__init__.py
++++ b/flag_gems/runtime/backend/_ascend/__init__.py
+@@ -33,6 +33,8 @@
+     "sort",
+     "sort_stable",
+     "topk",
++    "cat",  # Err occurred when running Qwen3.6 vLLM with flagtree ascend3.5
++    "exponential_",  # Err occurred when running Qwen3.6 vLLM with flagtree ascend3.5
+ )
+
+

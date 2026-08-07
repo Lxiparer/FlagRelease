@@ -1,0 +1,54 @@
+# flagos-patch-2: flag_gems pow.py dtype 判断（int 指数先转 fp32）
+# 背景: 与 patch_1 同源问题（gelu_tanh KeyError），此修复覆盖
+#       flag_gems 自身三个 pow kernel 的 int32/其他 dtype 指数入参，
+#       镜像 FlagGems 上游 PR #5113。
+# 目标文件(相对 site-packages): flag_gems/runtime/backend/_ascend/ops/pow.py
+# 安装: cd <site-packages> && patch -p1 < 本文件
+# 幂等锚点 marker: flagos-patch-2-flag-gems-pow-dtype
+--- a/flag_gems/runtime/backend/_ascend/ops/pow.py
++++ b/flag_gems/runtime/backend/_ascend/ops/pow.py
+@@ -13,7 +13,13 @@
+ @pointwise_dynamic(promotion_methods=[(0, 1, "BOOL_TO_LONG")])
+ @triton.jit
+ def pow_func(x, exponent):
+-    return _pow(x.to(tl.float32), exponent)
++    if (
++        tl.constexpr(exponent.dtype.is_fp32())
++        or tl.constexpr(exponent.dtype.is_fp16())
++        or tl.constexpr(exponent.dtype.is_bf16())
++    ):
++        return _pow(x.to(tl.float32), exponent)
++    return _pow(x.to(tl.float32), exponent.to(tl.float32))
+
+
+ def pow_tensor_tensor(A, exponent):
+@@ -31,7 +37,13 @@
+ @pointwise_dynamic(is_tensor=[True, False], promotion_methods=[(0, 1, "BOOL_TO_LONG")])
+ @triton.jit
+ def pow_func_tensor_scalar(x, exponent):
+-    return _pow(x.to(tl.float32), exponent)
++    if (
++        tl.constexpr(exponent.dtype.is_fp32())
++        or tl.constexpr(exponent.dtype.is_fp16())
++        or tl.constexpr(exponent.dtype.is_bf16())
++    ):
++        return _pow(x.to(tl.float32), exponent)
++    return _pow(x.to(tl.float32), exponent.to(tl.float32))
+
+
+ def pow_tensor_scalar(A, exponent):
+@@ -49,7 +61,13 @@
+ @pointwise_dynamic(is_tensor=[False, True], promotion_methods=[(0, 1, "BOOL_TO_LONG")])
+ @triton.jit
+ def pow_func_scalar_tensor(x, exponent):
+-    return _pow(x.to(tl.float32), exponent)
++    if (
++        tl.constexpr(exponent.dtype.is_fp32())
++        or tl.constexpr(exponent.dtype.is_fp16())
++        or tl.constexpr(exponent.dtype.is_bf16())
++    ):
++        return _pow(x.to(tl.float32), exponent)
++    return _pow(x.to(tl.float32), exponent.to(tl.float32))
+
+
+ def pow_scalar(A, exponent):

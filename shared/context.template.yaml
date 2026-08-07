@@ -129,22 +129,23 @@ gpu:
 inspection:
   core_packages:            # 核心组件版本
     torch: ""
-    vllm: ""
+    sglang: ""
   flag_packages:            # flag 生态组件版本
     flaggems: ""
     flagscale: ""
     flagcx: ""
-    vllm_plugin: ""
+    sglang_plugin: ""
   flaggems_control: ""      # env_var | code_comment
   flaggems_logic: ""        # unused | only_enable
   flaggems_code_path: ""    # flaggems 代码所在文件路径
   flaggems_code_lines: ""   # 相关代码行号范围
   flaggems_capabilities: [] # 运行时探测到的能力列表 (enable_unused, only_enable, yaml_config, vendor_default, query_ops, query_ops_legacy, use_gems_filter)
   vendor_config_path: ""    # 厂商默认配置文件路径（如存在）
-  vllm_plugin_installed: false  # 是否安装了 vllm-plugin-FL
-  plugin_has_dispatch: false    # vllm-plugin-FL 是否有 OpManager 调度
-  oot_ops: []                   # OOT 算子列表 (来自 plugin 探测)
-  env_vars: {}              # flag 相关环境变量 (USE_FLAGGEMS, USE_FLAGOS 等)
+  sglang_plugin_installed: false  # 是否安装了 sglang-plugin-FL
+  plugin_has_dispatch: false      # sglang-plugin-FL 是否有 OpManager 调度
+  oot_ops: []                     # OOT 算子列表 (来自 plugin 探测)
+  env_vars: {}              # flag 相关环境变量 (USE_FLAGGEMS, SGLANG_FL_* 等)
+  patch_status: {}          # ascend 兼容补丁状态 (由 apply_patches.sh --status 探测)
 
 # ============================================================================
 # Plugin 安装信息 (由 plugin-install 写入)
@@ -161,12 +162,12 @@ plugin_install:
 # Plugin 控制信息 (由 pre-service-inspection 写入)
 # ============================================================================
 plugin_control:
-  prefer_enabled: ""            # VLLM_FL_PREFER_ENABLED 当前值
-  oot_enabled: ""               # VLLM_FL_OOT_ENABLED 当前值
+  prefer_enabled: ""            # SGLANG_FL_PREFER 当前值
+  oot_enabled: ""               # SGLANG_FL_OOT_ENABLED 当前值
   oot_ops: []                   # 已注册的 OOT 算子列表
-  flagos_whitelist: ""          # 当前 VLLM_FL_FLAGOS_WHITELIST
-  flagos_blacklist: ""          # 当前 VLLM_FL_FLAGOS_BLACKLIST
-  oot_blacklist: ""             # 当前 VLLM_FL_OOT_BLACKLIST
+  flagos_whitelist: ""          # 当前 SGLANG_FL_FLAGOS_WHITELIST
+  flagos_blacklist: ""          # 当前 SGLANG_FL_FLAGOS_BLACKLIST
+  oot_blacklist: ""             # 当前 SGLANG_FL_OOT_BLACKLIST
   dispatch_mode: ""             # flagos | vendor | reference
 
 # ============================================================================
@@ -188,15 +189,16 @@ plugin_workflow:
 # 环境状态 (由 service-startup 写入)
 # ============================================================================
 environment:
-  env_type: ""              # 环境场景: native | vllm_flaggems | vllm_plugin_flaggems
-  has_plugin: false          # 是否有 vllm-plugin-FL
-  has_flagtree: false        # 是否有 FlagTree
+  env_type: ""              # 环境场景: native | sglang_plugin_flaggems
+  has_plugin: false          # 是否有 sglang-plugin-FL
+  has_flagtree: false        # 是否有 FlagTree（sglang 用 triton-cx，flagtree 仅记录不启用）
   flagtree_version: ""       # FlagTree 版本
   initial_env_verified: false      # 初始环境是否验证通过
-  flaggems_code_path: ""    # flaggems 代码文件路径 (仅 vllm_flaggems)
-  flaggems_enable_call: ""  # flag_gems.enable() 完整调用 (仅 vllm_flaggems)
-  flaggems_txt_path: ""     # enable() 中指定的 txt 路径 (仅 vllm_flaggems)
-  gems_txt_auto_detect: false  # 是否需要启动后自动搜索 gems.txt
+  # sglang 分支：无代码注入态（vllm_flaggems 对应物不存在），以下字段作废
+  flaggems_code_path: ""    # (sglang 分支不适用)
+  flaggems_enable_call: ""  # (sglang 分支不适用)
+  flaggems_txt_path: ""     # (sglang 分支不适用)
+  gems_txt_auto_detect: false  # (sglang 分支不适用)
 
 # ============================================================================
 # FlagGems 启停方法 (由 pre-service-inspection 探测写入)
@@ -210,7 +212,9 @@ flaggems_control:
 # 运行时信息 (由 service-startup 写入)
 # ============================================================================
 runtime:
-  framework: "vllm"       # 框架: 仅支持 vllm（固定值，勿改；下游 start_service.sh 直接消费）
+  framework: "sglang"     # 框架: 仅支持 sglang（固定值，勿改；下游 start_service.sh 直接消费）
+  python_bin_dir: ""      # python 二进制前缀（默认 /usr/local/python3.11.14/bin，空则用默认）
+  engine_flags: ""        # sglang serve 追加 flags（如 "--disable-radix-cache --page-size 16 --mem-fraction-static 0.7"，空格分隔）
   flaggems_enabled: false # 是否启用 FlagGems
   tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
   tp_reason: ""           # TP 推算原因
@@ -376,7 +380,7 @@ workflow:
   all_done: false             # 全流程是否完成
   last_error: ""              # 最近一次错误信息
   # ---- 新流程（双 pipeline）字段 ----
-  entry_image_type: ""        # 准入镜像分类: gems_tree | gems_tree_plugin （由 inspect_env.py 输出）
+  entry_image_type: ""        # 准入镜像分类: native | gems_tree_plugin （sglang 分支收敛为二态；由 inspect_env.py 输出）
   pipeline_branch: ""         # 实际走的 pipeline: A(gems_tree) | B(gems_tree_plugin)
   incompatible: false         # 是否标记为"不适配"（plugin+gems 强依赖且全走不通）
   incompatible_tag: ""        # 不适配标记名，如 "Qwen3-8B-flagos-metax不适配"

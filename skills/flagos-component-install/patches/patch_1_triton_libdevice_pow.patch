@@ -1,0 +1,24 @@
+# flagos-patch-1: triton libdevice pow constexpr 指数修复
+# 背景: gelu_tanh 的 pow(x, 2) 中 Python int 2 被当作 int32,
+#       extern_elementwise dispatch 表无 (fp32, int32) 项 → KeyError → 编译崩溃。
+# 目标文件(相对 site-packages): triton/language/extra/cann/libdevice.py
+# 安装: cd <site-packages> && patch -p1 < 本文件
+# 幂等锚点 marker: flagos-patch-1-triton-libdevice-pow
+--- a/triton/language/extra/cann/libdevice.py
++++ b/triton/language/extra/cann/libdevice.py
+@@ -125,6 +125,15 @@
+
+ @core.extern
+ def pow(arg0, arg1, _semantic=None):
++    # Non-fp exponent (e.g. Python int 2 in gelu_tanh pow(x, 2)) is not in the
++    # extern_elementwise dispatch table below (KeyError (fp32, int32)).
++    # Cast it to fp32 first, mirroring FlagGems PR #5113's fix for ascend ops.
++    if isinstance(arg1, core.constexpr):
++        # Python int/bool constant exponent -> fp32 scalar tensor
++        if isinstance(arg1.value, (int, bool)) and not isinstance(arg1.value, float):
++            arg1 = _semantic.full([], arg1.value, core.dtype("fp32"))
++    elif not (arg1.dtype.is_fp32() or arg1.dtype.is_fp16() or arg1.dtype.is_bf16()):
++        arg1 = arg1.to(core.dtype("fp32"), _semantic=_semantic)
+     if triton_enable_libdevice_simt() and is_compile_on_910_95:
+         return core.extern_elementwise("", "", [arg0, arg1], {
+             (core.dtype("fp32"), core.dtype("fp32")): ("__hmf_pow_fp32", core.dtype("fp32")),

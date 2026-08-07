@@ -1,5 +1,5 @@
 #!/bin/bash
-# start_service.sh — 从 context.yaml 读取配置并启动 vllm 服务
+# start_service.sh — 从 context.yaml 读取配置并启动 sglang 服务（sglang 分支）
 #
 # 供 operator_search.py 的 --service-startup-cmd 调用。
 # 在容器内执行，读取 /flagos-workspace/shared/context.yaml 获取启动参数。
@@ -16,10 +16,14 @@ set +eu; [ -f /opt/dtk/env.sh ] && source /opt/dtk/env.sh 2>/dev/null; set -eu
 
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
 MODE=""
-# VLLM_PLUGINS 覆盖：未设=沿用旧自动行为；显式设置（含空串）=强制覆盖
-# 取值: "" (禁用所有 plugin) | "fl" | 厂商插件名(如 metax) | 逗号分隔多值
-VLLM_PLUGINS_OVERRIDE_SET=0
-VLLM_PLUGINS_OVERRIDE=""
+# Python 二进制前缀（sglang 分支非 conda；可被 PYTHON_BIN_DIR 环境变量
+# 或 context runtime.python_bin_dir 覆盖）
+PY_BIN_DIR="${PYTHON_BIN_DIR:-/usr/local/python3.11.14/bin}"
+PYTHON="${PY_BIN_DIR}/python3"
+# SGLANG_PLUGINS 覆盖：未设=沿用旧自动行为；显式设置（含空串）=强制覆盖
+# 取值: "" | "sglang_fl" | 逗号分隔多值
+SGLANG_PLUGINS_OVERRIDE_SET=0
+SGLANG_PLUGINS_OVERRIDE=""
 # 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
 # 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
 LOG_FILE_OVERRIDE=""
@@ -29,8 +33,8 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --mode=*) MODE="${1#--mode=}"; shift ;;
         --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
-        --vllm-plugins=*) VLLM_PLUGINS_OVERRIDE="${1#--vllm-plugins=}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift ;;
-        --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
+        --sglang-plugins=*) SGLANG_PLUGINS_OVERRIDE="${1#--sglang-plugins=}"; SGLANG_PLUGINS_OVERRIDE_SET=1; shift ;;
+        --sglang-plugins)   SGLANG_PLUGINS_OVERRIDE="${2:-}"; SGLANG_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
         --log-file=*) LOG_FILE_OVERRIDE="${1#--log-file=}"; shift ;;
         --log-file)   LOG_FILE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
@@ -58,7 +62,7 @@ esac
 
 # 从 context.yaml 读取启动参数
 read_context() {
-    PATH=/opt/conda/bin:$PATH python3 -c "
+    "${PYTHON}" -c "
 import yaml, json, sys
 with open('${CONTEXT_YAML}') as f:
     ctx = yaml.safe_load(f)
@@ -69,10 +73,14 @@ port = ctx.get('service', {}).get('port', 8000)
 tp_size = ctx.get('runtime', {}).get('tp_size', 0)
 gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('count', 0))
 max_model_len = ctx.get('service', {}).get('max_model_len', 32768)
-framework = ctx.get('runtime', {}).get('framework') or 'vllm'  # 仅支持 vllm；空值/缺失均兜底为 vllm
+framework = ctx.get('runtime', {}).get('framework') or 'sglang'  # 仅支持 sglang；空值/缺失均兜底为 sglang
 cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
 visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
 thinking = ctx.get('runtime', {}).get('thinking_model', False)
+python_bin_dir = ctx.get('runtime', {}).get('python_bin_dir', '')
+engine_flags = ctx.get('runtime', {}).get('engine_flags', '')
+if isinstance(engine_flags, list):
+    engine_flags = ' '.join(str(f) for f in engine_flags)
 
 # TP fallback: 如果为 0，使用 GPU 数量
 if tp_size <= 0:
@@ -88,6 +96,8 @@ print(json.dumps({
     'cuda_visible': cuda_visible,
     'visible_devices_env': visible_devices_env,
     'thinking': thinking,
+    'python_bin_dir': python_bin_dir,
+    'engine_flags': engine_flags,
 }))
 "
 }
@@ -103,6 +113,14 @@ FRAMEWORK=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.s
 CUDA_VISIBLE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['cuda_visible'])")
 VISIBLE_ENV=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['visible_devices_env'])")
 THINKING=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['thinking'])")
+ENGINE_FLAGS=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['engine_flags'])" 2>/dev/null || true)
+CTX_PY_BIN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['python_bin_dir'])" 2>/dev/null || true)
+
+# context 可覆盖 python 前缀（runtime.python_bin_dir）
+if [ -n "$CTX_PY_BIN" ]; then
+    PY_BIN_DIR="$CTX_PY_BIN"
+    PYTHON="${PY_BIN_DIR}/python3"
+fi
 
 if [ -z "$MODEL_PATH" ]; then
     echo "ERROR: model.container_path 为空，无法启动服务" >&2
@@ -110,13 +128,24 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 
 # 强制清理残留进程和编译缓存（每次启动前无条件执行）
-pkill -9 -f 'vllm.entrypoints|vllm serve|vllm.serve' 2>/dev/null || true
+pkill -9 -f 'sglang.launch_server|sglang serve|python3 -m sglang' 2>/dev/null || true
 for _i in $(seq 1 15); do
     if ! ss -tlnp 2>/dev/null | grep -qE ":${PORT}\b"; then break; fi
     sleep 1
 done
 rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
 echo "[start_service.sh] 已清理残留进程和编译缓存"
+
+# 补丁保护第二防线：启动前检查 ascend 兼容补丁（triton/flag_gems），缺失自动重打
+if [ -f /flagos-workspace/scripts/apply_patches.sh ]; then
+    if bash /flagos-workspace/scripts/apply_patches.sh --verify >/dev/null 2>&1; then
+        echo "[start_service.sh] ascend 补丁检查通过"
+    else
+        echo "[start_service.sh] ascend 补丁缺失，自动重打..."
+        bash /flagos-workspace/scripts/apply_patches.sh --apply || \
+            echo "[start_service.sh] WARNING: 补丁重打失败，FlagGems 可能崩溃（gelu_tanh KeyError）" >&2
+    fi
+fi
 
 # 端口占用检测与自动递增（最多尝试 +10）
 ORIGINAL_PORT="$PORT"
@@ -146,15 +175,15 @@ if [ -n "$CUDA_VISIBLE" ]; then
     fi
 fi
 
-# 确保 conda 环境在 PATH 中
-export PATH=/opt/conda/bin:$PATH
+# 确保 sglang 环境在 PATH 中（sglang 分支：非 conda，python 前缀默认 /usr/local/python3.11.14/bin）
+export PATH="${PY_BIN_DIR}:${PATH}"
 
 # 加载持久化的 FlagGems 相关环境变量（只提取相关变量，避免覆盖 PATH 等系统变量）
 if [ -f /etc/environment ]; then
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            USE_FLAGGEMS|FLAGGEMS_*|VLLM_FL_*|VLLM_PLUGINS)
+            USE_FLAGGEMS|FLAGGEMS_*|SGLANG_FLAGGEMS_*|SGLANG_FL_*|SGLANG_PLUGINS)
                 val="${val%\"}" ; val="${val#\"}"
                 val="${val%\'}" ; val="${val#\'}"
                 export "$key=$val"
@@ -163,54 +192,44 @@ if [ -f /etc/environment ]; then
     done < /etc/environment
 fi
 
-# 从控制文件推断 FLAGGEMS_CONTROL_MODE（兜底：docker exec 不继承宿主进程环境变量）
-if [ -z "${FLAGGEMS_CONTROL_MODE:-}" ] && [ -f /root/flaggems_ops_control.json ]; then
-    HAS_INCLUDE=$(PATH=/opt/conda/bin:$PATH python3 -c "
-import json
-try:
-    d = json.load(open('/root/flaggems_ops_control.json'))
-    print('only_enable' if d.get('include') else 'unused')
-except: print('')
-" 2>/dev/null)
-    if [ -n "$HAS_INCLUDE" ]; then
-        export FLAGGEMS_CONTROL_MODE="$HAS_INCLUDE"
-        echo "[start_service.sh] FLAGGEMS_CONTROL_MODE=$HAS_INCLUDE (从控制文件推断)"
-    fi
-fi
+# sglang 分支：无代码注入控制文件（FLAGGEMS_CONTROL_MODE 机制不适用），
+# 算子控制统一走 SGLANG_FL_* 环境变量（黑/白名单）。
 
 # 根据 mode 强制覆盖 USE_FLAGGEMS（确保 native/flagos 模式正确）
 export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
 
-# native 模式下清除 FlagGems 控制变量，避免残留配置干扰
+# native 模式下关闭插件两层替换（Layer1 总开关 + Layer2 fused kernels）并清残留配置
 if [ "$MODE" = "native" ]; then
-    unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
+    export SGLANG_FL_OOT_ENABLED=0
+    unset SGLANG_FL_PREFER SGLANG_FL_PER_OP 2>/dev/null || true
+    unset SGLANG_FL_FLAGOS_BLACKLIST SGLANG_FL_FLAGOS_WHITELIST 2>/dev/null || true
+    unset SGLANG_FL_OOT_BLACKLIST SGLANG_FL_OOT_WHITELIST 2>/dev/null || true
 fi
 
-# VLLM_PLUGINS 决策（优先级从高到低）：
-#   1. 显式 --vllm-plugins（含空串）→ 强制覆盖（V1 三选场景：''/厂商插件/fl）
-#   2. 持久化/继承值（含空串）→ 沿用。V1 三选定案后由 baseline_selector.py 固化到
-#      /etc/environment；V3 起由 persist_op_config.py 固化为 fl。V2 由此继承 V1 的
-#      plugin（如 metax），修复"USE_FLAGGEMS=1 即强制 fl 覆盖厂商插件"的归因混淆
-#   3. 均未设置 → 旧自动兜底（USE_FLAGGEMS=1 且 vllm_fl 存在 → fl）
-if [ "$VLLM_PLUGINS_OVERRIDE_SET" = "1" ]; then
-    export VLLM_PLUGINS="$VLLM_PLUGINS_OVERRIDE"
-    if [ -z "$VLLM_PLUGINS_OVERRIDE" ]; then
-        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=（空，禁用所有 vllm plugin）"
+# SGLANG_PLUGINS 决策（优先级从高到低）：
+#   1. 显式 --sglang-plugins（含空串）→ 强制覆盖
+#   2. 持久化/继承值（含空串）→ 沿用（baseline_selector.py / persist_op_config.py 固化）
+#   3. 均未设置 → 自动兜底（USE_FLAGGEMS=1 且 sglang_fl 存在 → sglang_fl）
+#   sglang_fl 插件本身经 entry_points 自动发现；显式指定 SGLANG_PLUGINS 用于
+#   多插件过滤与 baseline 纯净场景（配合 USE_FLAGGEMS=0 + SGLANG_FL_OOT_ENABLED=0）
+if [ "$SGLANG_PLUGINS_OVERRIDE_SET" = "1" ]; then
+    export SGLANG_PLUGINS="$SGLANG_PLUGINS_OVERRIDE"
+    if [ -z "$SGLANG_PLUGINS_OVERRIDE" ]; then
+        echo "[start_service.sh] 显式覆盖：SGLANG_PLUGINS=（空）"
     else
-        echo "[start_service.sh] 显式覆盖：VLLM_PLUGINS=${VLLM_PLUGINS_OVERRIDE}"
+        echo "[start_service.sh] 显式覆盖：SGLANG_PLUGINS=${SGLANG_PLUGINS_OVERRIDE}"
     fi
-elif [ -n "${VLLM_PLUGINS+x}" ]; then
-    export VLLM_PLUGINS
-    echo "[start_service.sh] 继承持久化 plugin 配置：VLLM_PLUGINS='${VLLM_PLUGINS}'"
-# 旧自动兜底：显式指定 VLLM_PLUGINS 避免多 platform plugin 冲突（ascend vs fl）
+elif [ -n "${SGLANG_PLUGINS+x}" ]; then
+    export SGLANG_PLUGINS
+    echo "[start_service.sh] 继承持久化 plugin 配置：SGLANG_PLUGINS='${SGLANG_PLUGINS}'"
 elif [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
-    HAS_PLUGIN=$(PATH=/opt/conda/bin:$PATH python3 -c "
+    HAS_PLUGIN=$("${PYTHON}" -c "
 import importlib.util
-print('yes' if importlib.util.find_spec('vllm_fl') else 'no')
+print('yes' if importlib.util.find_spec('sglang_fl') else 'no')
 " 2>/dev/null || echo "no")
     if [ "$HAS_PLUGIN" = "yes" ]; then
-        export VLLM_PLUGINS="fl"
-        echo "[start_service.sh] plugin 场景：设置 VLLM_PLUGINS=fl"
+        export SGLANG_PLUGINS="sglang_fl"
+        echo "[start_service.sh] plugin 场景：设置 SGLANG_PLUGINS=sglang_fl"
     fi
 fi
 
@@ -228,27 +247,33 @@ if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
 fi
 
-# 构建启动命令（仅支持 vllm）
-if [ "$FRAMEWORK" != "vllm" ]; then
-    echo "ERROR: 仅支持 vllm 框架，但 runtime.framework='${FRAMEWORK}'。请检查 context.yaml。" >&2
+# 构建启动命令（sglang 分支：仅支持 sglang）
+if [ "$FRAMEWORK" != "sglang" ]; then
+    echo "ERROR: 仅支持 sglang 框架，但 runtime.framework='${FRAMEWORK}'。请检查 context.yaml。" >&2
     exit 1
 fi
-CMD="vllm serve '${MODEL_PATH}' \
+CMD="sglang serve --model-path '${MODEL_PATH}' \
     --host 0.0.0.0 \
     --port ${PORT} \
     --served-model-name '${MODEL_NAME}' \
-    --tensor-parallel-size ${TP_SIZE} \
-    --max-model-len ${MAX_MODEL_LEN} \
+    --tp-size ${TP_SIZE} \
+    --context-length ${MAX_MODEL_LEN} \
     --trust-remote-code"
 
-# Thinking model 添加 reasoning parser
+# sglang 特有 flags（context runtime.engine_flags，逐词追加；
+# 如 --disable-radix-cache --page-size 16 --mem-fraction-static 0.7）
+if [ -n "$ENGINE_FLAGS" ]; then
+    CMD="$CMD ${ENGINE_FLAGS}"
+fi
+
+# Thinking model 添加 reasoning parser（sglang 用连字符命名）
 if [ "$THINKING" = "true" ]; then
     # 根据模型名推断 parser
     MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
     if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
         CMD="$CMD --reasoning-parser qwen3"
     elif echo "$MODEL_LOWER" | grep -qE 'deepseek'; then
-        CMD="$CMD --reasoning-parser deepseek_r1"
+        CMD="$CMD --reasoning-parser deepseek-r1"
     fi
 fi
 
@@ -265,10 +290,8 @@ echo "${LOG_FILE}" > /flagos-workspace/logs/service_log_path
 echo "${PORT}" > /flagos-workspace/logs/service_port
 echo "[start_service.sh] PID=${SVC_PID}, log=${LOG_FILE}, port=${PORT}"
 
-# 保存控制文件副本到 results/（供报告对比配置 vs 运行时算子，仅首次启动时保存）
-if [ "$USE_FLAGGEMS_FLAG" = "1" ] && [ -f /root/flaggems_ops_control.json ] && [ ! -f /flagos-workspace/results/ops_control_initial.json ]; then
-    cp /root/flaggems_ops_control.json /flagos-workspace/results/ops_control_initial.json 2>/dev/null || true
-fi
+# sglang 分支：无控制文件机制；算子配置来自 /etc/environment 持久化 env，
+# 配置 vs 运行时对比以启动日志中的 env 快照与 dispatch 记录为准。
 
 # 短暂等待后验证进程是否存活（快速发现启动参数错误导致的立即崩溃）
 sleep 2
