@@ -207,7 +207,7 @@ def _sync_error_to_context(record: dict, log_dir: str):
         "recoverable": True,
     }, ensure_ascii=False)
 
-    python_bin = "/opt/conda/bin/python3" if os.path.isfile("/opt/conda/bin/python3") else "python3"
+    python_bin = "/usr/local/python3.11.14/bin/python3" if os.path.isfile("/usr/local/python3.11.14/bin/python3") else "python3"
 
     try:
         subprocess.run(

@@ -942,8 +942,8 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| 权重来源 | {model.get('url', '') or model.get('name', '-')} |")
     lines.append(f"| 权重数制 | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype') or 'bf16'} |")
-    lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
-    lines.append(f"| 推理框架后端版本 | {core_pkgs.get('vllm', '-')} |")
+    lines.append(f"| 推理框架后端 | {runtime.get('framework', 'sglang')} |")
+    lines.append(f"| 推理框架后端版本 | {core_pkgs.get('sglang', '-')} |")
     # plugin-FL 版本：优先真实版本号（plugin_install.version），
     # 其次从发布镜像 tag 的 pluginX.Y.Z 解析，最后回退 flag_packages 的采集值
     _plugin_install = ctx.get("plugin_install", {}) or {}
@@ -954,7 +954,7 @@ def generate_text_report(data: ReportData) -> str:
         if m:
             plugin_ver = m.group(1)
     if not plugin_ver:
-        _fp = flag_pkgs.get("vllm_plugin", "")
+        _fp = flag_pkgs.get("sglang_plugin", "")
         # 采集值若是 installed/True 之类的占位，不当版本号用
         plugin_ver = _fp if _fp and _fp not in ("installed", "True", "true", True) else "-"
     lines.append(f"| 推理框架插件plugin-FL | {plugin_ver} |")
@@ -1686,7 +1686,7 @@ def generate_summary(data: ReportData) -> str:
     env_type = data.get("environment", "env_type", default="N/A")
     plugin_triggered = data.get("plugin_workflow", "triggered", default=False)
     if plugin_triggered and "plugin" in str(env_type):
-        main_env = env_type.replace("_plugin_", "_").replace("vllm_plugin_flaggems", "vllm_flaggems")
+        main_env = env_type.replace("_plugin_", "_").replace("sglang_plugin_flaggems", "sglang_flaggems")
         env_display = f"{main_env} (主流程) / {env_type} (Plugin)"
     else:
         env_display = env_type

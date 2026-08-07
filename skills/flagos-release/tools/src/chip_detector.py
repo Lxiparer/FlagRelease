@@ -209,7 +209,7 @@ class EnvironmentInfo:
     flaggems_version: str = ""
     flagtree_version: str = ""
     # vLLM
-    vllm_version: str = ""
+    sglang_version: str = ""
     # 架构
     arch: str = "amd64"
     # 额外信息
@@ -361,7 +361,7 @@ class ChipDetector:
         env.flagtree_version = self._detect_flagtree_version()
 
         # vLLM 版本
-        env.vllm_version = self._detect_vllm_version()
+        env.sglang_version = self._detect_sglang_version()
 
         # 芯片相关信息
         if vendor:
@@ -470,10 +470,10 @@ class ChipDetector:
             return output.strip()
         return ""
 
-    def _detect_vllm_version(self) -> str:
+    def _detect_sglang_version(self) -> str:
         """检测 vLLM 版本"""
         success, output, _ = self._run_in_torch_env(
-            "pip show vllm 2>/dev/null | grep -i '^Version:' | awk '{print $2}'"
+            "pip show sglang 2>/dev/null | grep -i '^Version:' | awk '{print $2}'"
         )
         if success and output and "error" not in output.lower():
             return output.strip()
@@ -948,7 +948,7 @@ def generate_image_tag(
     """生成镜像 tag（统一命名规范，委托 get_image_name.sh 采集）
 
     新格式（镜像名主体由 get_image_name.sh 生成）:
-      {registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{vllm}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{date_tag}
+      {registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{sglang}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{date_tag}
 
     date_tag 由调用方（config.py）传入且已含版本后缀（-v1..-v4），
     脚本自带的时间戳被丢弃，改用传入的 date_tag，从而保留 V1-V4 tag 区分。

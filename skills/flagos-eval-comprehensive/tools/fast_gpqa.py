@@ -603,7 +603,7 @@ def _find_score(d: dict, depth: int = 0) -> Optional[float]:
 
 # 从模型 generation_config.json 采纳的采样字段白名单。
 # 已在真实容器验证 evalscope GenerateConfig 原生支持这些键（不支持也会被
-# evalscope 自动挪入 extra_body 透传 vllm，不会报错）。刻意不含 max_tokens：
+# evalscope 自动挪入 extra_body 透传 sglang，不会报错）。刻意不含 max_tokens：
 # 模型配置里的 max_tokens 常偏小（如 1024）会导致截断、精度暴跌，max_tokens
 # 仍由 auto_max_tokens 基于 max_model_len 自适应计算 + 截断检测决定。
 _GEN_PARAM_WHITELIST = ("temperature", "top_p", "top_k", "repetition_penalty")

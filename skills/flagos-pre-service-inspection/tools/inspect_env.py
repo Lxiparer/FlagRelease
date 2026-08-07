@@ -41,7 +41,6 @@ def find_best_python():
     """探测最佳 Python 解释器（sglang 分支：非 conda，默认 /usr/local/python3.11.14/bin）"""
     candidates = [
         "/usr/local/python3.11.14/bin/python3",
-        "/opt/conda/bin/python3",
         os.path.expanduser("~/miniconda3/bin/python3"),
         os.path.expanduser("~/anaconda3/bin/python3"),
     ]

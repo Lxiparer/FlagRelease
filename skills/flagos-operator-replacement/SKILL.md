@@ -38,9 +38,9 @@ provides:
 - `operator_search.py` — 搜索编排（完整的 next→配置→重启→benchmark→update 自动循环，支持 plugin/非plugin）
 - `apply_op_config.py` — Plugin 场景：生成算子替换环境变量 JSON（内联前缀方式）
 
-**核心设计**：FlagGems / vllm-plugin-FL 处于持续迭代中，本 skill 不硬编码任何特定 API，而是根据 `pre-service-inspection` 探测到的 `flaggems_capabilities` 自动选择最优操作方式，逐层降级保证稳定性。
+**核心设计**：FlagGems / sglang-plugin-FL 处于持续迭代中，本 skill 不硬编码任何特定 API，而是根据 `pre-service-inspection` 探测到的 `flaggems_capabilities` 自动选择最优操作方式，逐层降级保证稳定性。
 
-**强制约束**：不在 `flaggems_enable_oplist.txt` 中的算子必须被显式关闭，无论 plugin 还是非 plugin 场景。init 阶段通过 `--registered-ops` 传入 FlagGems 完整注册算子列表，黑名单计算时以注册表为基准，确保注册表中有但 oplist 中没有的算子也被加入 blacklist。
+**强制约束**：算子禁用必须显式写入 `SGLANG_FL_FLAGOS_BLACKLIST`（或 `SGLANG_FL_FLAGOS_WHITELIST`），以环境变量为准，无 oplist 文件对比机制。应用后重启服务，从 [GEMS] 日志确认黑名单算子已无 `flagos` 实现、走 vendor 回退，才算生效。
 
 ---
 
@@ -63,13 +63,13 @@ inspection:
   flaggems_code_lines: <来自 pre-service-inspection>
   flaggems_capabilities: <来自 pre-service-inspection>
   vendor_config_path: <来自 pre-service-inspection>
-  vllm_plugin_installed: <来自 pre-service-inspection>
+  sglang_plugin_installed: <来自 pre-service-inspection>
   plugin_has_dispatch: <来自 pre-service-inspection>
   gpu_compute_capability: <来自 pre-service-inspection>
   gpu_arch: <来自 pre-service-inspection>
 service:
   gems_txt_path: <来自 service-startup>
-  enable_oplist_path: <来自 service-startup>    # flaggems_enable_oplist.txt 路径（权威算子列表）
+  enable_oplist_path: <来自 service-startup>    # (sglang 分支不适用——权威列表取 [GEMS] 日志)  
   enable_oplist_count: <来自 service-startup>   # 当前生效算子数量
   initial_operator_list: <来自 service-startup>
 native_perf:
@@ -107,56 +107,39 @@ optimization:
 
 ## env_type = native
 
-纯 vllm 原生环境，无 FlagGems，**不进入算子优化流程**。
+纯 sglang 原生环境，无 FlagGems，**不进入算子优化流程**。
 
-## env_type = vllm_flaggems（环境变量驱动算子控制）
+## env_type = sglang_plugin_flaggems（环境变量驱动算子控制）
 
-环境检测阶段已自动注入环境变量驱动代码，后续算子控制通过修改控制文件 + 环境变量实现，不再修改源码。
+sglang 分支**无代码注入/控制文件机制**（`FLAGGEMS_CONTROL_MODE` / `/root/flaggems_ops_control.json` 均不适用），算子控制一律通过内联环境变量（`SGLANG_FL_*`）实现，经 `sglang_fl` 插件（entry_points 自动加载）在运行时读取：
 
-- **算子列表来源**：`environment.flaggems_txt_path` 指向的 txt 文件（由 `flag_gems.enable()` 生成）
+- **算子列表来源**：服务日志 `[GEMS]` 行（/flagos-workspace/logs/startup_flagos.log，由 `start_service.sh` 抓取）；sglang 分支无 txt 文件机制
 - **控制机制**：
-  - `USE_FLAGGEMS`：控制 FlagGems 开关（`1`=开启，`0`=关闭）
-  - `FLAGGEMS_CONTROL_MODE`：控制算子分支模式
-    - `only_enable`：白名单模式，从控制文件读取 `include` 列表
-    - `unused`：黑名单模式，从控制文件读取 `unused` 列表
-  - `/root/flaggems_ops_control.json`：算子控制配置文件
-- **优化方式**：通过 `toggle_flaggems.py --action modify-enable` 写入控制文件（已注入场景）或修改源码（未注入兜底）
-
-**控制文件格式**：
-```json
-// only_enable 模式（白名单）
-{"include": ["addmm", "bmm", "mm", "softmax"]}
-
-// unused 模式（黑名单）
-{"unused": ["softmax", "layer_norm"]}
-
-// 全量开启
-{"unused": [], "include": []}
-```
+  - `USE_FLAGGEMS`：FlagGems 总开关（`1`=开启，`0`=关闭）
+  - `SGLANG_FL_PREFER`：实现偏好（`flagos` | `vendor` | `reference`）
+  - `SGLANG_FL_FLAGOS_BLACKLIST` / `SGLANG_FL_FLAGOS_WHITELIST`：flag_gems 层算子黑白名单
+  - `SGLANG_FL_OOT_BLACKLIST` / `SGLANG_FL_OOT_WHITELIST`：OOT 层（fused kernels）黑白名单
+  - `SGLANG_FL_PER_OP`：单算子指定实现（`op=vendor;op2=flagos`）
+  - `SGLANG_PLUGINS`：插件使能（`sglang_fl`）
+- **优化方式**：`toggle_flaggems.py --action modify-enable`（env 语义，无控制文件）+ `apply_op_config.py --mode custom --flagos-blacklist`
 
 **搜索循环**：
 ```
-写控制文件(调整算子) → 重启服务 → benchmark → 读取 txt 确认生效算子 → 判断是否达标
+设置环境变量(调整算子) → 重启服务 → 读 [GEMS] 日志确认生效算子 → 判断是否达标
 ```
 
 **脚本调用示例**：
 ```bash
-# 只启用指定算子（写入控制文件 include 列表）
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
+# 只启用指定算子（写入 SGLANG_FL_FLAGOS_WHITELIST）
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
     --action modify-enable --enabled-ops 'addmm,mm,bmm,softmax' --json"
 
-# 禁用指定算子（写入控制文件 unused 列表）
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
+# 禁用指定算子（写入 SGLANG_FL_FLAGOS_BLACKLIST）
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
     --action modify-enable --disabled-ops 'softmax,layer_norm' --json"
 ```
 
-**`operator_search.py` 集成**：`_apply_non_plugin_config` 检测到已注入代码后，直接调用 `_apply_via_control_file()` 写控制文件 + 设环境变量，无需修改源码。未注入时降级为 Layer 1-4 策略。
-
-## env_type = vllm_plugin_flaggems（环境变量算子控制）
-
-- **算子列表来源**：`/tmp/flaggems_enable_oplist.txt`
-- **优化方式**：环境变量黑白名单（已有逻辑不变）
-- 详见下方"Plugin 场景的两层替换架构"
+**`operator_search.py` 集成**：`_apply_non_plugin_config` 检测到 `sglang_plugin_installed=true` 后，直接调用 `_apply_via_env()` 构造内联环境变量前缀，无需修改源码。
 
 ---
 
@@ -177,7 +160,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 # Plugin 场景的两层替换架构
 
-当 `vllm_plugin_installed=true` 且 `plugin_has_dispatch=true` 时，算子替换通过**环境变量**控制两个独立层：
+当 `sglang_plugin_installed=true` 且 `plugin_has_dispatch=true` 时，算子替换通过**环境变量**控制两个独立层：
 
 ```
 ┌─────────────────────────────────────────┐
@@ -185,11 +168,11 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 │   silu_and_mul, rms_norm,               │
 │   rotary_embedding, fused_moe,          │
 │   attention_backend                     │
-│   控制: VLLM_FL_OOT_BLACKLIST           │
+│   控制: SGLANG_FL_OOT_BLACKLIST           │
 ├─────────────────────────────────────────┤
 │ flag_gems 层（几十个 torch 底层算子）     │
 │   addmm, mm, softmax, cos, sin, ...    │
-│   控制: VLLM_FL_FLAGOS_BLACKLIST        │
+│   控制: SGLANG_FL_FLAGOS_BLACKLIST        │
 └─────────────────────────────────────────┘
 ```
 
@@ -201,38 +184,33 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ```bash
 # 关闭所有 FlagGems（= native 模式）
-USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false vllm serve ...
+USE_FLAGGEMS=0 SGLANG_FL_PREFER=false sglang serve ...
 
 # 全量启用 FlagGems
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true sglang serve ...
 
 # 禁用指定的 torch 底层算子（黑名单，FlagGems < 4.2.1rc0）
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST="softmax,layer_norm" vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_BLACKLIST="softmax,layer_norm" sglang serve ...
 
 # 只启用指定的 torch 底层算子（白名单，FlagGems >= 4.2.1rc0，优先使用）
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_WHITELIST="addmm,mm,bmm" vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_WHITELIST="addmm,mm,bmm" sglang serve ...
 
 # 禁用指定的 OOT 高层算子（与白名单/黑名单独立）
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_OOT_BLACKLIST="fused_moe" vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_OOT_BLACKLIST="fused_moe" sglang serve ...
 
 # 指定单个算子使用 vendor 实现
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_PER_OP="rms_norm=vendor;attention_backend=vendor" vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_PER_OP="rms_norm=vendor;attention_backend=vendor" sglang serve ...
 ```
 
-**重要**：环境变量设置后需重启服务才生效。重启后 FlagGems 运行时会自动重新生成算子列表 txt 文件。
+**重要**：环境变量设置后需重启服务才生效。重启后 `start_service.sh` 会从新日志重新抓取 [GEMS] 行，确认实际生效算子集。
 
 ## 算子控制方式总结
 
-| 场景 | 控制方式 | txt 文件角色 |
-|------|----------|-------------|
-| Plugin | `VLLM_FL_*` 环境变量 | **权威来源**（验证生效 + 读取实际算子列表） |
-| Plugin (白名单) | `VLLM_FL_FLAGOS_WHITELIST`（FlagGems >= 4.2.1rc0 自动启用） | 同上 |
-| 非 plugin (yaml_config) | YAML exclude 配置文件 | **权威来源**（验证生效 + 读取实际算子列表） |
-| 非 plugin (only_enable) | `flag_gems.only_enable(include=[...])` | **权威来源**（验证生效 + 读取实际算子列表） |
-| 非 plugin (enable_unused) | `flag_gems.enable(unused=[...])` | **权威来源**（验证生效 + 读取实际算子列表） |
-| 非 plugin (兜底) | 直接写 txt 文件 | 读写 |
+| 场景 | 控制方式 | 权威来源 |
+|------|----------|----------|
+| Plugin | `SGLANG_FL_*` 环境变量（BLACKLIST / WHITELIST / PER_OP / PREFER） | **[GEMS] 服务日志**（验证生效 + 读取实际算子列表） |
 
-**核心原则**：`/tmp/flaggems_enable_oplist.txt` 是运行时自动生成的**唯一权威算子列表**。每次服务启动后 FlagGems 会重新生成此文件，内容反映 blacklist/whitelist 等配置生效后的实际算子集合。所有算子替换、搜索、对比操作必须以此文件为准，而非 API 枚举或静态文件。
+**核心原则**：sglang 分支无 txt 文件机制，服务日志 `[GEMS]` 行（/flagos-workspace/logs/startup_flagos.log）是运行时唯一的**权威算子列表**。每次服务启动后 sglang_fl 插件按环境变量配置生成实际算子集合，`start_service.sh` 抓取该日志段。所有算子替换、搜索、对比操作必须以此为准，而非 API 枚举或静态文件。
 
 ## apply_op_config.py 使用方式
 
@@ -258,14 +236,14 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/apply_op_config.py \
 输出示例：
 ```json
 {
-  "env_vars": {"USE_FLAGGEMS": "1", "VLLM_FL_PREFER_ENABLED": "true", "VLLM_FL_FLAGOS_BLACKLIST": "softmax,layer_norm"},
-  "env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST=softmax,layer_norm"
+  "env_vars": {"USE_FLAGGEMS": "1", "SGLANG_FL_PREFER": "true", "SGLANG_FL_FLAGOS_BLACKLIST": "softmax,layer_norm"},
+  "env_inline": "USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_BLACKLIST=softmax,layer_norm"
 }
 ```
 
 在启动命令前使用内联前缀：
 ```bash
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST=softmax,layer_norm vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_BLACKLIST=softmax,layer_norm sglang serve ...
 ```
 
 ---
@@ -317,14 +295,14 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py mapping \
 
 ## 模式 4：DeepGemm 兼容性
 
-**症状**：`VLLM_USE_DEEP_GEMM=1` 时启动崩溃
-**原因**：DeepGemm 与某些 FlagGems 算子冲突
-**修复**：设置 `VLLM_USE_DEEP_GEMM=0` 或禁用冲突算子
+**症状**：DeepGemm（FlagCX）与某些 FlagGems 算子冲突导致启动崩溃
+**原因**：融合 kernel 层与底层算子实现冲突
+**修复**：禁用冲突算子（`SGLANG_FL_OOT_BLACKLIST`）或改用 `SGLANG_FL_PREFER=vendor` 整体回退
 
 ## 模式 5：dispatch 层遗漏
 
 **症状**：gems.txt 中已移除算子但仍被调用
-**原因**：vllm_fl dispatch 层有独立的算子注册，未同步修改
+**原因**：sglang_fl dispatch 层有独立的算子注册，未同步修改
 **修复**：同时修改 flag_gems 层和 dispatch 层（见两层替换架构）
 
 ---
@@ -389,7 +367,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups 
 
 ```bash
 # 方式 A：配置 profiler 目录后采集
-# 启动服务时加 VLLM_TORCH_PROFILER_DIR=/flagos-workspace/traces/profiler
+# 启动服务时按需开启 profiling（torch.profiler 环境），trace 落到 /flagos-workspace/traces/
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py profile \
   --profiler-dir /flagos-workspace/traces/profiler \
   --port $PORT --model-name $MODEL_NAME --json
@@ -545,7 +523,7 @@ print('配置已写入:', config_path)
 
 ## 步骤 4 — Plugin 场景：通过环境变量同步禁用
 
-如果 `vllm_plugin_installed=true`，使用内联环境变量控制而不是修改代码：
+如果 `sglang_plugin_installed=true`，使用内联环境变量控制而不是修改代码：
 
 ```bash
 # 生成环境变量 JSON
@@ -554,10 +532,10 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/apply_op_config.py --mode custom
   --flagos-blacklist "softmax"
 
 # 在启动命令前使用内联环境变量
-USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_OOT_BLACKLIST=fused_moe VLLM_FL_FLAGOS_BLACKLIST=softmax vllm serve ...
+USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_OOT_BLACKLIST=fused_moe SGLANG_FL_FLAGOS_BLACKLIST=softmax sglang serve ...
 ```
 
-如果 `vllm_plugin_installed=false`，无需此步骤（Layer 1-4 已直接控制 flag_gems 层）。
+如果 `sglang_plugin_installed=false`（native 态），无 sglang_fl 插件，无法用 SGLANG_FL_* 控制，此步骤不适用（native 不进入算子优化流程）。
 
 ## 步骤 5 — 报告替换详情并提醒重启
 
@@ -589,7 +567,7 @@ Round 3: 追加排除 low 风险算子（copy_/add/mul 等基础运算）
          → benchmark → 达标？→ 结束
          → 不达标？→ 问题不在算子层面，标记失败
 
-Plugin 场景：通过 VLLM_FL_FLAGOS_BLACKLIST 环境变量控制
+Plugin 场景：通过 SGLANG_FL_FLAGOS_BLACKLIST 环境变量控制
 非 plugin 场景：通过 Layer 1-4 策略控制
 每轮重启后读取 txt 文件验证算子变化
 
@@ -826,7 +804,7 @@ MetaX C500 + Qwen3-8B：309 个注册算子仅 26 个运行时执行，全量 Fl
 
 `operator_search.py run` 在搜索循环开始前自动执行框架验证：
 
-1. 以 `USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false` 启动服务（禁用所有算子，仅保留 plugin 框架）
+1. 以 `USE_FLAGGEMS=0 SGLANG_FL_PREFER=false` 启动服务（禁用所有算子，仅保留 plugin 框架）
 2. 运行 quick benchmark
 3. 与 native_throughput 对比
 
@@ -938,8 +916,8 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - 精度调优耗时更新 `timing.steps.accuracy_tuning`
 - 性能调优耗时更新 `timing.steps.performance_tuning`
 - **算子列表 txt 备份**（调优完成、服务重启验证通过后保存）：
-  - 精度调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
-  - 性能调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
+  - 精度调优完成后：从 /flagos-workspace/logs/startup_flagos.log 的 [GEMS] 行提取生效算子，存档为 /flagos-workspace/results/accuracy_tuned_ops.txt
+  - 性能调优完成后：同样提取并存档为 /flagos-workspace/results/final_ops.txt
 - **精度调优后精度结果保存**（步骤5达标时必须执行）：
   - 评测时直接通过 `--output` 指定输出路径，无需事后 cp：
     - V3 精度文件：`fast_gpqa.py ... --output /flagos-workspace/results/gpqa_flagos_optimized.json`
@@ -996,15 +974,15 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 执行后必须完成：
 - 更新 `context.yaml` 的 `optimization` 和 `operator_replacement` 字段
 - 写入 `traces/07_performance_tuning.json`
-- 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
-- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
+- 保存算子列表：从 startup_flagos.log 的 [GEMS] 行提取生效算子，存档到 /flagos-workspace/results/final_ops.txt
+- 更新报告：`docker exec $CONTAINER bash -c "${PY_BIN_DIR}:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ### 步骤7完成后：算子配置固化
 
 **强制执行**：无论是否触发了步骤5/7，只要 `env_type` 不是 `native`，都必须执行：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto --verify"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto --verify"
 ```
 
 `--verify` 会重启服务检查运行时算子数量是否与预期一致。验证失败时标记 `workflow.config_persisted=false`，继续发布但标记为私有。

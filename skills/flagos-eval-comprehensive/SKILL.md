@@ -47,7 +47,7 @@ provides:
 **启动前互斥检查**：精度评测启动前，必须确认没有正在运行的性能测试进程。并发执行会互相抢占 GPU 资源，导致结果不可信。
 
 ```bash
-docker exec $CONTAINER bash -c "pgrep -f 'benchmark_runner\|vllm.*bench' && echo 'BLOCKED: 性能测试运行中，等待结束' && exit 1 || echo 'OK: 无性能测试进程'"
+docker exec $CONTAINER bash -c "pgrep -f 'benchmark_runner\|sglang.bench_serving' && echo 'BLOCKED: 性能测试运行中，等待结束' && exit 1 || echo 'OK: 无性能测试进程'"
 ```
 
 ---
@@ -153,12 +153,12 @@ docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINE
 **步骤 2：安装依赖**
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH pip install evalscope pyyaml requests"
 ```
 
 如使用 ModelScope 数据源（默认）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install modelscope"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH pip install modelscope"
 ```
 
 **步骤 3：配置**
@@ -180,11 +180,11 @@ dataset_hub: "modelscope"               # modelscope 或 huggingface
 ```bash
 # 方式一：使用配置文件
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
+    PATH=${PY_BIN_DIR}:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 
 # 方式二：命令行参数（无需改配置文件）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
+    PATH=${PY_BIN_DIR}:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
 ```
 
 ## 输出
@@ -242,8 +242,8 @@ sleep 5
 
 2. 关闭 FlagGems，以 native 模式启动服务：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 ```
 等待服务就绪：
 ```bash
@@ -253,7 +253,7 @@ docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.
 3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度）：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    PATH=${PY_BIN_DIR}:\$PATH python3 eval_wrapper.py \
     --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json' \
     --service-log /flagos-workspace/logs/startup_native.log \
     --stall-timeout 300 --max-timeout 3600"
@@ -277,7 +277,7 @@ sleep 5
 2. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    PATH=${PY_BIN_DIR}:\$PATH python3 eval_wrapper.py \
     --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_flagos.json' \
     --service-log /flagos-workspace/logs/startup_flagos.log \
     --stall-timeout 300 --max-timeout 3600"
@@ -377,7 +377,7 @@ tools/
 在提交评测之前，先用一条极简 benchmark 验证服务不会崩溃：
 
 ```bash
-docker exec $CONTAINER bash -c "vllm bench serve \
+docker exec $CONTAINER bash -c "sglang bench_serving \
   --host <service_host> --port <service_port> \
   --model <model_name> --tokenizer <tokenizer_path> \
   --dataset-name random --random-input-len 1024 --random-output-len 15 \
@@ -527,7 +527,7 @@ curl -X GET http://110.43.160.159:5050/evaluation_diffs \
 通过 `accuracy_compare.py` 脚本执行对比：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/accuracy_compare.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/accuracy_compare.py \
     --v1 /flagos-workspace/results/gpqa_native.json \
     --v2 /flagos-workspace/results/gpqa_flagos.json \
     --output /flagos-workspace/results/accuracy_compare.json \
@@ -579,18 +579,18 @@ V2精度下降 > 5% 时：
      --plugin-mode --json
    ```
 3. 按组逐轮累积禁用测试：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C
-4. **每轮算子控制方式**（判据是**当前实际控制方式**而非 env_type——vllm_fl 包存在≠plugin 控制生效。判定：`grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment` 命中=plugin_env 路径，未命中=control_file 路径。plugin_env 路径与性能调优 operator_search.py 走相同的 env_inline 路径）：
-   - **plugin_env 路径**：worker 只读环境变量、**不读控制文件**。使用 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.env_inline`（已含 `VLLM_FL_FLAGOS_BLACKLIST` / `VLLM_FL_OOT_BLACKLIST`）作为启动命令内联前缀重启服务：
+4. **每轮算子控制方式**（判据是**当前实际控制方式**而非 env_type——sglang_fl 包存在≠plugin 控制生效。判定：`grep -q '^SGLANG_FL_PREFER=true' /etc/environment` 命中=plugin_env 路径，未命中=control_file 路径。plugin_env 路径与性能调优 operator_search.py 走相同的 env_inline 路径）：
+   - **plugin_env 路径**：worker 只读环境变量、**不读控制文件**。使用 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.env_inline`（已含 `SGLANG_FL_FLAGOS_BLACKLIST` / `SGLANG_FL_OOT_BLACKLIST`）作为启动命令内联前缀重启服务：
      ```bash
-     # env_inline 形如: USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST=softmax,layer_norm
-     <env_inline> nohup vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1 &
+     # env_inline 形如: USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_BLACKLIST=softmax,layer_norm
+     <env_inline> nohup sglang serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1 &
      ```
-     > ⚠️ **禁止写 `/root/flaggems_ops_control.json`**：plugin 模式 `VLLM_FL_PREFER_ENABLED=true` 会使注入代码 `pass`，控制文件完全无效，写它会导致每轮禁用不生效、调优空转。
-   - **control_file 路径**（含分支 B V1=v1.1/v1.2 场景的 V2：baseline_selector 已清除 `VLLM_FL_PREFER_ENABLED`，flaggems 经注入代码+控制文件生效，即使镜像装有 vllm_fl 包）：使用当轮 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`（`{"include": [...]}`），通过 `start_service.sh` 启动（自动推断 `FLAGGEMS_CONTROL_MODE=only_enable`）。
+     > ⚠️ **禁止写 `/root/flaggems_ops_control.json`**：plugin 模式 `SGLANG_FL_PREFER=true` 会使注入代码 `pass`，控制文件完全无效，写它会导致每轮禁用不生效、调优空转。
+   - **control_file 路径**（含分支 B V1=v1.1/v1.2 场景的 V2：baseline_selector 已清除 `SGLANG_FL_PREFER`，flaggems 经注入代码+控制文件生效，即使镜像装有 sglang_fl 包）：使用当轮 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`（`{"include": [...]}`），通过 `start_service.sh` 启动（自动推断 `FLAGGEMS_CONTROL_MODE=only_enable`）。
    - **不使用** `toggle_flaggems.py --action modify-enable --disabled-ops`
 5. 某轮累积禁用后精度恢复（下降 ≤5%）→ 达标即停，保留所有已累积禁用的算子
 6. **每轮输出算子状态**（见下方格式）
-7. **每轮必须验证生效**：重启后确认 worker 进程真实生效——plugin 场景 `cat /proc/<vllm-pid>/environ | tr '\0' '\n' | grep VLLM_FL_FLAGOS_BLACKLIST` 应含本轮禁用算子；两种场景均可读 `/tmp/flaggems_enable_oplist.txt`（权威来源）确认禁用算子已不在启用列表
+7. **每轮必须验证生效**：重启后确认 worker 进程真实生效——`cat /proc/<sglang-pid>/environ | tr '\0' '\n' | grep SGLANG_FL_FLAGOS_BLACKLIST` 应含本轮禁用算子；再从 /flagos-workspace/logs/startup_flagos.log 的 [GEMS] 行确认禁用算子已无 flagos 实现（权威来源，sglang 分支无 txt 文件）
 
 ## 每轮算子状态输出（强制）
 
@@ -706,7 +706,7 @@ bash skills/flagos-service-startup/tools/safe_restart_service.sh \
 或手动三步（不推荐，容易遗漏）：
 ```bash
 docker restart $CONTAINER && sleep 5
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_round${ROUND}.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_round${ROUND}.log 2>&1"
 docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port 8000 --model-name '$MODEL_NAME' --log-path /flagos-workspace/logs/startup_round${ROUND}.log --mode flagos"
 ```
 
@@ -815,7 +815,7 @@ ISSUE_EOF"
   - V1 评测 → 记录在 `traces/04_quick_accuracy.json` 中
   - V2 评测 → 记录在 `traces/04_quick_accuracy.json` 中
 - [ ] `timing.steps.quick_accuracy` 已更新为本步骤的 `duration_seconds`
-- [ ] 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
+- [ ] 更新报告：`docker exec $CONTAINER bash -c "${PY_BIN_DIR}:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 
@@ -846,7 +846,7 @@ ISSUE_EOF"
 会话可能在调优中途超时，重试时必须先检查是否已有达标结果：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
 import yaml
 with open('/flagos-workspace/shared/context.yaml') as f:
     ctx = yaml.safe_load(f)
@@ -877,7 +877,7 @@ else:
 # SCORE: 本轮评测得分 (如 22.0)
 # BASELINE: V1 基线分数 (如 22.0)
 # DISABLED_OPS: 本轮累积禁用的算子，逗号分隔 (如 "addmm,mm,bmm")
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/persist_tuning_checkpoint.py $ROUND $SCORE $BASELINE '$DISABLED_OPS'"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/persist_tuning_checkpoint.py $ROUND $SCORE $BASELINE '$DISABLED_OPS'"
 ```
 
 该工具会：
@@ -890,12 +890,12 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - **轮次上限 = 分组数**（分几组跑几轮，绝对上限 8 轮），达标即停
 - **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C……逐组追加，直至覆盖所有组（每轮在上一轮基础上追加禁用）
 - 达标标准：累积禁用后 V2 精度下降 ≤5%（相对 V1）
-- **算子控制方式**（按当前实际控制方式区分——`grep -q '^VLLM_FL_PREFER_ENABLED=true' /etc/environment` 命中与否，见模块 C 第4步）：plugin_env 路径用 `cumulative_test_env.env_inline`（`VLLM_FL_FLAGOS_BLACKLIST` 等）内联重启，**禁止写控制文件**（该模式下无效）；control_file 路径才用 `cumulative_test_env.control_file` 白名单写 `/root/flaggems_ops_control.json` + `FLAGGEMS_CONTROL_MODE=only_enable`
+- **算子控制方式**（按当前实际控制方式区分——`grep -q '^SGLANG_FL_PREFER=true' /etc/environment` 命中与否，见模块 C 第4步）：plugin_env 路径用 `cumulative_test_env.env_inline`（`SGLANG_FL_FLAGOS_BLACKLIST` 等）内联重启，**禁止写控制文件**（该模式下无效）；control_file 路径才用 `cumulative_test_env.control_file` 白名单写 `/root/flaggems_ops_control.json` + `FLAGGEMS_CONTROL_MODE=only_enable`
 
 执行后必须完成：
 - 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段
 - 写入 `traces/05_accuracy_tuning.json`
 - 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
-- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
+- 更新报告：`docker exec $CONTAINER bash -c "${PY_BIN_DIR}:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 **注意**：精度调优禁用的算子会传递给后续步骤6，6在此算子集上采集性能基线。

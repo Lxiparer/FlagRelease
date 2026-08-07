@@ -323,7 +323,7 @@ def main():
     if not chip_name or chip_name == gpu_type:
         chip_name = extract_chip_name(gpu_type, vendor)
     tp_size = ctx.get("runtime", {}).get("tp_size", 1)
-    framework = (ctx.get("runtime", {}).get("framework", "vllm") or "vllm").upper()
+    framework = (ctx.get("runtime", {}).get("framework", "sglang") or "sglang").upper()
     workflow_start = ctx.get("timing", {}).get("workflow_start", "")
     release_ts = ctx.get("release", {}).get("timestamp", "")
     create_dt = format_datetime(workflow_start)
@@ -343,10 +343,10 @@ def main():
 
     flaggems_ver = flag_packages.get("flaggems", "")
     flagtree_ver = environment.get("flagtree_version", "")
-    vllm_ver = core_packages.get("vllm", "")
-    plugin_ver = flag_packages.get("vllm_plugin", "")
+    sglang_ver = core_packages.get("sglang", "")
+    plugin_ver = flag_packages.get("sglang_plugin", "")
     flagcx_ver = flag_packages.get("flagcx", "")
-    framework_ver = vllm_ver or ""
+    framework_ver = sglang_ver or ""
 
     # 算子列表和数量
     gems_op_list = optimization.get("enabled_ops", []) or service.get("initial_operator_list", [])

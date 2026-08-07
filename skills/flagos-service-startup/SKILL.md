@@ -79,8 +79,8 @@ flaggems_control:
   disable_method: <来自 pre-service-inspection>
   integration_type: <来自 pre-service-inspection>
 environment:
-  env_type: <来自 pre-service-inspection>       # native | vllm_flaggems | vllm_plugin_flaggems
-  flaggems_txt_path: <来自 pre-service-inspection>  # vllm_flaggems 场景的 txt 路径
+  env_type: <来自 pre-service-inspection>       # native | sglang_plugin_flaggems | sglang_plugin_flaggems
+  flaggems_txt_path: <来自 pre-service-inspection>  # sglang_plugin_flaggems 场景的 txt 路径
   gems_txt_auto_detect: <来自 pre-service-inspection>
 ```
 
@@ -101,7 +101,7 @@ service:
   initial_operator_list: [...]
   max_model_len: <服务实际的 max_model_len>
 runtime:
-  framework: vllm  # 固定值，仅支持 vllm
+  framework: sglang  # 固定值，仅支持 sglang（sglang 分支）
   gpu_count: <GPU 数量>
   tp_size: <tensor-parallel-size>
   tp_reason: <TP 推算原因>
@@ -123,7 +123,7 @@ sleep 5
 
 备选方式（仅当不能重启容器时）：
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -9 -f 'sglang.launch_server\|sglang serve\|python3 -m sglang\|multiproc_worker' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 2 — 切换 FlagGems 状态（按 env_type 分路径）
@@ -135,75 +135,71 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 
 ---
 
-### env_type = native（纯 vllm 原生）
+### env_type = native（纯 sglang 原生）
 
 无 FlagGems 可切换，无需调用 `toggle_flaggems.py`。
-- Native 模式 / FlagOS 模式均直接启动标准 vllm 命令
+- Native 模式 / FlagOS 模式均直接启动标准 sglang serve 命令（经 start_service.sh）
 - 跳过算子列表记录（步骤 5）
 - 不执行 V2/V3 相关步骤
 
 ---
 
-### env_type = vllm_flaggems（通过环境变量驱动 FlagGems 开关）
+### env_type = sglang_plugin_flaggems（通过 SGLANG_FL_* 环境变量控制 FlagGems 开关）
 
-环境检测阶段（步骤2）已自动完成一次性代码注入，将原始 `flag_gems.enable()` 替换为环境变量驱动逻辑。后续所有 FlagGems 开关和算子控制通过环境变量 + 配置文件实现，不再修改源码。
+sglang 分支：无代码注入/控制文件机制（`FLAGGEMS_CONTROL_MODE` / `/root/flaggems_ops_control.json` 均不适用），
+FlagGems 开关与算子控制统一走 SGLANG_FL_* 环境变量（sglang_fl 插件经 entry_points 自动加载）。
 
 **控制机制**：
-- `USE_FLAGGEMS`：控制 FlagGems 开关（`1`=开启，`0`=关闭）
-- `FLAGGEMS_CONTROL_MODE`：控制算子分支模式（`only_enable`=白名单，`unused`=黑名单）
-- `/root/flaggems_ops_control.json`：算子控制配置文件
+- `USE_FLAGGEMS`：Layer 1 总开关（`1`=开启替换，`0`=关闭）
+- `SGLANG_FL_PREFER`：调度偏好（`flagos`=优先 flagos 实现，`reference`=参考实现，`vendor`=厂商原生）
+- `SGLANG_FL_FLAGOS_WHITELIST` / `SGLANG_FL_FLAGOS_BLACKLIST`：算子白/黑名单
+- `SGLANG_PLUGINS`：显式指定插件过滤（空串=不加载 sglang_fl，基线纯净场景）
 
 **Native 模式**（关闭 FlagGems）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --json"
 ```
-输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=0`），在启动命令中使用 `env_inline` 作为内联前缀。
+输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference`），在启动命令中使用 `env_inline` 作为内联前缀。
 
 **Native 模式服务启动命令**（使用 `start_service.sh --mode native`）：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=0 SGLANG_FL_PREFER=reference bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 ```
 
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json"
 ```
-输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=1`），同时写入控制文件 `/root/flaggems_ops_control.json`（默认全量开启）。
+输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos`）。sglang 场景无控制文件写入；持久化经 `persist_op_config.py --auto --env-type sglang_plugin_flaggems` 固化到 /etc/environment。
 
-**注意**：如果 `optimization.disabled_ops` 非空（之前已禁用部分算子），应改用 `--action modify-enable --disabled-ops '<list>'`，确保已禁用算子不被重新加载。`--action enable` 会自动检测已有 control file 并继承 `FLAGGEMS_CONTROL_MODE`，但显式使用 `modify-enable` 更可靠。
+**注意**：如果 `optimization.disabled_ops` 非空（之前已禁用部分算子），应改用 `apply_op_config.py --mode custom --flagos-blacklist '<list>'` 生成 env_inline（SGLANG_FL_FLAGOS_BLACKLIST）作启动前缀，确保已禁用算子不被重新加载。
 
 **服务启动命令**（使用内联环境变量前缀）：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 <startup_command> > /flagos-workspace/logs/startup_flagos.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos <startup_command> > /flagos-workspace/logs/startup_flagos.log 2>&1"
 ```
 
 **算子列表获取**（启动后）：
-- 读取 `environment.flaggems_txt_path`（由 pre-service-inspection 步骤 2.6 写入）
-- 如果 `gems_txt_auto_detect: true`（代码解析未找到路径），启动后调用：
-  ```bash
-  docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action find-gems-txt --json"
-  ```
-  从输出的 `recommended` 字段获取路径，回写 `context.yaml` 的 `environment.flaggems_txt_path`
-
-**未注入兜底**：如果环境检测阶段注入失败（源码格式异常），toggle_flaggems.py 自动降级为原有的注释/取消注释方式。
+- 无 txt 机制：从服务日志 `[GEMS]` 行（/flagos-workspace/logs/startup_flagos.log）解析运行时实际启用算子
+- 或经 dispatch 日志（`[DISPATCH] Op 'xxx' -> 'yyy'`）核对算子调度路径
 
 ---
 
-### env_type = vllm_plugin_flaggems（通过环境变量控制 FlagGems 开关）
+### env_type = sglang_plugin_flaggems（通过环境变量控制 FlagGems 开关）
 
 **Native 模式**（关闭 FlagGems）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --integration-type plugin --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --integration-type plugin --json"
 ```
 输出 JSON 包含 `env_vars` 和 `env_inline` 字段，在启动命令中使用 `env_inline` 作为内联前缀。
 
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --integration-type plugin --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --integration-type plugin --json"
 ```
 
 **算子列表获取**（启动后）：
-- 检查 `/tmp/flaggems_enable_oplist.txt`（plugin 架构下的权威算子列表）
+- sglang 分支无 txt 机制：从服务日志 `[GEMS]` 行（/flagos-workspace/logs/startup_flagos.log）解析运行时实际启用算子
 
 ## 步骤 2.4 — GPU 空闲检测（强制）
 
@@ -212,7 +208,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 使用统一检测脚本（自动适配 NVIDIA / 华为昇腾 / 沐曦等厂商）：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/detect_gpu.py --check-free --vendor \$(python3 -c \"import yaml; print(yaml.safe_load(open('/flagos-workspace/shared/context.yaml')).get('gpu',{}).get('vendor',''))\")"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/detect_gpu.py --check-free --vendor \$(python3 -c \"import yaml; print(yaml.safe_load(open('/flagos-workspace/shared/context.yaml')).get('gpu',{}).get('vendor',''))\")"
 ```
 
 输出 JSON 格式：`{vendor, free_gpus: [idx...], busy_gpus: [idx...], total, details: [{index, used_mib, total_mib, free_mib, usage_pct}...], visible_devices_env}`
@@ -252,7 +248,7 @@ runtime:
 在启动服务前，自动推算最小可用 `--tensor-parallel-size`：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/calc_tp_size.py --model-path $MODEL_PATH --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/calc_tp_size.py --model-path $MODEL_PATH --json"
 ```
 
 输出示例：
@@ -348,17 +344,17 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV
 
 **Plugin 场景**（内联环境变量前缀）：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV}=${VISIBLE_DEVICES:-} PATH=/opt/conda/bin:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV}=${VISIBLE_DEVICES:-} PATH=${PY_BIN_DIR}:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
 ```
 
 其中 `${VISIBLE_DEVICES_ENV}` 从 context.yaml 的 `gpu.visible_devices_env` 获取（如 `CUDA_VISIBLE_DEVICES`、`ASCEND_RT_VISIBLE_DEVICES` 等），`${VISIBLE_DEVICES}` 从 `runtime.cuda_visible_devices` 获取。
 
-### Plugin 场景 vllm 服务启动模板
+### Plugin 场景 sglang 服务启动模板
 
-Plugin 环境下服务启动命令统一使用标准 vllm 格式，FlagGems 控制通过**内联环境变量**注入，与启动命令分离。
+Plugin 环境下服务启动命令统一使用标准 sglang serve 格式，FlagGems 控制通过**内联环境变量**（SGLANG_FL_*）注入，与启动命令分离。
 
 ```bash
-vllm serve ${MODEL_PATH} \
+sglang serve ${MODEL_PATH} \
     --host 0.0.0.0 \
     --port ${PORT:-8000} \
     --served-model-name ${MODEL_NAME} \
@@ -381,16 +377,16 @@ vllm serve ${MODEL_PATH} \
 
 ```bash
 # Default（不修改环境，原样启动）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_default.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_default.log 2>&1"
 
 # Native（关闭 FlagGems）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 
 # FlagOS Full（全量 FlagGems）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_flagos.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos > /flagos-workspace/logs/startup_flagos.log 2>&1"
 
 # FlagOS Optimized（自定义算子集）
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos_optimized > /flagos-workspace/logs/startup_flagos.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos_optimized > /flagos-workspace/logs/startup_flagos.log 2>&1"
 ```
 
 四种模式差异仅在内联环境变量前缀（由 `toggle_flaggems.py` 或 `apply_op_config.py` 的 JSON 输出中的 `env_inline` 提供）。
@@ -399,7 +395,7 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\
 - 具体参数值从容器 README / 用户输入 / context.yaml 获取
 - `--served-model-name` 默认使用模型目录名
 - `--tensor-parallel-size` 默认使用 `calc_tp_size.py` 的推荐值（基于模型大小和单卡显存自动推算），fallback 到 GPU 总数
-- 业务环境变量（`VLLM_USE_MODELSCOPE` 等）按需在 docker exec 中追加，不写入模板
+- 业务环境变量（`USE_FLAGGEMS`、`SGLANG_FL_*` 等）按需在 docker exec 中追加，不写入模板
 - `--max-model-len` 使用 context.yaml 中 `service.max_model_len` 的值（由步骤 2.6 决策）
 
 ## 步骤 4 — 等待服务就绪（动态超时）
@@ -510,13 +506,13 @@ fi
 
 ```bash
 # 以 oplist 文件为准，同步保存到 results/ops_list.json
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
   --save-ops /flagos-workspace/results/ops_list.json"
 
 # 保存初始全开算子列表的 txt 副本到 results/（供事后查看和对比）
 docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/initial_oplist.txt
 
-# 保存初始控制文件副本（供报告中配置 vs 运行时 txt 对比，仅首次启动时保存）
+# 保存初始算子配置快照（供报告中配置 vs 运行时 [GEMS] 日志对比，仅首次启动时保存）
 docker exec $CONTAINER bash -c '[ ! -f /flagos-workspace/results/ops_control_initial.json ] && cp /root/flaggems_ops_control.json /flagos-workspace/results/ops_control_initial.json 2>/dev/null || true'
 ```
 
@@ -641,7 +637,7 @@ ISSUE_EOF"
   - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
 - 启动失败时，`logs/issues_startup.log` 已追加写入问题记录
 - `timing.steps.service_startup` 已更新为本步骤的 `duration_seconds`
-- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
+- 更新报告：`docker exec $CONTAINER bash -c "${PY_BIN_DIR}:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 
@@ -691,13 +687,13 @@ ISSUE_EOF"
 9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
 10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 
-**崩溃重试时的服务启动方式**：禁用算子后重启服务时，**必须使用 `start_service.sh`**（而非直接 `docker exec -d` 拼接 vllm 命令），确保 `FLAGGEMS_CONTROL_MODE` 等环境变量被正确加载：
+**崩溃重试时的服务启动方式**：禁用算子后重启服务时，**必须使用 `start_service.sh`**（而非直接 `docker exec -d` 拼接 sglang 命令），确保 `SGLANG_FL_*` 等环境变量被正确加载：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos"
 ```
 如果必须使用 `docker exec -d` 直接启动，则需内联传递环境变量：
 ```bash
-docker exec -d $CONTAINER bash -c "source /etc/environment && export USE_FLAGGEMS=1 && cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH vllm serve ..."
+docker exec -d $CONTAINER bash -c "source /etc/environment && export USE_FLAGGEMS=1 && cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH sglang serve ..."
 ```
 
 **关键判定**：`workflow.service_ok` 表示"FlagGems 模式可用"，不是"native 模式可用"。native 能启动但 FlagGems 不能 → `service_ok = false`。只有 FlagGems 模式（含禁用部分算子后）能正常启动 → `service_ok = true`。

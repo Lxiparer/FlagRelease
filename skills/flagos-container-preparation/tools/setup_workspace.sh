@@ -149,8 +149,8 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         rm -f /workspace/gpqa_result.json
         rm -f /flagos-workspace/scripts/gpqa_result.json
 
-        # 停止可能残留的 vllm 服务进程
-        pkill -f 'vllm.entrypoints' 2>/dev/null || true
+        # 停止可能残留的 sglang 服务进程
+        pkill -9 -f 'sglang.launch_server\|sglang serve\|python3 -m sglang\|multiproc_worker' 2>/dev/null || true
     "
     # 重置 context.yaml：从项目模板复制，确保与模板字段同步
     docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
@@ -231,7 +231,7 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/service_monitor.py:scripts/service_monitor.py"
     # 服务启动（供 operator_search.py 调用）
     "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
-    # V1 三选状态机（分支 B，选定后固化 VLLM_PLUGINS + 写 context baseline.*）
+    # V1 二选状态机（分支 B，选定后固化 SGLANG_PLUGINS/USE_FLAGGEMS + 写 context baseline.*）
     "skills/flagos-service-startup/tools/baseline_selector.py:scripts/baseline_selector.py"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
@@ -257,8 +257,10 @@ SCRIPT_MAP=(
     "skills/flagos-operator-replacement/tools/operator_reduction.py:scripts/operator_reduction.py"
     # 组件安装（统一入口）
     "skills/flagos-component-install/tools/install_component.py:scripts/install_component.py"
-    # FlagTree 安装脚本
+    # FlagTree 安装脚本（sglang 分支硬闸门禁用，保留部署以兼容引用）
     "skills/flagos-component-install/tools/install_flagtree.sh:scripts/install_flagtree.sh"
+    # 补丁保护（sglang 分支核心机制：FlagGems 安装/升级后自动恢复三手工补丁）
+    "skills/flagos-component-install/tools/apply_patches.sh:scripts/apply_patches.sh"
     # GPQA Diamond 快速精度评测（eval/ 兼容 SKILL.md 引用，scripts/ 供编排层统一调用）
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:eval/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
@@ -310,6 +312,16 @@ done
 # .sh 文件需要 +x 权限
 docker exec "${CONTAINER}" bash -c "chmod +x /flagos-workspace/scripts/*.sh 2>/dev/null || true"
 
+# 补丁文件 → /flagos-workspace/patches/（apply_patches.sh 的 PATCHES_DIR 默认 scripts/../patches）
+docker exec "${CONTAINER}" mkdir -p /flagos-workspace/patches
+for patch_file in "${PROJECT_ROOT}"/skills/flagos-component-install/patches/*.patch; do
+    if [ -f "$patch_file" ]; then
+        docker cp "$patch_file" "${CONTAINER}:/flagos-workspace/patches/"
+        echo "  ✓ patches/$(basename "$patch_file")"
+        SCRIPTS_COPIED=$((SCRIPTS_COPIED + 1))
+    fi
+done
+
 # 评测脚本（eval_*.py 批量复制）
 for eval_script in "${PROJECT_ROOT}"/skills/flagos-eval-comprehensive/tools/eval_*.py; do
     if [ -f "$eval_script" ]; then
@@ -349,8 +361,8 @@ fi
 # 4. 安装脚本依赖（如需要）
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
-    PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
-    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
+    ${PY_BIN_DIR}:\$PATH python3 -c 'import yaml' 2>/dev/null || ${PY_BIN_DIR}:\$PATH pip install pyyaml -q 2>/dev/null || true
+    ${PY_BIN_DIR}:\$PATH python3 -c 'import evalscope' 2>/dev/null || ${PY_BIN_DIR}:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
@@ -384,7 +396,7 @@ fi
 
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
 echo "[4.6/6] 预装评测依赖..."
-docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
+docker exec "${CONTAINER}" bash -c "${PY_BIN_DIR}:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
     echo "  ✓ 评测依赖预装完成" || \
     echo "  ⚠ 评测依赖安装失败（非致命，评测阶段会重试）"
 
@@ -419,7 +431,7 @@ CTX_CMD_ARGS+=(--set "container.status=running")
 [ -n "${MODEL_NAME}" ] && CTX_CMD_ARGS+=(--set "model.name=${MODEL_NAME}")
 # 用 printf %q 安全转义每个参数，避免空格/特殊字符注入
 CTX_SET_ESCAPED=$(printf ' %q' "${CTX_CMD_ARGS[@]}")
-docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py${CTX_SET_ESCAPED} --json" >/dev/null 2>&1 && \
+docker exec "${CONTAINER}" bash -c "${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py${CTX_SET_ESCAPED} --json" >/dev/null 2>&1 && \
     echo "  ✓ 基础 context 已写入 (container.name, status, workspace, model)" || \
     echo "  ⚠ 基础 context 写入失败（非致命，Claude 会补写）"
 

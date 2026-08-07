@@ -5,7 +5,7 @@ version: 8.0.0
 triggers:
   - 性能测试
   - benchmark
-  - vllm bench
+  - sglang bench_serving
   - 吞吐量测试
   - performance test
 depends_on:
@@ -47,7 +47,7 @@ provides:
 
 ## 强制约束
 
-**只能通过 `benchmark_runner.py` 执行性能测试**，禁止直接运行 `vllm bench serve`。
+**只能通过 `benchmark_runner.py` 执行性能测试**，禁止直接运行 `sglang bench_serving`。
 
 **启动前互斥检查**：性能测试启动前，必须确认没有正在运行的精度评测进程。并发执行会互相抢占 GPU 资源，导致结果不可信。
 
@@ -84,7 +84,7 @@ ${CMD_PREFIX} rm -rf /tmp/triton_cache/ 2>/dev/null
 
 # Plugin 场景的算子覆盖率检查
 
-当 `vllm_plugin_installed=true` 时，在性能测试前检查算子覆盖率：
+当 `sglang_plugin_installed=true` 时，在性能测试前检查算子覆盖率：
 
 ```bash
 # 检查 FlagGems 实际覆盖了多少 aten 算子
@@ -169,18 +169,18 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 
 ```bash
 # 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
 # 2. ×1.2 合成基线（吞吐×1.2、延迟÷1.2），按 native_performance.json 标准格式落盘
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
 ```
 
 合成文件带 `_meta.synthetic=true` 标记：下游 `performance_compare.py` / `operator_optimizer.py init` / `operator_search.py` 照常当 V1 基线消费（零特殊处理），`generate_report.py` 识别标记并在报告注明"合成基线，非实测 V1"。脚本拒绝覆盖已存在的实测 V1 基线（防误用）。80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍。
 
 ```bash
 # 关闭 FlagGems
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
 # 以 native 模式启动服务
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 # 等待服务就绪
 docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
 ```
@@ -188,7 +188,7 @@ docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.
 运行 V1 基线 benchmark：
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH python3 scripts/benchmark_runner.py \
   --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name native_performance \
@@ -235,7 +235,7 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 5. 不可恢复（连续 2 轮无法定位新算子）→ 调用 `issue_reporter.py full --type operator-crash` → 设 `performance_ok=false` → 跳到步骤 8 发布
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH python3 scripts/benchmark_runner.py \
   --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name flagos_performance \
@@ -248,7 +248,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 **强制规则**：V1 和 V2 性能测试完成后，必须调用 `performance_compare.py` 生成对比。禁止跳过此步骤或手动计算比值。
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH python3 scripts/performance_compare.py \
   --native results/native_performance.json \
   --flagos-full results/flagos_performance.json \
   --output results/performance_compare.csv \
@@ -296,7 +296,7 @@ ELSE:
 优化完成后重测：
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH python3 scripts/benchmark_runner.py \
   --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name flagos_optimized \
@@ -307,7 +307,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 ## 步骤 9：性能对比 + 报告
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH python3 scripts/performance_compare.py \
   --native results/native_performance.json \
   --flagos-optimized results/flagos_optimized.json \
   --flagos-full results/flagos_performance.json \
@@ -429,7 +429,7 @@ ISSUE_EOF"
   - `traces/06_quick_performance.json`（V1/V2 性能测试 + 对比）
   - `traces/07_performance_tuning.json`（算子优化记录，仅触发步骤7时）
 - `timing.steps.quick_performance` 已更新为本步骤的 `duration_seconds`
-- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
+- 更新报告：`docker exec $CONTAINER bash -c "${PY_BIN_DIR}:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 

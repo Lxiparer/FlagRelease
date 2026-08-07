@@ -157,12 +157,12 @@ V4 列写明：成功(beats_v3产出-v4镜像) / 跳过(V3精度不达标未触�
 
 | # | 模型 | Issue 类型 | 目标组件 | 问题摘要 | 涉及算子 | 产出阶段 |
 |---|------|-----------|---------|---------|---------|---------|
-| 1 | <model> | <type: accuracy-degraded/plugin-error/performance-degraded> | <FlagGems/vllm-plugin-FL> | <摘要> | <算子列表> | <V阶段> |
+| 1 | <model> | <type: accuracy-degraded/plugin-error/performance-degraded> | <FlagGems/sglang-plugin-FL> | <摘要> | <算子列表> | <V阶段> |
 
 按组件统计：
 ```
 FlagGems:        <n> issues (<types>)
-vllm-plugin-FL:  <n> issues (<types>)
+sglang-plugin-FL:  <n> issues (<types>)
 ```
 
 ---

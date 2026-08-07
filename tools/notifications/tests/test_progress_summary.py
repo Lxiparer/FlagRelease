@@ -180,7 +180,7 @@ class ProgressSummaryTests(unittest.TestCase):
             "repo/tianshu:model": "iluvatar",
             "repo/hy3-metax001-gems:v1": "metax",
             "repo/nvidia002-cuda:v1": "nvidia",
-            "harbor.baai.ac.cn/flagrelease-public/hy3-metax001-gems5.0.2-tree0.5.1-cxnone-plugin0.2.0-vllm0.20.2-cp312-pt28-maca37-x64-3.8.1:202607061058": "metax",
+            "harbor.baai.ac.cn/flagrelease-public/hy3-metax001-gems5.0.2-tree0.5.1-cxnone-plugin0.2.0-sglang0.5.11-cp312-pt28-maca37-x64-3.8.1:202607061058": "metax",
             "repo/notmetaxmodel:v1": "unknown",
             "repo/metax-hygon:model": "unknown",
             "repo/metax001-kunlun:v1": "unknown",

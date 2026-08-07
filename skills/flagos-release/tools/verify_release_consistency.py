@@ -2,7 +2,7 @@
 """verify_release_consistency.py — 发布一致性校验（批处理结束兜底）
 
 背景（2026-08-05 Mistral-Small-24B V3 发布事故）：
-发布命令因 env VAR=... / /opt/conda/bin/python3 前缀未命中 Bash 白名单被 headless
+发布命令因 env VAR=... / ${PY_BIN_DIR}/python3 前缀未命中 Bash 白名单被 headless
 自动拒绝，main.py 未执行但流程继续，造成"语义正确却静默未发布"。白名单已加兜底规则
 （settings.local.json 的 env * / 绝对路径 / nohup 前缀），本脚本作为最后一道防线：
 发布步骤 trace 声称 success 时，校验镜像 tag 确实已产出并回写 context；缺失则报错
@@ -155,7 +155,7 @@ def check_online_readme(host_base: str, container: str, issues: List[str]):
         result = subprocess.run(
             ["docker", "exec", container, "bash", "-c",
              f"cd /flagos-workspace/scripts 2>/dev/null && "
-             f"PATH=/opt/conda/bin:$PATH python3 -c "
+             f"{PY_BIN_DIR}/python3 -c "
              f"\"from modelscope.hub.api import HubApi; "
              f"api=HubApi(); "
              f"print(api.get_model('{ms_url.split('/models/')[-1]}').model_id or '') \" 2>/dev/null || echo ''"],

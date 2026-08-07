@@ -84,18 +84,18 @@ environment:
 ## 步骤 1 — 查看当前版本
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip show flag-gems 2>/dev/null"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH pip show flag-gems 2>/dev/null"
 ```
 
 FlagTree 状态：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py --component flagtree --action verify --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py --component flagtree --action verify --json"
 ```
 
 ## 步骤 2 — 停止服务（如在运行）
 
 ```bash
-docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
+docker exec $CONTAINER bash -c "pkill -9 -f 'sglang.launch_server\|sglang serve\|python3 -m sglang\|multiproc_worker' 2>/dev/null; sleep 3"
 ```
 
 ## 步骤 3 — 执行安装/升级
@@ -103,27 +103,27 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|flagscale' 2>/dev/null; sleep 3"
 ### FlagGems 安装
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flaggems --action install --json"
 ```
 
 指定版本：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flaggems --action install --version 4.2.1rc0 --json"
 ```
 
 ### FlagGems 升级
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flaggems --action upgrade --json"
 ```
 
 ### FlagTree 安装
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flagtree --action install --vendor nvidia --json"
 ```
 
@@ -131,14 +131,14 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 源码编译（无预编译包时）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flagtree --action install --vendor ascend --source --json"
 ```
 
 ### FlagTree 卸载
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flagtree --action uninstall --json"
 ```
 
@@ -147,7 +147,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### FlagTree 验证
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flagtree --action verify --json"
 ```
 
@@ -155,7 +155,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 FlagGems 验证：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flaggems --action verify --json"
 ```
 

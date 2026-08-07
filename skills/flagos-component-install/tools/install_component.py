@@ -17,8 +17,8 @@
 """
 install_component.py — FlagOS 生态组件统一安装/升级/卸载
 
-支持组件：flaggems, flagtree
-FlagTree 操作委托给 install_flagtree.sh。
+支持组件：flaggems（sglang 分支 flagtree 硬闸门禁用——误装会卸载 triton-cx）
+FlagGems 安装/升级成功后自动触发 apply_patches.sh --apply（三手工补丁保护第一防线）。
 
 Usage:
     # FlagGems 安装（最新版）
@@ -125,6 +125,7 @@ def install_flaggems(version=None, proxy=None):
 
     if result["success"]:
         result["api"] = check_flaggems_api()
+        result["patches"] = _reapply_patches()   # 补丁保护第一防线
 
     return result
 
@@ -155,61 +156,59 @@ def upgrade_flaggems(proxy=None):
 
     if result["success"]:
         result["api"] = check_flaggems_api()
+        result["patches"] = _reapply_patches()   # 补丁保护第一防线
 
     return result
 
 
 # =============================================================================
-# FlagTree 操作（委托给 install_flagtree.sh）
+# FlagTree 操作（sglang 分支：硬闸门，不委托 install_flagtree.sh）
 # =============================================================================
 
 def handle_flagtree(action, vendor=None, version=None, source=False, branch=None, json_output=False):
-    """FlagTree 操作委托给 install_flagtree.sh"""
-    if not os.path.isfile(FLAGTREE_SCRIPT):
-        return {
-            "component": "flagtree",
-            "action": action,
-            "success": False,
-            "message": f"install_flagtree.sh 不存在: {FLAGTREE_SCRIPT}",
-            "timestamp": datetime.now().isoformat(),
-        }
+    """FlagTree 操作（sglang 分支硬闸门：一律 skipped，不执行安装）。
 
-    # 构建命令
-    cmd_parts = [f"bash {FLAGTREE_SCRIPT}", action]
-    if vendor:
-        cmd_parts.extend(["--vendor", vendor])
-    if version:
-        cmd_parts.extend(["--version", version])
-    if source:
-        cmd_parts.append("--source")
-    if branch:
-        cmd_parts.extend(["--branch", branch])
-
-    cmd = " ".join(cmd_parts)
-    code, out, err = run_cmd(cmd, timeout=600)
-
-    result = {
+    sglang 环境的 FlagCX 运行时是 triton-cx 3.5.1，安装 flagtree 会与其依赖冲突
+    并卸载 triton-cx（灾难性）。任何 flagtree 操作直接返回 skipped，不调用
+    install_flagtree.sh。本函数保留签名以兼容调用方，内部不再执行任何命令。
+    """
+    return {
         "component": "flagtree",
         "action": action,
-        "success": code == 0,
-        "output": out,
+        "success": True,
+        "skipped": True,
+        "message": (
+            "sglang 分支禁用 flagtree：环境依赖 triton-cx（FlagCX 运行时），"
+            "安装 flagtree 会卸载 triton-cx。如需底层编译器能力请用 triton-cx。"
+        ),
         "timestamp": datetime.now().isoformat(),
     }
 
-    if code != 0:
-        result["error"] = err or out
 
-    # verify 输出包含 JSON，尝试解析
-    if action == "verify" and out:
-        try:
-            start = out.index("{")
-            end = out.rindex("}") + 1
-            verify_data = json.loads(out[start:end])
-            result["verify"] = verify_data
-        except (ValueError, json.JSONDecodeError):
-            pass
+# =============================================================================
+# 补丁恢复（FlagGems 安装/升级后自动调用）
+# =============================================================================
 
-    return result
+APPLY_PATCHES_SCRIPT = "/flagos-workspace/scripts/apply_patches.sh"
+
+
+def _reapply_patches():
+    """FlagGems 安装/升级成功后重新应用手工补丁（sglang 分支第一防线）。
+
+    pip install/upgrade 会覆盖 flag_gems/triton 文件，冲掉 4 个手工补丁
+    （libdevice.py pow、flag_gems pow dtype、cat/exponential_、enable() record）。
+    此处直接调用 apply_patches.sh --apply（幂等，marker 锚点检测）。
+    """
+    if not os.path.isfile(APPLY_PATCHES_SCRIPT):
+        return {
+            "applied": False,
+            "message": f"apply_patches.sh 不存在: {APPLY_PATCHES_SCRIPT}（跳过，start_service 启动前会兜底校验）",
+        }
+    code, out, err = run_cmd(f"bash {APPLY_PATCHES_SCRIPT} --apply", timeout=120)
+    return {
+        "applied": code == 0,
+        "message": out or err or ("补丁已恢复" if code == 0 else "补丁恢复失败"),
+    }
 
 
 # =============================================================================
@@ -318,9 +317,7 @@ def main():
 
         if action == "verify":
             if args.component == "flagtree":
-                v = result.get("verify", {})
-                print(f"  FlagTree: {'v' + v.get('flagtree_version', '?') if v.get('flagtree_installed') else '未安装'}")
-                print(f"  Triton:   {'v' + v.get('triton_version', '?') if v.get('triton_installed') else '未安装'}")
+                print(f"  FlagTree: skipped（sglang 分支禁用，依赖 triton-cx 而非 flagtree）")
             else:
                 print(f"  版本: {result.get('version', '未安装')}")
                 api = result.get("api", {})

@@ -56,12 +56,13 @@ if [ "$VENDOR" = "zhenwu" ]; then
     PIP_LIST=$(pip list 2>/dev/null || echo "")
     TREE_VER=$(parse_ver "$PIP_LIST" flagtree)
     GEMS_VER=$(parse_ver "$PIP_LIST" flag_gems)
-    VLLM_VER=$(parse_ver "$PIP_LIST" vllm)
-    PLUGIN_VER=$(parse_ver "$PIP_LIST" vllm-plugin-fl)
-    CX_VER=$(parse_ver "$PIP_LIST" flagcx)
+    SGLANG_VER=$(parse_ver "$PIP_LIST" sglang)
+    PLUGIN_VER=$(parse_ver "$PIP_LIST" sglang-plugin-fl)
+    CX_VER=$(parse_ver "$PIP_LIST" triton-cx)   # sglang 分支 cx 层 = triton-cx（FlagCX 运行时）
+    [ -z "$CX_VER" ] && CX_VER=$(parse_ver "$PIP_LIST" flagcx)
     TREE_VER="${TREE_VER:-none}"
     GEMS_VER="${GEMS_VER:-none}"
-    VLLM_VER="${VLLM_VER:-none}"
+    SGLANG_VER="${SGLANG_VER:-none}"
     PLUGIN_VER="${PLUGIN_VER:-none}"
     CX_VER="${CX_VER:-none}"
 
@@ -78,10 +79,10 @@ if [ "$VENDOR" = "zhenwu" ]; then
 
     G=$(semver "$GEMS_VER"); T=$(semver "$TREE_VER")
     C=$(semver "$CX_VER"); P=$(semver "$PLUGIN_VER")
-    V=$(semver "$VLLM_VER"); PY=$(cver "$PYTHON_VER"); PT=$(cver "$TORCH_VER")
+    V=$(semver "$SGLANG_VER"); PY=$(cver "$PYTHON_VER"); PT=$(cver "$TORCH_VER")
     HV=$(cver "$HGGC_VER")
 
-    echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-hggc${HV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+    echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-hggc${HV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
     exit 0
 fi
 
@@ -111,13 +112,14 @@ esac
 PIP_LIST=$(run "pip list 2>/dev/null")
 TREE_VER=$(parse_ver "$PIP_LIST" flagtree)
 GEMS_VER=$(parse_ver "$PIP_LIST" flag_gems)
-VLLM_VER=$(parse_ver "$PIP_LIST" vllm)
-PLUGIN_VER=$(parse_ver "$PIP_LIST" vllm-plugin-fl)
-[ -z "$PLUGIN_VER" ] && PLUGIN_VER=$(parse_ver "$PIP_LIST" vllm_fl)
-CX_VER=$(parse_ver "$PIP_LIST" flagcx)
+SGLANG_VER=$(parse_ver "$PIP_LIST" sglang)
+PLUGIN_VER=$(parse_ver "$PIP_LIST" sglang-plugin-fl)
+[ -z "$PLUGIN_VER" ] && PLUGIN_VER=$(parse_ver "$PIP_LIST" sglang_fl)
+CX_VER=$(parse_ver "$PIP_LIST" triton-cx)
+CX_VER=${CX_VER:-$(parse_ver "$PIP_LIST" flagcx)}
 TREE_VER="${TREE_VER:-none}"
 GEMS_VER="${GEMS_VER:-none}"
-VLLM_VER="${VLLM_VER:-none}"
+SGLANG_VER="${SGLANG_VER:-none}"
 PLUGIN_VER="${PLUGIN_VER:-none}"
 CX_VER="${CX_VER:-none}"
 
@@ -128,22 +130,16 @@ TORCH_VER="${TORCH_VER:-none}"
 ARCH=$(carc "$(run "uname -m")")
 TIMESTAMP=$(date +"%Y%m%d%H%M")
 
-# 公共版本压缩 (顺序: gems, tree, cx, plugin | vllm, python, torch)
+# 公共版本压缩 (顺序: gems, tree, cx, plugin | sglang, python, torch)
 G=$(semver "$GEMS_VER"); T=$(semver "$TREE_VER")
 C=$(semver "$CX_VER"); P=$(semver "$PLUGIN_VER")
-V=$(semver "$VLLM_VER"); PY=$(cver "$PYTHON_VER"); PT=$(cver "$TORCH_VER")
+V=$(semver "$SGLANG_VER"); PY=$(cver "$PYTHON_VER"); PT=$(cver "$TORCH_VER")
 
 # ========== 厂商特有逻辑 ==========
 case "$VENDOR" in
     ascend)
         GPU="ascend001"
-        VLLM_ASCEND_VER=$(parse_ver "$PIP_LIST" vllm-ascend)
-        if [ -n "$VLLM_ASCEND_VER" ]; then
-            V=$(semver "$VLLM_ASCEND_VER")
-            VL="vllm-ascend"
-        else
-            VL="vllm"
-        fi
+        VL="sglang"   # sglang 分支无 sglang-ascend 包，直接用 sglang 版本
         TORCH_NPU_VER=$(parse_ver "$PIP_LIST" torch_npu)
         TORCH_NPU_VER="${TORCH_NPU_VER:-none}"
         PT=$(cver "$TORCH_NPU_VER")
@@ -164,7 +160,7 @@ case "$VENDOR" in
         DRIVER=$(run "hy-smi --showdriverversion 2>/dev/null | grep -oP 'Driver Version:\s*\K[^\s]+'" )
         [ -z "$DRIVER" ] || [ "$DRIVER" = "none" ] && DRIVER=$(hy-smi --showdriverversion 2>/dev/null | grep -oP 'Driver Version:\s*\K[^\s]+' || echo "none")
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-dtk${DV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-dtk${DV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     iluvatar)
         GPU="iluvatar001"
@@ -175,7 +171,7 @@ case "$VENDOR" in
         DRIVER=$(run "ixsmi 2>/dev/null | grep -oP 'Driver Version:\s*\K[0-9.]+'" )
         [ -z "$DRIVER" ] || [ "$DRIVER" = "none" ] && DRIVER=$(ixsmi 2>/dev/null | grep -oP 'Driver Version:\s*\K[0-9.]+' || echo "none")
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-ixml${IV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-ixml${IV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     kunlunxin)
         GPU="kunlunxin001"
@@ -185,7 +181,7 @@ case "$VENDOR" in
         XV=$(cver "$XRE_VER")
         DRIVER=$(echo "$XPU_SMI_OUTPUT" | awk '/Driver Version/{match($0, /Driver Version:[[:space:]]*([0-9.]+)/, m); print m[1]}' | head -1)
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-xrt${XV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-xrt${XV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     metax)
         GPU="metax001"
@@ -196,7 +192,7 @@ case "$VENDOR" in
         DRIVER=$(run "mx-smi 2>/dev/null | grep -oP 'Kernel Mode Driver Version:\s*\K[0-9.]+'" )
         [ -z "$DRIVER" ] || [ "$DRIVER" = "none" ] && DRIVER=$(mx-smi 2>/dev/null | grep -oP 'Kernel Mode Driver Version:\s*\K[0-9.]+' || echo "none")
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-maca${MV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-maca${MV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     mthreads)
         GPU="mthreads001"
@@ -209,7 +205,7 @@ case "$VENDOR" in
         DRIVER=$(run "mthreads-gmi 2>/dev/null | grep -oP 'Driver Version:\K[^\s]+'" )
         [ -z "$DRIVER" ] || [ "$DRIVER" = "none" ] && DRIVER=$(mthreads-gmi 2>/dev/null | grep -oP 'Driver Version:\K[^\s]+' || echo "none")
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-musa${MV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-musa${MV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     nvidia)
         GPU="nvidia003"
@@ -217,7 +213,7 @@ case "$VENDOR" in
         CV=$(cver "$CUDA_VER")
         DRIVER=$(run "nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1" | xargs)
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-cu${CV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-cu${CV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     tsingmicro)
         GPU="tsingmicro001"
@@ -225,19 +221,19 @@ case "$VENDOR" in
         DRIVER=$(echo "$TSM_INFO" | grep -i 'Driver Version' | awk -F'|' '{print $3}' | xargs)
         DRIVER="${DRIVER:-none}"
         DV=$(cver "$DRIVER")
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-raisa${DV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-raisa${DV}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     cambricon)
         GPU="cambricon001"
         DRIVER=$(run "cnmon 2>/dev/null | grep -oP 'Driver[^0-9]*\K[0-9.]+' | head -1")
         DRIVER="${DRIVER:-none}"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
     arm|sunrise|enflame)
         # 新增厂商：暂无专用 smi 采集逻辑，用通用命名（GPU 编码固定 001，驱动 none）。
         # 后续接入真实检测时补对应分支即可。
         GPU="${VENDOR}001"
         DRIVER="none"
-        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-vllm${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
+        echo "${MODEL}-${GPU}-gems${G}-tree${T}-cx${C}-plugin${P}-sglang${V}-cp${PY}-pt${PT}-${ARCH}-${DRIVER}:${TIMESTAMP}"
         ;;
 esac

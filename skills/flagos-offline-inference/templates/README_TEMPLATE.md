@@ -136,5 +136,5 @@ flag_gems 记录文件：`/root/gems.txt`
 
 {{注意事项列表}}
 
-- 不使用 vllm、不启动在线服务、不做 benchmark
+- 不使用在线推理服务（sglang serve）、不做 benchmark
 - 评测组使用时替换 `--input_file` 指向评测数据即可

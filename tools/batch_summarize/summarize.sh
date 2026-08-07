@@ -231,7 +231,7 @@ HEADER="${HEADER}
 - A3 逐模型列出 V1~V4 各阶段状态，标明是否由网络问题导致失败
 - A3.1 Harbor镜像发布验证：V2/V3 读 traces/08_release.json、traces/13_plugin_release.json 的 harbor_push action；V4 无独立 release trace，读 context.yaml versions.v4.harbor_image（或 v4_reduction 字段）判断是否产出优化镜像，逐模型验证每个成功V阶段是否正确上传镜像，标注异常
 - A4 耗时按真实步骤名逐列统计（容器准备/环境检测/服务启动/精度评测/精度调优/性能评测/性能调优/打包发布/Plugin安装/Plugin服务/Plugin精度/Plugin性能/Plugin发布/V4减算子/V4发布）
-- A6 Issue产出汇总：读取 results/issue_data_*.json 和 results/issue_*_flagos-ai_*.md，列出每个issue的类型、目标组件(FlagGems/vllm-plugin-FL)、问题摘要、涉及算子、产出阶段
+- A6 Issue产出汇总：读取 results/issue_data_*.json 和 results/issue_*_flagos-ai_*.md，列出每个issue的类型、目标组件(FlagGems/sglang-plugin-FL)、问题摘要、涉及算子、产出阶段
 - 板块B每个模型必须列出 V1~V4 全部四个阶段，跳过的写明原因（如「V3精度不达标，V4被跳过」）；V3 Max 标注为最终交付版本
 - 板块B V3阶段必须写明精度分数、rel_drop、Harbor是否已上传及最终达标结论；V4阶段写明减算子优化结果（不影响达标）
 "

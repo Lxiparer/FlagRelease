@@ -19,7 +19,6 @@
       "Bash(docker load *)",
       "Bash(docker images *)",
       "Bash(docker --version)",
-
       "Bash(pip install *)",
       "Bash(pip3 install *)",
       "Bash(pip show *)",
@@ -33,14 +32,12 @@
       "Bash(huggingface-cli login *)",
       "Bash(huggingface-cli upload *)",
       "Bash(hf auth login *)",
-
       "Bash(curl -s http://localhost:*)",
       "Bash(curl -s http://127.0.0.1:*)",
       "Bash(curl -s --connect-timeout *)",
       "Bash(curl -s https://*)",
       "Bash(curl -X POST *)",
       "Bash(curl -X GET *)",
-
       "Bash(mkdir -p /data/flagos-workspace/*)",
       "Bash(mkdir -p /data/flagos-logs/*)",
       "Bash(ls *)",
@@ -53,7 +50,6 @@
       "Bash(grep *)",
       "Bash(sleep *)",
       "Bash(lsof *)",
-
       "Bash(nvidia-smi *)",
       "Bash(nvidia-smi)",
       "Bash(npu-smi *)",
@@ -61,15 +57,11 @@
       "Bash(hostname)",
       "Bash(df *)",
       "Bash(free *)",
-
       "Bash(cd /tmp && git clone *)",
       "Bash(git clone *)",
-
       "Bash(cp *)",
       "Bash(ln -s *)",
-
       "Bash(bash skills/flagos-container-preparation/tools/setup_workspace.sh *)",
-
       "Bash(python3 skills/*)",
       "Bash(python skills/*)",
       "Bash(python3 -c *)",
@@ -78,9 +70,7 @@
       "Bash(python3 skills/flagos-release/tools/main.py *)",
       "Bash(python3 skills/flagos-release/tools/upload_to_platform.py *)",
       "Bash(env *)",
-      "Bash(/opt/conda/bin/python3 *)",
       "Bash(nohup *)",
-
       "Bash(git checkout *)",
       "Bash(git add *)",
       "Bash(git commit *)",
@@ -93,19 +83,18 @@
       "Bash(git merge *)",
       "Bash(git rm *)",
       "Bash(gh auth *)",
-
       "Bash(mkdir -p ~/.ssh)",
       "Bash(ssh-keyscan *)",
       "Bash(ssh-keygen *)",
       "Bash(ssh -T git@github.com)",
       "Read(//root/.ssh/**)",
-
       "Bash(env)",
       "Bash(cat)",
       "Bash(python3)",
       "Bash(python3 prompts/stream_filter.py *)",
       "WebSearch",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(/usr/local/python3.11.14/bin/python3 *)"
     ]
   }
 }

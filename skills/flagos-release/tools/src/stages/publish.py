@@ -349,16 +349,16 @@ class PublishStage(BaseStage):
             message=summary
         ))
 
-    # vllm-plugin-FL 官方认可的算子/plugin 环境变量（逐字核对 vllm_fl/utils.py）。
-    # 固化进镜像 Config.Env，确保裸 docker run / vllm serve 也能读到，不再依赖
+    # sglang-plugin-FL 官方认可的算子/plugin 环境变量（阶段 0 容器核实 sglang_fl 权威映射）。
+    # 固化进镜像 Config.Env，确保裸 docker run / sglang serve 也能读到，不再依赖
     # /etc/environment(PAM) 或 .bashrc(登录 shell) —— 这两者 Docker 拉起进程都不加载。
+    # sglang 分支无 FLAGGEMS_CONTROL_MODE（无代码注入态）。
     _FLAGGEMS_COMMIT_ENV_KEYS = [
         "USE_FLAGGEMS",
-        "VLLM_FL_PREFER_ENABLED",
-        "VLLM_PLUGINS",
-        "VLLM_FL_FLAGOS_BLACKLIST",
-        "VLLM_FL_FLAGOS_WHITELIST",
-        "FLAGGEMS_CONTROL_MODE",
+        "SGLANG_FL_PREFER",
+        "SGLANG_PLUGINS",
+        "SGLANG_FL_FLAGOS_BLACKLIST",
+        "SGLANG_FL_FLAGOS_WHITELIST",
     ]
 
     def _collect_flaggems_env_for_commit(self) -> dict:
@@ -367,8 +367,8 @@ class PublishStage(BaseStage):
         来源优先级：/root/flaggems_op_config.json 的 env_vars（persist_op_config.py 记录，
         最权威）> /etc/environment 兜底。返回 {KEY: VALUE}（仅非空）。
 
-        互斥约束（官方 utils.py:114 硬校验）：VLLM_FL_FLAGOS_BLACKLIST 与
-        VLLM_FL_FLAGOS_WHITELIST 不能同时存在，否则 plugin 启动即 ValueError。
+        互斥约束（官方 utils.py 硬校验）：SGLANG_FL_FLAGOS_BLACKLIST 与
+        SGLANG_FL_FLAGOS_WHITELIST 不能同时存在，否则 plugin 启动即报错。
         二者都出现时保留 BLACKLIST（主流程语义），丢弃 WHITELIST 并告警。
         """
         keys = self._FLAGGEMS_COMMIT_ENV_KEYS
@@ -405,7 +405,7 @@ for k, v in result.items():
     print(f'{{k}}={{v}}')
 """
         script_b64 = base64.b64encode(reader.encode()).decode()
-        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         success, stdout, _ = self.run_command(
             cmd=cmd, step_name="收集固化环境变量", timeout=60, in_container=True, check=False
         )
@@ -420,9 +420,9 @@ for k, v in result.items():
                     if k in keys and v:
                         env_map[k] = v
         # 互斥：blacklist 与 whitelist 不可并存
-        if "VLLM_FL_FLAGOS_BLACKLIST" in env_map and "VLLM_FL_FLAGOS_WHITELIST" in env_map:
+        if "SGLANG_FL_FLAGOS_BLACKLIST" in env_map and "SGLANG_FL_FLAGOS_WHITELIST" in env_map:
             print("  ⚠ 同时检测到 BLACKLIST 与 WHITELIST，保留 BLACKLIST 丢弃 WHITELIST（避免 plugin ValueError）")
-            env_map.pop("VLLM_FL_FLAGOS_WHITELIST", None)
+            env_map.pop("SGLANG_FL_FLAGOS_WHITELIST", None)
         return env_map
 
     def _ensure_operator_config_persisted(self) -> bool:
@@ -482,7 +482,7 @@ except Exception as e:
 """
         import base64
         script_b64 = base64.b64encode(check_script.encode()).decode()
-        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
 
         success, stdout, stderr = self.run_command(
             cmd=cmd,
@@ -520,7 +520,7 @@ except Exception as e:
         if need_persist:
             print("  执行 persist_op_config.py --auto ...")
             success, stdout, stderr = self.run_command(
-                cmd="PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto",
+                cmd="${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto",
                 step_name="强制固化算子配置",
                 timeout=180,
                 in_container=True,
@@ -1155,8 +1155,8 @@ except Exception as e:
                 candidate_paths = [weights_dir]
                 # 如果有 serve_start_cmd，从中提取容器内模型路径
                 serve_cmd = self.config.model_info.serve_start_cmd or ""
-                if "vllm serve " in serve_cmd:
-                    parts = serve_cmd.split("vllm serve ", 1)[1].split()
+                if "sglang serve " in serve_cmd:
+                    parts = serve_cmd.split("sglang serve ", 1)[1].split()
                     if parts:
                         cmd_model_path = parts[0].strip().rstrip("\\")
                         if cmd_model_path != weights_dir:
@@ -1191,7 +1191,7 @@ except Exception as e:
         return output_dir
 
     def _is_plugin_image(self) -> bool:
-        """判定当前发布目标是否为 plugin 镜像（README serve 命令需 VLLM_PLUGINS=fl 前缀）。
+        """判定当前发布目标是否为 plugin 镜像（README serve 命令需 SGLANG_PLUGINS=sglang_fl 前缀）。
 
         判据不能只看 version_tag——2.2 同镜像双 tag 场景（version_tag=v2 + also_tag=v3/v4）
         主 tag 是 v2 但镜像本身是 plugin 镜像，同样需要 fl 前缀。满足以下任一即视为 plugin 镜像：
@@ -1207,17 +1207,17 @@ except Exception as e:
         )
 
     def _ensure_plugin_prefix(self, serve_cmd: str) -> str:
-        """plugin 镜像的 serve 命令固化 VLLM_PLUGINS=fl 前缀。
+        """plugin 镜像的 serve 命令固化 SGLANG_PLUGINS=sglang_fl 前缀。
 
-        VLLM_PLUGINS=fl 由 start_service.sh 在环境变量层设置，从不进入 serve 命令字符串，
+        SGLANG_PLUGINS=sglang_fl 由 start_service.sh 在环境变量层设置，从不进入 serve 命令字符串，
         导致 README 偶发丢失该前缀、用户照抄命令起服务报错。此处对所有 README 生成路径
-        （模板 / 内置 / 外部脚本）统一在源头补齐。幂等：命令已含 VLLM_PLUGINS= 则不动。
+        （模板 / 内置 / 外部脚本）统一在源头补齐。幂等：命令已含 SGLANG_PLUGINS= 则不动。
         """
         if not serve_cmd:
             return serve_cmd
-        if self._is_plugin_image() and "VLLM_PLUGINS=" not in serve_cmd:
-            serve_cmd = "VLLM_PLUGINS=fl " + serve_cmd
-            print("  ✓ README serve 命令补齐 plugin 前缀 VLLM_PLUGINS=fl（plugin 镜像）")
+        if self._is_plugin_image() and "SGLANG_PLUGINS=" not in serve_cmd:
+            serve_cmd = "SGLANG_PLUGINS=sglang_fl " + serve_cmd
+            print("  ✓ README serve 命令补齐 plugin 前缀 SGLANG_PLUGINS=sglang_fl（plugin 镜像）")
         return serve_cmd
 
     def _prepare_template_vars(self) -> dict:
@@ -1254,10 +1254,10 @@ except Exception as e:
             vars["torch_backend"] = self.env_info.torch_backend or "N/A"
             vars["flagtree_version"] = self.env_info.flagtree_version or chip_config.tree or "N/A"
             vars["flaggems_version"] = self.env_info.flaggems_version or chip_config.gems_version or "N/A"
-            if self.env_info.vllm_version:
-                vars["vllm_row"] = f"| vLLM | Version: {self.env_info.vllm_version} |"
+            if self.env_info.sglang_version:
+                vars["sglang_row"] = f"| sglang | Version: {self.env_info.sglang_version} |"
             else:
-                vars["vllm_row"] = ""
+                vars["sglang_row"] = ""
         else:
             vars["driver_version"] = "N/A"
             vars["docker_version"] = model_info.docker_version or "N/A"
@@ -1271,7 +1271,7 @@ except Exception as e:
             vars["torch_backend"] = "N/A"
             vars["flagtree_version"] = chip_config.tree or "N/A"
             vars["flaggems_version"] = chip_config.gems_version or "N/A"
-            vars["vllm_row"] = ""
+            vars["sglang_row"] = ""
 
         vars["image_harbor_path"] = self._readme_pull_image() or "N/A"
         image_harbor = vars["image_harbor_path"]
@@ -1286,17 +1286,17 @@ except Exception as e:
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 
-        # plugin 镜像固化 VLLM_PLUGINS=fl 前缀（统一走 _ensure_plugin_prefix，判据/幂等见该方法）
+        # plugin 镜像固化 SGLANG_PLUGINS=sglang_fl 前缀（统一走 _ensure_plugin_prefix，判据/幂等见该方法）
         vars["serve_start_cmd"] = self._ensure_plugin_prefix(vars["serve_start_cmd"])
 
         # 一致性校验：serve_start_cmd 中必须包含 canonical_model_path
         if vars["serve_start_cmd"] and canonical_path not in vars["serve_start_cmd"]:
             print(f"  ⚠ 路径一致性警告: serve_start_cmd 中未包含 canonical_model_path ({canonical_path})")
             print(f"    serve_start_cmd: {vars['serve_start_cmd'][:120]}...")
-            # 尝试自动修正：替换 vllm serve 后的路径
+            # 尝试自动修正：替换 sglang serve 后的路径
             import re
             vars["serve_start_cmd"] = re.sub(
-                r'(vllm\s+serve\s+)\S+', rf'\1{canonical_path}', vars["serve_start_cmd"])
+                r'(sglang\s+serve\s+)\S+', rf'\1{canonical_path}', vars["serve_start_cmd"])
 
         vars["evaluation_table"] = self._generate_evaluation_table()
 
@@ -1489,14 +1489,14 @@ modelscope download --model FlagRelease/{flagrelease_name} --local_dir {canonica
 - Enter your question (e.g., "Explain the basics of quantum computing")
 - Click the send button to get a response
 # Technical Overview
-**FlagOS** is a fully open-source system software stack designed to unify the "model\\u2013system\\u2013chip" layers and foster an open, collaborative ecosystem. It enables a "develop once, run anywhere" workflow across diverse AI accelerators, unlocking hardware performance, eliminating fragmentation among vendor-specific software stacks, and substantially lowering the cost of porting and maintaining AI workloads. With core technologies such as the **FlagScale**, together with vllm-plugin-fl, distributed training/inference framework, **FlagGems** universal operator library, **FlagCX** communication library, and **FlagTree** unified compiler, the **FlagRelease** platform leverages the **FlagOS** stack to automatically produce and release various combinations of \\<chip + open-source model\\>. This enables efficient and automated model migration across diverse chips, opening a new chapter for large model deployment and application.
+**FlagOS** is a fully open-source system software stack designed to unify the "model\\u2013system\\u2013chip" layers and foster an open, collaborative ecosystem. It enables a "develop once, run anywhere" workflow across diverse AI accelerators, unlocking hardware performance, eliminating fragmentation among vendor-specific software stacks, and substantially lowering the cost of porting and maintaining AI workloads. With core technologies such as the **FlagScale**, together with sglang-plugin-fl, distributed training/inference framework, **FlagGems** universal operator library, **FlagCX** communication library, and **FlagTree** unified compiler, the **FlagRelease** platform leverages the **FlagOS** stack to automatically produce and release various combinations of \\<chip + open-source model\\>. This enables efficient and automated model migration across diverse chips, opening a new chapter for large model deployment and application.
 ## FlagGems
 FlagGems is a high-performance, generic operator library implemented in [Triton](https://github.com/openai/triton) language. It is built on a collection of backend-neutral kernels that aims to accelerate LLM (Large-Language Models) training and inference across diverse hardware platforms.
 ## FlagTree
 FlagTree is an open source, unified compiler for multiple AI chips project dedicated to developing a diverse ecosystem of AI chip compilers and related tooling platforms, thereby fostering and strengthening the upstream and downstream Triton ecosystem. Currently in its initial phase, the project aims to maintain compatibility with existing adaptation solutions while unifying the codebase to rapidly implement single-repository multi-backend support. For upstream model users, it provides unified compilation capabilities across multiple backends; for downstream chip manufacturers, it offers examples of Triton ecosystem integration.
-## FlagScale and vllm-plugin-fl
-Flagscale is a comprehensive toolkit designed to support the entire lifecycle of large models. It builds on the strengths of several prominent open-source projects, including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) and [vLLM](https://github.com/vllm-project/vllm), to provide a robust, end-to-end solution for managing and scaling large models.
-vllm-plugin-fl is a vLLM plugin built on the FlagOS unified multi-chip backend, to help flagscale support multi-chip on vllm framework.
+## FlagScale and sglang-plugin-fl
+Flagscale is a comprehensive toolkit designed to support the entire lifecycle of large models. It builds on the strengths of several prominent open-source projects, including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) and [SGLang](https://github.com/sgl-project/sglang), to provide a robust, end-to-end solution for managing and scaling large models.
+sglang-plugin-fl is an sglang plugin built on the FlagOS unified multi-chip backend, to help flagscale support multi-chip on the sglang framework.
 ## **FlagCX**
 FlagCX is a scalable and adaptive cross-chip communication library. It serves as a platform where developers, researchers, and AI engineers can collaborate on various projects, contribute to the development of cutting-edge AI solutions, and share their work with the global community.
 
@@ -1596,8 +1596,8 @@ The model weights are derived from {source} and are open\\u2011sourced under the
         elif chip_config.tree and chip_config.tree != "none":
             rows.append(("FlagTree Version", chip_config.tree))
 
-        if self.env_info and self.env_info.vllm_version:
-            rows.append(("vLLM Version", self.env_info.vllm_version))
+        if self.env_info and self.env_info.sglang_version:
+            rows.append(("sglang Version", self.env_info.sglang_version))
 
         if self.env_info and self.env_info.arch:
             rows.append(("Architecture", self.env_info.arch))
@@ -1696,7 +1696,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
 """
         token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 ModelScope",
             timeout=UPLOAD_TIMEOUT, in_container=True
@@ -1713,7 +1713,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         container = self.config.container_name
         if not container:
             return False
-        check_cmd = f"PATH=/opt/conda/bin:$PATH python3 -c 'import {package}'"
+        check_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c 'import {package}'"
         result, _, _ = self.run_command(
             cmd=check_cmd, step_name=f"检查容器内 {package}",
             timeout=30, in_container=True
@@ -1721,7 +1721,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         if result:
             return True
         print(f"  容器内未安装 {package}，自动安装中...")
-        install_cmd = f"PATH=/opt/conda/bin:$PATH pip install {package} -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
+        install_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH pip install {package} -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
         result, _, _ = self.run_command(
             cmd=install_cmd, step_name=f"容器内安装 {package}",
             timeout=300, in_container=True
@@ -1736,8 +1736,8 @@ print(f'已发布到 ModelScope: {{model_id}}')
             return weights_dir
         # 回退：从 serve_start_cmd 中解析
         serve_cmd = self.config.model_info.serve_start_cmd or ""
-        if "vllm serve " in serve_cmd:
-            parts = serve_cmd.split("vllm serve ", 1)[1].split()
+        if "sglang serve " in serve_cmd:
+            parts = serve_cmd.split("sglang serve ", 1)[1].split()
             if parts:
                 return parts[0].strip().rstrip("\\")
         return "/data/models"
@@ -1765,7 +1765,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         """
         token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
         # 1) CLI 建私有仓
-        create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
+        create_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
         print(f"  创建私有仓库: {model_id} ({visibility})")
         result, _, _ = self.run_command(
             cmd=create_cmd, step_name="创建 ModelScope 私有仓库",
@@ -1812,7 +1812,7 @@ except Exception:
 sys.exit(0 if ok else 1)
 """
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         sdk_ok, _, _ = self.run_command(
             cmd=cmd, step_name="确保 ModelScope 私有仓库（SDK 兜底）",
             timeout=120, in_container=True
@@ -1859,7 +1859,7 @@ sys.exit(0 if ok else 1)
             print(f"  x 无法确保 ModelScope 私有仓库存在，中止上传（拒绝 upload 自动建公开仓）")
             return False
 
-        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
+        upload_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -1986,7 +1986,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
 """
         token_env = f"HF_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} ${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 HuggingFace",
             timeout=UPLOAD_TIMEOUT, in_container=True
@@ -2039,7 +2039,7 @@ sys.exit(0 if _private_ok else 1)
 """
         token_env = f"HF_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} ${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         ok, _, _ = self.run_command(
             cmd=cmd, step_name="确保 HuggingFace 私有仓库",
             timeout=120, in_container=True
@@ -2076,7 +2076,7 @@ sys.exit(0 if _private_ok else 1)
         print(f"  容器内上传目录: {container_upload_dir}")
 
         if token:
-            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
+            login_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
             success, _, _ = self.run_command(
                 cmd=login_cmd, step_name="HuggingFace 登录",
                 timeout=60, in_container=True
@@ -2092,7 +2092,7 @@ sys.exit(0 if _private_ok else 1)
             return False
 
         private_flag = "--private "
-        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
+        upload_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -2155,7 +2155,7 @@ sys.exit(0 if _private_ok else 1)
             if not self._ensure_container_package("modelscope"):
                 print(f"  x 容器内安装 modelscope 失败")
                 return False
-            shell_cmd = f"PATH=/opt/conda/bin:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
+            shell_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
             docker_cmd = ["docker", "exec",
                           "-e", f"MODELSCOPE_API_TOKEN={token}",
                           container, "bash", "-c", shell_cmd]
@@ -2167,7 +2167,7 @@ sys.exit(0 if _private_ok else 1)
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            shell_cmd = f"PATH=/opt/conda/bin:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
+            shell_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
             # HuggingFace endpoint fallback：用户指定则只用该 endpoint，否则依次尝试
             # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
             user_endpoint = os.environ.get("HF_ENDPOINT", "")

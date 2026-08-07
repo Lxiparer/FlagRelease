@@ -387,8 +387,8 @@ def ensure_modelscope_cli(container=None) -> bool:
     """确保 modelscope CLI 可用，未安装则自动安装"""
     try:
         if container:
-            cmd_check = ["docker", "exec", container, "bash", "-c", "PATH=/opt/conda/bin:$PATH modelscope --help"]
-            cmd_install = ["docker", "exec", container, "bash", "-c", "PATH=/opt/conda/bin:$PATH pip install modelscope"]
+            cmd_check = ["docker", "exec", container, "bash", "-c", "PATH=/usr/local/python3.11.14/bin:$PATH modelscope --help"]
+            cmd_install = ["docker", "exec", container, "bash", "-c", "PATH=/usr/local/python3.11.14/bin:$PATH pip install modelscope"]
         else:
             cmd_check = ["modelscope", "--help"]
             cmd_install = ["pip", "install", "modelscope"]
@@ -426,7 +426,7 @@ def download_in_container(container: str, model_id: str, container_download_path
 
     cmd = [
         "docker", "exec", container, "bash", "-c",
-        f"PATH=/opt/conda/bin:$PATH modelscope download --model {model_id} --local_dir {container_download_path}"
+        f"PATH=/usr/local/python3.11.14/bin:$PATH modelscope download --model {model_id} --local_dir {container_download_path}"
     ]
     print(f"\n>>> 在容器内下载模型: {model_id}")
     print(f"    容器: {container}")
@@ -585,7 +585,7 @@ def docker_exec_run(container_name: str, cmd_str: str, proxy: str = "",
         env_flags.extend(["-e", f"http_proxy={proxy}", "-e", f"https_proxy={proxy}"])
     full_cmd = ["docker", "exec"] + env_flags + [
         container_name, "bash", "-c",
-        f"PATH=/opt/conda/bin:$PATH {cmd_str}",
+        f"PATH=/usr/local/python3.11.14/bin:$PATH {cmd_str}",
     ]
     return subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
 

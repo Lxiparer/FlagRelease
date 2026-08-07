@@ -58,12 +58,12 @@ execution:
 inspection:
   core_packages:
     torch: "<version>"
-    vllm: "<version>"
+    sglang: "<version>"
   flag_packages:
     flaggems: "<version>"
     flagscale: "<version>"
     flagcx: "<version>"
-    vllm_plugin: "<version>"
+    sglang_plugin: "<version>"
   flaggems_capabilities: []
   env_vars: {}
 flaggems_control:
@@ -71,12 +71,12 @@ flaggems_control:
   disable_method: ""
   integration_type: ""
 environment:
-  env_type: "<native|vllm_flaggems|vllm_plugin_flaggems>"
+  env_type: "<native|sglang_plugin_flaggems|sglang_plugin_flaggems>"
   has_plugin: <true|false>
   has_flagtree: <true|false>
-  flaggems_code_path: "<仅 vllm_flaggems>"
-  flaggems_enable_call: "<仅 vllm_flaggems>"
-  flaggems_txt_path: "<仅 vllm_flaggems>"
+  flaggems_code_path: "<仅 sglang_plugin_flaggems>"
+  flaggems_enable_call: "<仅 sglang_plugin_flaggems>"
+  flaggems_txt_path: "<仅 sglang_plugin_flaggems>"
   gems_txt_auto_detect: <true|false>
 ```
 
@@ -87,13 +87,13 @@ environment:
 ## 步骤 1 — 运行环境检查脚本（一步完成）
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json"
 ```
 
 此命令一次性完成：
 - 执行模式检测（host / container）
-- 核心组件版本检查（torch, vllm）
-- flag 生态组件版本（flaggems, flagscale, flagcx, vllm_plugin）
+- 核心组件版本检查（torch, sglang）
+- flag 生态组件版本（flaggems, flagscale, flagcx, sglang_plugin）
 - FlagGems 运行时能力探测（capabilities, enable_signature 等）
 - FlagGems 多维度集成方式探测（环境变量/代码扫描/入口点/启动脚本）
 - 推导 enable/disable 方法
@@ -106,7 +106,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 同时写入 `environment` 字段：
 ```yaml
 environment:
-  has_plugin: <vllm_plugin_installed>
+  has_plugin: <sglang_plugin_installed>
 ```
 
 ## 步骤 2.5 — 环境场景分类
@@ -115,7 +115,7 @@ environment:
 
 ```yaml
 environment:
-  env_type: "<native|vllm_flaggems|vllm_plugin_flaggems>"
+  env_type: "<native|sglang_plugin_flaggems|sglang_plugin_flaggems>"
   has_flagtree: <true|false>
 ```
 
@@ -124,8 +124,8 @@ environment:
 | env_type | 判定条件 |
 |----------|---------|
 | `native` | 无 flaggems 安装 |
-| `vllm_flaggems` | 有 flaggems，无 vllm-plugin-FL |
-| `vllm_plugin_flaggems` | 有 flaggems + 有 vllm-plugin-FL |
+| `sglang_plugin_flaggems` | 有 flaggems，无 sglang-plugin-FL |
+| `sglang_plugin_flaggems` | 有 flaggems + 有 sglang-plugin-FL |
 
 FlagTree 仅记录 `has_flagtree`，不影响场景分类。
 
@@ -134,8 +134,8 @@ FlagTree 仅记录 `has_flagtree`，不影响场景分类。
 从 `inspect_env.py` JSON 输出的 `entry_classification` 字段读取准入镜像类型，写入 `context.yaml` 的 `workflow.entry_image_type`（编排层 `run_pipeline.sh` 据此路由到分支 A/B，**必须持久化，否则路由回退 unknown**）：
 
 ```bash
-ENTRY_TYPE=$(docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('entry_classification',{}).get('entry_image_type','unknown'))")
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.entry_image_type=$ENTRY_TYPE --json"
+ENTRY_TYPE=$(docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json" | python3 -c "import sys,json;print(json.load(sys.stdin).get('entry_classification',{}).get('entry_image_type','unknown'))")
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.entry_image_type=$ENTRY_TYPE --json"
 ```
 
 | entry_image_type | 判定条件 | 路由分支 |
@@ -146,10 +146,10 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 
 
-当 `env_type == vllm_flaggems` 时，调用 `toggle_flaggems.py --action analyze` 深入分析代码中的 FlagGems 集成：
+当 `env_type == sglang_plugin_flaggems` 时，调用 `toggle_flaggems.py --action analyze` 深入分析代码中的 FlagGems 集成：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action analyze --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action analyze --json"
 ```
 
 从输出中提取并写入 `context.yaml`：
@@ -166,7 +166,7 @@ environment:
 ## 步骤 3 — 生成报告
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --report"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --report"
 ```
 
 将报告内容分别保存到：
@@ -178,7 +178,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 # 完成条件
 
 - 执行模式已检测（host / container）
-- 核心组件（torch、vllm）已确认安装
+- 核心组件（torch、sglang）已确认安装
 - flag 组件版本已记录
 - FlagGems 集成方式已探测（integration_type）
 - FlagGems 启用/关闭方法已推导（enable_method / disable_method）
@@ -194,7 +194,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | 问题 | 解决方案 |
 |------|----------|
 | torch 未安装 | 镜像可能有问题，建议更换镜像或手动安装 |
-| vllm 未安装 | 确认镜像是否为推理镜像 |
+| sglang 未安装 | 确认镜像是否为推理镜像 |
 | FlagGems 未安装 | 确认镜像是否包含 FlagGems，或手动安装 |
 | inspect_env.py 不存在 | 运行 `setup_workspace.sh` 重新部署 |
 | capabilities 为空列表 | FlagGems 版本过旧，算子替换降级到源码修改模式 |

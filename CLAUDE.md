@@ -32,7 +32,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 1. 运行 `diagnose_failure.py --json` 获取诊断：
    ```bash
-   docker exec <container> bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/diagnose_failure.py --json"
+   docker exec <container> bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/diagnose_failure.py --json"
    ```
 2. 输出诊断摘要给用户（中断位置、错误原因、恢复建议）
 3. 根据诊断结果从中断点恢复（不从头重跑）
@@ -48,14 +48,14 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 容器准备 / prepare container / 环境准备 | flagos-container-preparation | `skills/flagos-container-preparation/SKILL.md` |
 | 环境检查 / inspect environment / 服务前检查 | flagos-pre-service-inspection | `skills/flagos-pre-service-inspection/SKILL.md` |
 | 启动服务 / start service / 健康检查 | flagos-service-startup | `skills/flagos-service-startup/SKILL.md` |
-| 性能测试 / benchmark / vllm bench | flagos-performance-testing | `skills/flagos-performance-testing/SKILL.md` |
+| 性能测试 / benchmark / sglang bench | flagos-performance-testing | `skills/flagos-performance-testing/SKILL.md` |
 | 算子替换 / operator replacement / 算子优化 | flagos-operator-replacement | `skills/flagos-operator-replacement/SKILL.md` |
 | 精度评测 / eval correctness / accuracy test / 远端评测 / FlagRelease / flageval / 综合评测 / comprehensive eval / 本地评测 / quick 评测 / evalscope / GPQA | flagos-eval-comprehensive | `skills/flagos-eval-comprehensive/SKILL.md` |
 | 日志分析 / analyze logs | flagos-log-analyzer | `skills/flagos-log-analyzer/SKILL.md` |
 | 提交 issue / submit issue / report bug / 自动报告 | flagos-issue-reporter | `skills/flagos-issue-reporter/SKILL.md` |
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
-| 安装 plugin / install plugin / plugin 安装 / vllm-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
+| 安装 plugin / install plugin / plugin 安装 / sglang-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
 | 离线推理 / offline inference / 模型适配 / inference 跑通 / 推理验证 | flagos-offline-inference | `skills/flagos-offline-inference/SKILL.md` |
 
 ---
@@ -75,7 +75,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
 8 V2发布(Pro)        → 打包 Harbor 私有(始终) + V2 精度达标才对外传权重/README，tag 后缀 -v2
 --- Plugin 验证流程（plugin_entry=service_ok 触发，V2 精度不阻塞；性能不阻断）---
-9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
+9  Plugin 安装       → install_plugin.py 安装 sglang-plugin-FL → 失败则 issue + 停止
 10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
 11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
 12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
@@ -91,9 +91,9 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 **算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 11/12 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
 **Plugin 流程特殊规则**：
-- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2(注入)精度不达标不阻塞 V3 尝试**——V2(FlagGems 注入)与 V3(plugin)是两套不同的算子调度路径，V2 注入精度差不代表 V3 plugin 也差；V3 自己的精度在步骤11单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-13。
+- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2 精度不达标不阻塞 V3 尝试**——V2 与 V3 在 sglang 场景同走 sglang_fl 调度路径，但 V2 达标算子集与 V3 复测调优独立判定；V3 自己的精度在步骤11单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-13。
 - 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
-- Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（只保存本地文件）
+- Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/sglang-plugin-FL` 提交（只保存本地文件）
 - **Plugin 阶段算子调优（精度三级递进）**：步骤 11 **精度**不达标时按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭拖累精度的算子直到精度达标；③若全关 flaggems 算子仍精度不达标，判定为框架问题，提交 plugin-error issue，accuracy_ok=false（精度硬闸门未过 → V3 不产出）。步骤 12 **性能**不达标：仅写 performance-degraded issue + 标 performance_ok=false，**照常继续步骤13**（可选跑一次 plugin 性能调优尽力提升，达上限即停，不强求达标）。
 - 算子集初始化：以主流程已达标的算子集（含步骤 5/7 的禁用列表）为起点，在此基础上累加禁用
 - 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
@@ -104,14 +104,14 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 | 版本 | 定义 | 镜像 tag 后缀 | 产出方式 |
 |------|------|--------------|---------|
-| **V1** (基础版) | 仅 FlagTree，不开启 FlagGems | `-v1` | 阶段一手动发布 |
+| **V1** (基础版) | 原生 sglang，不加载 sglang_fl 插件、不开启 FlagGems（或关闭 flaggems 后无法起服务→无 V1） | `-v1` | 阶段一手动发布 |
 | **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
-| **V2** (Pro版) | FlagGems + FlagTree，精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
+| **V2** (Pro版) | FlagGems（sglang_fl plugin），精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
 | **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
 | **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
 
-- **V1 基线**：不开启 flaggems 算子替换的版本（仅 FlagTree 生效），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.05 合成基线（全芯片统一标准；吞吐×1.05、延迟÷1.05），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` + `target_ratio_override=1.0` 标记），下游对比/调优/报告照常消费。合成基线场景达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）
-- **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
+- **V1 基线**：不开启 flaggems 算子替换的版本（不加载 sglang_fl 插件 + USE_FLAGGEMS=0 的原生 sglang），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务（sglang_fl 与 sglang 深度耦合），则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.05 合成基线（全芯片统一标准；吞吐×1.05、延迟÷1.05），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` + `target_ratio_override=1.0` 标记），下游对比/调优/报告照常消费。合成基线场景达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）
+- **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以运行时 [GEMS] 日志 / dispatch 记录的实际启用算子为准
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
 - **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
@@ -123,23 +123,18 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 | entry_image_type | 分支 | 准入镜像组成 | 版本路径 |
 |------------------|------|--------------|---------|
-| `gems_tree` | **A**（简单） | flaggems + flagtree，无 plugin | V1(裸启动) → V2(代码注入全量) → V3(切 plugin 白名单) → V4(减算子) |
-| `gems_tree_plugin` | **B**（复杂） | flaggems + flagtree + plugin | V1(三选) → V2(2.1/2.2) → V3(3.1/3.2) → V4 |
+| `gems_tree_plugin` | **B**（复杂） | flaggems + plugin（sglang_fl） | V1(二选 v1.1/none) → V2(plugin 全量+调优) → V3(plugin 复测) → V4(减算子) |
 | `native` | native | 无 flaggems | 仅精度/性能评测，不做算子调优与多版本发布 |
 
-**分支 A（gems_tree）工作流**：
-- V1：裸启动基线（不开 flaggems 算子替换），产出精度/性能基线；缺失时用 `nv_baseline.yaml` 兜底
-- V2：代码注入方式开启全量 flaggems 算子，经步骤5/7 调优达标
-- V3：切换到 plugin 白名单方式（与 V2 算子集一致），验证 plugin 路径
-- V4：`operator_reduction.py` 从 V3 减算子提性能
+（sglang 分支无 `gems_tree` 代码注入态：flaggems 必须经 sglang_fl 插件生效，entry_image_type 收敛为 native | gems_tree_plugin）
 
 **分支 B（gems_tree_plugin）工作流**：
-- V1：**三选状态机**（`baseline_selector.py`）按优先级确定基础版依赖——
-  - `v1.1` VLLM_PLUGINS='' 纯净基线 → `v1.2` 厂商 platform plugin → `v1.3` fl plugin 但不开 flaggems
-  - 三者均失败 → `none`（强依赖 flaggems），精度基线回退 `nv_baseline.yaml`
-- V2：`2.1` 代码注入独立 V2 镜像；或 `2.2` V2=V3 同镜像（V1.3 场景，`--also-tag` 双 tag 发布）
-- V3：`3.1` 切厂商/fl plugin 白名单独立 V3；或 `3.2` V3=V2（同上双 tag）；厂商 plugin 不适配时用 `--incompatible-tag` 打不适配标记
-- V4：`operator_reduction.py` 随机选1~3算子优化性能
+- V1：**二选状态机**（`baseline_selector.py`）确定基础版依赖——
+  - `v1.1` SGLANG_PLUGINS='' + USE_FLAGGEMS=0 纯净基线（原生 sglang，不加载插件不开替换）
+  - 失败 → `none`（强依赖 flaggems，sglang_fl 与 sglang 深度耦合），精度基线回退 `nv_baseline.yaml`
+- V2：plugin 全量开启（USE_FLAGGEMS=1 + SGLANG_FL_PREFER=flagos），经步骤5/7 精度/性能调优达标
+- V3：plugin 流程精度复测调优（步骤9-13），V2 与 V3 同走 sglang_fl 调度路径；V1=none 时 V2=V3 同镜像 `--also-tag` 双 tag 发布
+- V4：`operator_reduction.py` 减算子优化性能
 
 - **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）
 
@@ -149,7 +144,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 ### NV 重点场景
 
-`vllm + flagtree + flaggems`（无 plugin）是当前 NV 模型发布的优先场景，推荐版本组合：`vllm>=0.7.3 + flaggems>=5.1.0 + flagtree>=0.5.0`。
+`sglang + sglang-plugin-FL + flaggems`（triton-cx 替代 flagtree）是当前 NV 模型发布的优先场景，推荐版本组合：`sglang 0.5.11 + sglang-plugin-FL + flaggems>=5.3.0rc2 + triton-cx 3.5.1`（勿装 flagtree——会卸载 triton-cx）。
 
 ---
 
@@ -159,11 +154,10 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 | env_type | 判定条件 | FlagGems 控制 | 算子列表来源 |
 |----------|---------|--------------|-------------|
-| `native` | 无 flaggems | 无 | 无 |
-| `vllm_flaggems` | 有 flaggems，无 plugin | 环境变量 + 控制文件（一次性注入后） | enable() 中的 txt 路径 |
-| `vllm_plugin_flaggems` | 有 flaggems + plugin | 环境变量 | `/tmp/flaggems_enable_oplist.txt` |
+| `native` | 无 flaggems（或有 flaggems 但无 sglang_fl 插件） | 无 | 无 |
+| `sglang_plugin_flaggems` | 有 flaggems + sglang_fl 插件 | SGLANG_FL_* 环境变量（无代码注入/控制文件） | 服务日志 [GEMS] 行 / dispatch 日志 |
 
-FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagGems 控制实现细节见 `skills/flagos-pre-service-inspection/SKILL.md` 和 `skills/flagos-service-startup/SKILL.md`。
+（sglang 分支无控制文件机制；补丁状态经 apply_patches.sh --verify 探测。各场景的 FlagGems 控制实现细节见 `skills/flagos-pre-service-inspection/SKILL.md` 和 `skills/flagos-service-startup/SKILL.md`。
 
 ---
 
@@ -194,9 +188,9 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 性能调优触发 | `performance_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
 | V3 验证 benchmark | quick 模式 | 不询问策略 |
 | Plugin 流程触发 | `workflow.qualified=true` 后自动进入步骤 9-13 | 不询问是否安装 plugin |
-| Plugin 安装失败 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不尝试恢复 |
-| Plugin 服务崩溃 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
-| Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
+| Plugin 安装失败 | 写 issue 到 `flagos-ai/sglang-plugin-FL` → 停止任务 | 不尝试恢复 |
+| Plugin 服务崩溃 | 写 issue 到 `flagos-ai/sglang-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
+| Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/sglang-plugin-FL` | 非 FlagGems 仓库 |
 | Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
 | Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 达标不重新调优；不达标进三级递进继续调优 |
 | 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
@@ -221,7 +215,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ```
 
-部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
+部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`、`apply_patches.sh`（含 `patches/` 目录）。
 
 ---
 
@@ -288,8 +282,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 **强制规则**：每个 Skill 完成后，必须调用 `generate_report.py` 更新报告（覆盖写入，脚本自动备份上一版）：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --summary"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/generate_report.py --summary"
 ```
 
 ---
@@ -303,7 +297,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - 步骤完成：`[步骤1] 容器准备 — 完成 (1m 9s)`
 - 步骤失败：`[步骤3] 启服务 — 失败`
 - 步骤跳过：`[步骤4] 精度评测 — 跳过`
-- 关键结果：`✓ env_type=vllm_flaggems, flaggems=5.1.0`
+- 关键结果：`✓ env_type=sglang_plugin_flaggems, flaggems=5.3.0rc2`
 - 异常事件：`✗ V2/V1 性能比 72.1% < 80%`
 
 详细格式示例见 `skills/shared/pipeline_log_spec.md`。
@@ -361,9 +355,9 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### 工具使用约束
 
-1. **性能测试只能通过 `benchmark_runner.py` 执行**，禁止直接运行 `vllm bench serve`
+1. **性能测试只能通过 `benchmark_runner.py` 执行**，禁止直接运行 `sglang bench_serving`
 2. **FlagGems 开关只能通过 `toggle_flaggems.py` 切换**，禁止手动 sed
-3. **FlagGems/FlagTree 安装只能通过 `install_component.py` 执行**，禁止手动 pip install
+3. **FlagGems 安装只能通过 `install_component.py` 执行**，禁止手动 pip install；**FlagTree 在 sglang 场景禁止安装**（会卸载 triton-cx，install_component.py 已内置硬闸门返回 skipped）
 4. **Issue 生成只能通过 `issue_reporter.py` 执行**，禁止手动拼 `gh issue create`。Issue 只保存为本地 markdown 文件，代码层面已禁用 GitHub API 自动提交
 5. **性能对比必须通过 `performance_compare.py` 执行**，禁止手动计算 ratio
 6. **步骤7性能算子调优必须通过 `operator_search.py run` 一次性执行**。禁止编排层手动拼凑循环。`operator_search.py` 失败时禁止手动重试，应直接标记失败并继续流程
@@ -373,7 +367,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 8. **所有操作在 `/flagos-workspace` 目录下执行**，产出文件按类型分目录
 9. **容器内 `/flagos-workspace/shared/context.yaml` 是 Skill 间共享状态**，每个 Skill 完成后必须通过 `docker exec` 更新（禁止操作 `shared/context.template.yaml`）
-10. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀
+10. **容器内 Python 必须用 sglang 环境 python**（/usr/local/python3.11.14/bin，可用 PYTHON_BIN_DIR 覆盖）。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=${PY_BIN_DIR}:$PATH` 前缀（PY_BIN_DIR 默认 /usr/local/python3.11.14/bin）
 11. **宿主机 mkdir/ls 严禁使用花括号展开**。`mkdir -p /path/{a,b,c}` 会被 sandbox 拦截。容器内不受此限制
 12. **Claude Code Bash 工具受沙箱限制**。外部路径文件读写必须通过 `docker exec` 或 `docker cp`。禁止直接操作 `/mnt/data/...` 等宿主机路径
 13. **中间文件禁止写入项目源码目录**。只能写入 `/mnt/data/flagos-workspace/<model>/config/` 或容器内 `/flagos-workspace/config/`
@@ -400,8 +394,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 算子控制约束
 
 26. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。算子控制方式按场景区分：
-    - **非 plugin 场景（`vllm_flaggems`）**：通过白名单控制文件启动 — 将启用算子写入 `/root/flaggems_ops_control.json`（`{"include": [启用算子]}`），`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`
-    - **Plugin 场景（`vllm_plugin_flaggems`，含步骤 10-12）**：步骤 9 安装成功后通过 `persist_op_config.py --auto --env-type vllm_plugin_flaggems` 将算子配置固化到容器 `/etc/environment`（`USE_FLAGGEMS`、`VLLM_FL_PREFER_ENABLED`、`VLLM_FL_FLAGOS_WHITELIST`）。步骤 10-12 启动服务优先使用 `start_service.sh --mode flagos`（自动加载固化变量），无需编排层手动传递内联环境变量。兜底时仍可通过 `apply_op_config.py --mode custom --flagos-whitelist "op1,op2,..."` 生成 `env_inline` 内联传递。禁止使用控制文件（plugin 模式下 `VLLM_FL_PREFER_ENABLED=true` 会跳过控制文件逻辑）。统一使用白名单，不使用黑名单
+    - **sglang 场景（`sglang_plugin_flaggems`，含步骤 10-12）**：无代码注入控制文件机制（`FLAGGEMS_CONTROL_MODE` / `/root/flaggems_ops_control.json` 均不适用），算子配置统一走 SGLANG_FL_* env。步骤 9 安装成功后通过 `persist_op_config.py --auto --env-type sglang_plugin_flaggems` 将算子配置固化到容器 `/etc/environment`（`USE_FLAGGEMS`、`SGLANG_FL_PREFER`、`SGLANG_FL_FLAGOS_WHITELIST`/`BLACKLIST`、`SGLANG_PLUGINS`）。步骤 10-12 启动服务优先使用 `start_service.sh --mode flagos`（自动加载固化变量），无需编排层手动传递内联环境变量。兜底时仍可通过 `apply_op_config.py --mode custom --flagos-blacklist "op1,op2,..."` 生成 `env_inline` 内联传递
     - 两种场景均禁止使用 `toggle_flaggems.py --action enable`（会重置为全量开启）
 27. **算子列表以运行时 txt（`flaggems_enable_oplist.txt` 或 `gems.txt`）为唯一权威来源**。每次服务启动后必须检查该文件。不在此文件中的算子必须被显式关闭。算子调优中的关闭列表只是控制输入，实际生效以运行时 txt 为准
 

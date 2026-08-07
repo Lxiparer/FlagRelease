@@ -22,7 +22,7 @@ provides:
 
 针对非 vLLM 类模型（如 embedding、分类、生成、扩散等），完成离线推理跑通验证与 flag_gems 接入，产出可复现的推理流程供评测组使用。
 
-**不涉及**：vllm、在线服务、benchmark、plugin、性能评测。
+**不涉及**：在线服务（sglang serve）、benchmark、plugin、性能评测。
 
 ---
 
@@ -67,7 +67,7 @@ docker run -d \
 
 进入容器后确认基础依赖：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c 'import torch; print(torch.__version__, torch.cuda.is_available())'"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 -c 'import torch; print(torch.__version__, torch.cuda.is_available())'"
 ```
 
 缺失依赖按模型需求安装（使用阿里云镜像源）。
@@ -158,7 +158,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c 'import to
 实际运行推理脚本：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /root/run_inference.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /root/run_inference.py \
   --model_path $CONTAINER_MODEL_PATH \
   --input_file /root/test_input.xxx \
   --device cuda:0 \

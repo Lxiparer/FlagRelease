@@ -34,7 +34,7 @@ Issue 类型:
     accuracy-degraded    精度调优筛出的问题算子
     performance-degraded 性能调优筛出的问题算子
     flagtree-error       FlagTree/Triton 框架报错
-    plugin-error         vllm-plugin-FL 框架报错
+    plugin-error         sglang-plugin-FL 框架报错
 
 Usage:
     python3 issue_reporter.py collect --type operator-crash --log-path crash.log --env-file env.json --json
@@ -118,7 +118,7 @@ except ImportError:
     ]
     OP_EXTRACT_PATTERNS = [
         re.compile(r"flag_gems[./]ops[./](\w+)"),
-        re.compile(r"vllm_fl[./]ops[./](?:oot[./])?(\w+)"),
+        re.compile(r"sglang_fl[./]ops[./](?:oot[./])?(\w+)"),
         re.compile(r'File\s+"[^"]*flag_gems[^"]*?/(\w+)\.py"'),
     ]
 
@@ -163,9 +163,9 @@ ISSUE_TYPES = {
         "description": "FlagTree/Triton 框架报错",
     },
     "plugin-error": {
-        "title_prefix": "Bug: vllm-plugin-FL error",
+        "title_prefix": "Bug: sglang-plugin-FL error",
         "labels": ["bug"],
-        "description": "vllm-plugin-FL 框架报错",
+        "description": "sglang-plugin-FL 框架报错",
     },
 }
 
@@ -307,7 +307,7 @@ def _load_environment(env_file: Optional[str], context_yaml: Optional[str]) -> D
             pkgs = data.get("core_packages", {})
             env["pytorch"] = pkgs.get("torch", data.get("torch_version", ""))
             env["triton"] = pkgs.get("triton", data.get("triton_version", ""))
-            env["vllm"] = pkgs.get("vllm", data.get("vllm_version", ""))
+            env["sglang"] = pkgs.get("sglang", data.get("sglang_version", ""))
             flag_pkgs = data.get("flag_packages", {})
             env["flaggems"] = flag_pkgs.get("flaggems", data.get("flaggems_version", ""))
             env["flagtree"] = flag_pkgs.get("flagtree", data.get("flagtree_version", ""))
@@ -341,7 +341,7 @@ def _load_environment(env_file: Optional[str], context_yaml: Optional[str]) -> D
             core = insp.get("core_packages", {})
             env["pytorch"] = core.get("torch", "")
             env["triton"] = core.get("triton", "")
-            env["vllm"] = core.get("vllm", "")
+            env["sglang"] = core.get("sglang", "")
             flag = insp.get("flag_packages", {})
             env["flaggems"] = flag.get("flaggems", "")
             env["flagtree"] = flag.get("flagtree", "")
@@ -603,7 +603,7 @@ def _parse_flagtree_error(log_path: str) -> Dict[str, Any]:
 
 
 def _parse_plugin_error(log_path: str) -> Dict[str, Any]:
-    """解析 vllm-plugin-FL 相关错误"""
+    """解析 sglang-plugin-FL 相关错误"""
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -611,10 +611,10 @@ def _parse_plugin_error(log_path: str) -> Dict[str, Any]:
         return {"related_components": [], "error_messages": [], "error_logs": ""}
 
     plugin_patterns = [
-        re.compile(r"(?:vllm_plugin_fl|vllm-plugin-FL).*?(?:error|fail|exception)", re.IGNORECASE),
+        re.compile(r"(?:sglang_plugin_fl|sglang-plugin-FL).*?(?:error|fail|exception)", re.IGNORECASE),
         re.compile(r"(?:OpManager|op_manager).*?(?:error|fail|dispatch)", re.IGNORECASE),
-        re.compile(r"(?:ImportError|ModuleNotFoundError).*?(?:vllm_plugin|vllm_fl)", re.IGNORECASE),
-        re.compile(r"(?:vllm_fl)\.(?:ops|dispatch|register).*?(?:error|fail)", re.IGNORECASE),
+        re.compile(r"(?:ImportError|ModuleNotFoundError).*?(?:sglang_plugin|sglang_fl)", re.IGNORECASE),
+        re.compile(r"(?:sglang_fl)\.(?:ops|dispatch|register).*?(?:error|fail)", re.IGNORECASE),
     ]
 
     components = set()
@@ -632,11 +632,11 @@ def _parse_plugin_error(log_path: str) -> Dict[str, Any]:
             if "import" in msg.lower():
                 components.add("import")
                 error_type = "import_error"
-            if "vllm_fl" in msg.lower():
-                components.add("vllm_fl")
+            if "sglang_fl" in msg.lower():
+                components.add("sglang_fl")
 
     if not components:
-        components.add("vllm-plugin-FL")
+        components.add("sglang-plugin-FL")
 
     return {
         "related_components": sorted(components),
@@ -788,8 +788,8 @@ def _generate_description(issue_type, affected_ops, op_details, error_messages, 
         return f"FlagTree/Triton framework error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
 
     elif issue_type == "plugin-error":
-        components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "vllm-plugin-FL"
-        return f"vllm-plugin-FL error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
+        components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "sglang-plugin-FL"
+        return f"sglang-plugin-FL error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
 
     return "Bug report."
 
@@ -815,7 +815,7 @@ def _generate_env_table(env):
         ("Triton", env.get("triton", "N/A")),
         ("FlagGems", env.get("flaggems", "N/A")),
         ("FlagTree", env.get("flagtree", "N/A")),
-        ("vLLM", env.get("vllm", "N/A")),
+        ("sglang", env.get("sglang", "N/A")),
         ("Driver", env.get("driver", "N/A")),
     ]
     table = "| Item | Value |\n|------|-------|\n"
@@ -834,7 +834,7 @@ def _generate_steps(issue_type, model, env):
         steps.append("3. Start vLLM inference service with FlagGems enabled")
         steps.append("4. Observe operator runtime failures / framework errors")
     elif issue_type == "plugin-error":
-        steps.append("3. Install vllm-plugin-FL (git clone + pip install --no-build-isolation)")
+        steps.append("3. Install sglang-plugin-FL (git clone + pip install --no-build-isolation)")
         steps.append("4. Start vLLM inference service with plugin enabled")
         steps.append("5. Observe plugin-related errors")
     elif issue_type == "accuracy-zero":
@@ -865,7 +865,7 @@ def _generate_expected(issue_type):
     elif issue_type == "flagtree-error":
         return "FlagTree/Triton should compile and execute kernels without errors."
     elif issue_type == "plugin-error":
-        return "vllm-plugin-FL should load and dispatch operators without errors."
+        return "sglang-plugin-FL should load and dispatch operators without errors."
     return "Expected behavior."
 
 
@@ -895,7 +895,7 @@ def _generate_actual(issue_type, affected_ops, op_details, error_messages):
 
     elif issue_type == "plugin-error":
         msgs = "\n".join(f"- {m}" for m in error_messages[:3]) if error_messages else "- (see error logs)"
-        return f"vllm-plugin-FL errors:\n{msgs}"
+        return f"sglang-plugin-FL errors:\n{msgs}"
 
     return "Unexpected behavior."
 
@@ -956,7 +956,7 @@ def _generate_directions(issue_type, env, affected_ops):
         directions.append("- Try rebuilding FlagTree from source with platform-specific flags")
 
     elif issue_type == "plugin-error":
-        directions.append("- Verify vllm-plugin-FL version compatibility with vLLM and FlagGems")
+        directions.append("- Verify sglang-plugin-FL version compatibility with vLLM and FlagGems")
         directions.append("- Check OpManager dispatch configuration and operator registration")
         directions.append("- Try reinstalling plugin with --no-build-isolation flag")
 

@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-install_plugin.py — vllm-plugin-FL 安装/验证/卸载
+install_plugin.py — sglang-plugin-FL 安装/验证/卸载
 
 Usage:
     python3 install_plugin.py --action install --json
@@ -42,14 +42,14 @@ except ImportError:
     def write_last_error(*a, **kw): pass
     def write_checkpoint(*a, **kw): pass
 
-DEFAULT_REPO = "https://github.com/flagos-ai/vllm-plugin-FL"
-PACKAGE_NAME = "vllm-plugin-FL"
-# 真实导入名候选：镜像自带的 plugin 实际模块名是 vllm_fl（entry point fl），
-# 旧版硬编码 vllm_plugin_fl 已过期，会导致 verify 误报 importable=false。
+DEFAULT_REPO = "https://github.com/flagos-ai/sglang-plugin-FL"
+PACKAGE_NAME = "sglang-plugin-FL"
+# 真实导入名候选：镜像自带的 plugin 实际模块名是 sglang_fl（entry point fl），
+# 旧版硬编码 sglang_plugin_fl 已过期，会导致 verify 误报 importable=false。
 # 按顺序探测，任一可导入即视为可用。
-IMPORT_NAME = "vllm_plugin_fl"          # 兼容保留（历史包名）
-IMPORT_NAME_CANDIDATES = ["vllm_fl", "vllm_plugin_fl"]
-CLONE_DIR = "/tmp/vllm-plugin-FL"
+IMPORT_NAME = "sglang_plugin_fl"          # 兼容保留（历史包名）
+IMPORT_NAME_CANDIDATES = ["sglang_fl", "sglang_plugin_fl"]
+CLONE_DIR = "/tmp/sglang-plugin-FL"
 
 
 def run_cmd(cmd, timeout=600, env=None):
@@ -235,7 +235,7 @@ def verify_plugin():
         }
 
     # 尝试 import：按候选模块名依次探测，任一可导入即视为可用。
-    # （镜像自带 plugin 的真实模块名是 vllm_fl，旧硬编码 vllm_plugin_fl 会误报未安装）
+    # （镜像自带 plugin 的真实模块名是 sglang_fl，旧硬编码 sglang_plugin_fl 会误报未安装）
     importable = False
     imported_name = ""
     last_err = ""
@@ -292,7 +292,7 @@ def uninstall_plugin():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="vllm-plugin-FL 安装管理")
+    parser = argparse.ArgumentParser(description="sglang-plugin-FL 安装管理")
     parser.add_argument("--action", required=True, choices=["install", "verify", "uninstall"])
     parser.add_argument("--repo-url", default=DEFAULT_REPO, help="仓库地址")
     parser.add_argument("--branch", default="main", help="分支")

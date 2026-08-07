@@ -171,16 +171,16 @@ qualified 状态记录到报告中:
 ## Tag 格式
 
 ```
-{registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{vllm}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{YYYYMMDDHHMM}[-vN]
+{registry}/{model}-{gpu}-gems{g}-tree{t}-cx{c}-plugin{p}-{sglang}{v}-cp{py}-pt{pt}-{sdk}{s}-{arch}-{driver}:{YYYYMMDDHHMM}[-vN]
 ```
 
-字段顺序：模型 → GPU 码 → gems → tree → cx(flagcx) → plugin(vllm-plugin-fl) →
-vllm → cp(python) → pt(torch) → 厂商 SDK → 架构 → 驱动。
+字段顺序：模型 → GPU 码 → gems → tree → cx(flagcx) → plugin(sglang-plugin-fl) →
+sglang → cp(python) → pt(torch) → 厂商 SDK → 架构 → 驱动。
 
 ## 示例
 
 ```
-harbor.baai.ac.cn/flagrelease-public/GLM5.2-kunlunxin001-gems4.2.1-treenone-cx0.10.0-plugin0.1.0-vllm0.13.0-cp310-pt29-xrtnone-x64-515.58:202606251805-v2
+harbor.baai.ac.cn/flagrelease-public/GLM5.2-ascend001-gems5.3.0-treenone-cx3.5.1-plugin0.1.0-sglang0.5.11-cp311-pt26-cann8.2-a64-22.0.3:202606251805-v2
 ```
 
 ## 规则
@@ -188,9 +188,9 @@ harbor.baai.ac.cn/flagrelease-public/GLM5.2-kunlunxin001-gems4.2.1-treenone-cx0.
 - GPU 码：厂商固定编码（`nvidia003`、`kunlunxin001`、`metax001`、`ascend001`、
   `hygon001`、`iluvatar001`、`mthreads001`、`tsingmicro001`、zhenwu 用 `pp001`）
 - 版本压缩两档：
-  - `semver`（gems/tree/cx/plugin/vllm）保留 `x.y.z`，去 `+`/`.dev` 后缀
+  - `semver`（gems/tree/cx/plugin/sglang）保留 `x.y.z`，去 `+`/`.dev` 后缀
   - `cver`（python/torch/SDK）主.次去点，如 `3.10.4→310`、`2.9.0→29`
-- 厂商专属 SDK 键：nvidia=`cu`、ascend=`cann`(+`ptnpu`/`vllm-ascend`)、
+- 厂商专属 SDK 键：nvidia=`cu`、ascend=`cann`(+`ptnpu`)、
   hygon=`dtk`、metax=`maca`、mthreads=`musa`、kunlunxin=`xrt`、
   iluvatar=`ixml`、tsingmicro=`raisa`、zhenwu=`hggc`
 - 架构：`x86_64→x64`、`aarch64→a64`
@@ -326,9 +326,9 @@ fi
 每个步骤完成后调用 `generate_report.py` 生成/更新报告：
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
   --output /flagos-workspace/results/report.md"
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
   --json --output /flagos-workspace/results/report.json"
 ```
 

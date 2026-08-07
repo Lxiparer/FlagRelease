@@ -220,21 +220,22 @@ COMMON_KERNEL_PATTERNS = [
     # MoE kernels
     (r'^fused_moe_kernel$', 'FusedMoE'),
 
-    # VLLM specific kernels
-    (r'vllm::cross_device_reduce_1stage.*', 'CrossDeviceReduce'),
+    # Framework kernels（vllm:: / sglang:: 双前缀匹配）
+    (r'(?:vllm|sglang)::cross_device_reduce_1stage.*', 'CrossDeviceReduce'),
     (r'two_shot_all_reduce_kernel_inplace.*', 'TwoShotAllReduce'),
-    (r'vllm::topk_kernel.*', 'TopK'),
-    (r'vllm::topKPerRowDecode.*', 'TopKDecode'),
-    (r'vllm::topKPerRowPrefill.*', 'TopKPrefill'),
-    (r'vllm::concat_and_cache_mla_kernel.*', 'ConcatCacheMLA'),
-    (r'vllm::indexer_k_quant_and_cache_kernel.*', 'IndexerKQuantCache'),
-    (r'vllm::act_and_mul_kernel.*', 'ActAndMul'),
-    (r'vllm::moe::grouped_topk_fused_kernel.*', 'MoEGroupedTopK'),
-    (r'vllm::moe::moe_align_block_size_kernel.*', 'MoEAlignBlockSize'),
-    (r'vllm::moe::moe_align_block_size_small_batch_expert_kernel.*', 'MoEAlignBlockSizeSmall'),
-    (r'vllm::moe::moe_sum_kernel.*', 'MoESum'),
-    (r'vllm::moe::count_and_sort_expert_tokens_kernel.*', 'MoECountSortTokens'),
-    (r'vllm::cp_gather_indexer_k_quant_cache_kernel.*', 'CPGatherIndexerKQuantCache'),
+    (r'(?:vllm|sglang)::topk_kernel.*', 'TopK'),
+    (r'topk_softmax.*', 'TopK'),
+    (r'(?:vllm|sglang)::topKPerRowDecode.*', 'TopKDecode'),
+    (r'(?:vllm|sglang)::topKPerRowPrefill.*', 'TopKPrefill'),
+    (r'(?:vllm|sglang)::concat_and_cache_mla_kernel.*', 'ConcatCacheMLA'),
+    (r'(?:vllm|sglang)::indexer_k_quant_and_cache_kernel.*', 'IndexerKQuantCache'),
+    (r'(?:vllm|sglang)::act_and_mul_kernel.*', 'ActAndMul'),
+    (r'(?:vllm|sglang)::moe::grouped_topk_fused_kernel.*', 'MoEGroupedTopK'),
+    (r'(?:vllm|sglang)::moe::moe_align_block_size_kernel.*', 'MoEAlignBlockSize'),
+    (r'(?:vllm|sglang)::moe::moe_align_block_size_small_batch_expert_kernel.*', 'MoEAlignBlockSizeSmall'),
+    (r'(?:vllm|sglang)::moe::moe_sum_kernel.*', 'MoESum'),
+    (r'(?:vllm|sglang)::moe::count_and_sort_expert_tokens_kernel.*', 'MoECountSortTokens'),
+    (r'(?:vllm|sglang)::cp_gather_indexer_k_quant_cache_kernel.*', 'CPGatherIndexerKQuantCache'),
 
     # Deep GEMM kernels
     (r'deep_gemm::sm90_fp8_paged_mqa_logits.*', 'DeepGEMM_FP8_PagedMQA'),

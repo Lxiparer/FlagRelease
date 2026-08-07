@@ -66,7 +66,7 @@ diagnosis:
 ## 步骤 1 — 分析单个日志文件
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py analyze \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py analyze \
     --log-path /flagos-workspace/logs/startup_flagos.log \
     --json"
 ```
@@ -76,7 +76,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ## 步骤 2 — 扫描整个日志目录
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py scan \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py scan \
     --log-dir /flagos-workspace/logs/ \
     --json"
 ```

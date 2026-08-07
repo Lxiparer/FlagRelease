@@ -176,7 +176,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
         ]
 
     # serve_start_cmd + container_run_cmd
-    # 核心原则：README 中下载路径、docker run 挂载路径、vllm serve 模型路径三者必须一致
+    # 核心原则：README 中下载路径、docker run 挂载路径、sglang serve 模型路径三者必须一致
     # 统一使用 canonical_model_path 作为唯一模型路径
     import re
     svc = ctx.get('service', {})
@@ -188,15 +188,15 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
 
     if commands.get('serve_start'):
         serve_cmd = commands['serve_start']
-        # 用正则替换 vllm serve 后的模型路径参数（第一个非 -- 参数）
-        serve_cmd = re.sub(r'(vllm\s+serve\s+)\S+', rf'\1{canonical_model_path}', serve_cmd)
+        # 用正则替换 sglang serve 后的模型路径参数（第一个非 -- 参数）
+        serve_cmd = re.sub(r'(sglang\s+serve\s+)\S+', rf'\1{canonical_model_path}', serve_cmd)
         # 替换端口为默认 8000
         serve_cmd = re.sub(r'--port\s+\d+', '--port 8000', serve_cmd)
         config.model_info.serve_start_cmd = serve_cmd
     else:
         tp = runtime.get('tp_size') or 1
         max_model_len = svc.get('max_model_len', '')
-        cmd_parts = [f"vllm serve {canonical_model_path}",
+        cmd_parts = [f"sglang serve {canonical_model_path}",
                      f"--host 0.0.0.0 --port 8000",
                      f"--tensor-parallel-size {tp}",
                      f"--served-model-name {model_short}" if model_short else None,

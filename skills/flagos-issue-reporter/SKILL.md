@@ -78,7 +78,7 @@ issues:
 | `accuracy-degraded` | 精度调优流程筛出的精度不佳算子 | `bug` | flagos-ai/FlagGems |
 | `performance-degraded` | 性能调优流程筛出的性能不佳算子 | `bug` | flagos-ai/FlagGems |
 | `flagtree-error` | FlagTree/Triton 框架报错 | `bug` | flagos-ai/FlagGems |
-| `plugin-error` | vllm-plugin-FL 框架报错 | `bug` | flagos-ai/vllm-plugin-FL |
+| `plugin-error` | sglang-plugin-FL 框架报错 | `bug` | flagos-ai/sglang-plugin-FL |
 
 ---
 
@@ -166,12 +166,12 @@ python3 issue_reporter.py full \
     --output-dir /data/flagos-workspace/<model>/results/ \
     --json
 
-# plugin 报错（提交到 vllm-plugin-FL 仓库）
+# plugin 报错（提交到 sglang-plugin-FL 仓库）
 python3 issue_reporter.py full \
     --type plugin-error \
     --log-path /data/flagos-workspace/<model>/logs/startup_flagos.log \
     --context-yaml /data/flagos-workspace/<model>/shared/context.yaml \
-    --repo flagos-ai/vllm-plugin-FL \
+    --repo flagos-ai/sglang-plugin-FL \
     --output-dir /data/flagos-workspace/<model>/results/ \
     --json
 ```
@@ -181,7 +181,7 @@ python3 issue_reporter.py full \
 ### 步骤 1 — 收集问题数据
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py collect \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py collect \
     --type operator-crash \
     --log-path /flagos-workspace/logs/startup_flagos.log \
     --context-yaml /flagos-workspace/shared/context.yaml \
@@ -194,7 +194,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ### 步骤 2 — 格式化为 Bug Report
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py format \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py format \
     --collected-file /flagos-workspace/results/issue_data.json \
     --output /flagos-workspace/results/issue_report.md \
     --json"

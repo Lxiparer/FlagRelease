@@ -1,12 +1,12 @@
 ---
 name: flagos-plugin-install
-description: vllm-plugin-FL 组件安装/验证/卸载，安装后复用 V1 基线进行精度性能验证
+description: sglang-plugin-FL 组件安装/验证/卸载，安装后复用 V1 基线进行精度性能验证
 version: 1.0.0
 triggers:
   - 安装 plugin
   - install plugin
   - plugin 安装
-  - vllm-plugin
+  - sglang-plugin
 depends_on: []
 provides:
   - plugin_install.installed
@@ -16,7 +16,7 @@ provides:
 
 # Plugin 安装 Skill
 
-在 flaggems+flagtree 环境精度性能双达标后，安装 vllm-plugin-FL 组件并验证。
+在 flaggems+flagtree 环境精度性能双达标后，安装 sglang-plugin-FL 组件并验证。
 
 **工具脚本**（已由 setup_workspace.sh 部署到容器）：
 - `install_plugin.py` — plugin 安装/验证/卸载
@@ -25,7 +25,7 @@ provides:
 - flaggems + flagtree 环境已就绪
 - 精度性能双达标（`workflow.accuracy_ok=true && workflow.performance_ok=true`）
 
-**目标仓库**：`https://github.com/flagos-ai/vllm-plugin-FL`
+**目标仓库**：`https://github.com/flagos-ai/sglang-plugin-FL`
 
 ---
 
@@ -46,7 +46,7 @@ workflow:
 environment:
   has_plugin: <来自 pre-service-inspection>
 inspection:
-  vllm_plugin_installed: <来自 pre-service-inspection>
+  sglang_plugin_installed: <来自 pre-service-inspection>
 ```
 
 ## 写入容器内 /flagos-workspace/shared/context.yaml
@@ -69,7 +69,7 @@ plugin_install:
 
 确认 flaggems+flagtree 环境精度性能双达标：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
 import yaml
 ctx = yaml.safe_load(open('/flagos-workspace/shared/context.yaml'))
 wf = ctx.get('workflow', {})
@@ -80,38 +80,38 @@ print(f'accuracy_ok={wf.get(\"accuracy_ok\")}, performance_ok={wf.get(\"performa
 ## 步骤 2 — 检查当前 plugin 状态
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
 ```
 
 ## 步骤 3 — 安装 plugin
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
     --action install --json"
 ```
 
 指定分支：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
     --action install --branch main --json"
 ```
 
 Editable 安装（开发调试用）：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
     --action install --editable --json"
 ```
 
 带代理：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py \
     --action install --proxy http://proxy:port --json"
 ```
 
 ## 步骤 4 — 验证安装
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
 ```
 
 ## 步骤 5 — 安装后验证流程
@@ -122,13 +122,13 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 2. 精度评测 — 与 V1 基线对比
 3. 性能评测 — 与 V1 基线对比
 
-遇到 plugin 相关报错时，调用 issue_reporter 提交到 `flagos-ai/vllm-plugin-FL`：
+遇到 plugin 相关报错时，调用 issue_reporter 提交到 `flagos-ai/sglang-plugin-FL`：
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
     --type plugin-error \
     --log-path /flagos-workspace/logs/startup_flagos.log \
     --context-yaml /flagos-workspace/shared/context.yaml \
-    --repo flagos-ai/vllm-plugin-FL \
+    --repo flagos-ai/sglang-plugin-FL \
     --output-dir /flagos-workspace/results/ \
     --json"
 ```
@@ -136,7 +136,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ## 步骤 6 — 卸载（如需回退）
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action uninstall --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action uninstall --json"
 ```
 
 ---
@@ -147,7 +147,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - context.yaml `plugin_install` 字段已更新
 - 安装后服务可正常启动
 - 精度/性能与 V1 基线对比完成
-- 遇到 plugin 报错时 issue 已提交到 `flagos-ai/vllm-plugin-FL`
+- 遇到 plugin 报错时 issue 已提交到 `flagos-ai/sglang-plugin-FL`
 
 ---
 
@@ -158,7 +158,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | git clone 失败 | 检查网络，使用 `--proxy` 参数 |
 | pip install 编译失败 | 确认 `--no-build-isolation` 已使用，检查构建依赖 |
 | import 失败 | 检查 Python 环境，确认 conda 环境激活 |
-| 服务启动后 plugin 未生效 | 检查 `VLLM_FL_PREFER_ENABLED` 环境变量 |
+| 服务启动后 plugin 未生效 | 检查 `SGLANG_FL_PREFER` 环境变量 |
 | plugin 与 flaggems 冲突 | 卸载 plugin 回退到 flaggems+flagtree 环境 |
 
 ---
@@ -177,7 +177,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 - **分支 B（`entry_image_type=gems_tree_plugin` / `pipeline_branch=B`）**：准入镜像**本就自带可用 plugin**（我们提供的镜像至少在一个模型上已验证可用）。
   - **禁止 `--action install`（禁止重装）**：重装会 `rm -rf` + 重新 clone/pip，**覆盖镜像里厂商适配好的 plugin**，破坏 V3 对比语义。
-  - 步骤 9 只做 `--action verify` 确认 plugin 可用 + 记录状态；plugin 通过启动环境变量 `VLLM_PLUGINS=fl` 在步骤 10 使能。
+  - 步骤 9 只做 `--action verify` 确认 plugin 可用 + 记录状态；plugin 通过启动环境变量 `SGLANG_PLUGINS=fl` 在步骤 10 使能。
   - 即便误调 `--action install`，`install_plugin.py` 内置分支硬闸门会拒绝重装并返回 `skipped=true`（除非显式 `--force`）——但仍**不应主动调 install**。
 
 - **分支 A（`entry_image_type=gems_tree` / `pipeline_branch=A`）**：准入镜像**无 plugin** → 照常 `--action install` 安装。
@@ -186,10 +186,10 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ```bash
 # 【分支 A 才安装】安装 plugin（分支 B 禁止，内置闸门也会拦截重装）
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action install --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action install --json"
 
 # 验证安装（分支 A/B 均执行）
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
 ```
 
 ### 失败处理（强制停止）
@@ -198,10 +198,10 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 
 1. 调用 `issue_reporter.py` 提交 issue 到 plugin 仓库：
    ```bash
-   docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+   docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
        --type plugin-error \
        --context-yaml /flagos-workspace/shared/context.yaml \
-       --repo flagos-ai/vllm-plugin-FL \
+       --repo flagos-ai/sglang-plugin-FL \
        --output-dir /flagos-workspace/results/ \
        --json"
    ```
@@ -213,7 +213,7 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 
 安装成功后：
 - 更新 `context.yaml` 的 `plugin_install` 字段
-- 更新 `environment.env_type` 为 `vllm_plugin_flaggems`（如果原来不是）
+- 更新 `environment.env_type` 为 `sglang_plugin_flaggems`（如果原来不是）
 - 更新 `environment.has_plugin=true`
 - 写入 `traces/09_plugin_install.json`
 - 更新 `workflow_ledger` 步骤 09 状态
@@ -226,10 +226,10 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 | 差异项 | 主流程（步骤 3-7） | Plugin 流程（步骤 10-12） |
 |--------|-------------------|--------------------------|
 | 算子集 | 从全量开始，经调优得到最终集合 | 直接使用主流程最终算子集 |
-| Issue 路由 | FlagGems 仓库 | `flagos-ai/vllm-plugin-FL` |
+| Issue 路由 | FlagGems 仓库 | `flagos-ai/sglang-plugin-FL` |
 | 服务崩溃 | 尝试恢复（切 native / 翻倍 TP） | **写 issue + 停止任务** |
 | 不达标处理 | 触发算子调优（步骤 5/7） | **三级递进**：①写 issue → ②plugin 模式关算子调优 → ③全关仍不达标才判框架问题 |
-| 启动环境变量 | 按 env_type 决定 | 固定 `USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true` + blacklist |
+| 启动环境变量 | 按 env_type 决定 | 固定 `USE_FLAGGEMS=1 SGLANG_FL_PREFER=true` + blacklist |
 | V1 基线 | 当前流程内测得 | 复用步骤 4/6 的 V1 结果 |
 | Trace 文件 | `traces/03-07_*.json` | `traces/10-12_*.json` |
 | 日志命名 | `startup_flagos.log` | `startup_plugin.log` |
@@ -239,25 +239,25 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 ```bash
 # 1. 从 context.yaml 获取 disabled_ops 列表（逗号分隔）
 # 2. 调用 apply_op_config.py 生成 env_inline
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/apply_op_config.py \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/apply_op_config.py \
     --mode custom --flagos-blacklist '${DISABLED_OPS_COMMA_SEPARATED}'"
 # 3. 使用输出的 env_inline 作为启动命令前缀
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH \
-    USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST='${DISABLED_OPS}' \
-    vllm serve ... > /flagos-workspace/logs/startup_plugin.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=${PY_BIN_DIR}:\$PATH \
+    USE_FLAGGEMS=1 SGLANG_FL_PREFER=true SGLANG_FL_FLAGOS_BLACKLIST='${DISABLED_OPS}' \
+    sglang serve ... > /flagos-workspace/logs/startup_plugin.log 2>&1"
 ```
 
-> ⚠️ Plugin 模式下 `VLLM_FL_PREFER_ENABLED=true` 会使注入代码 `pass`，跳过控制文件逻辑。
-> 必须通过 `VLLM_FL_FLAGOS_BLACKLIST` 环境变量传递禁用算子，`/root/flaggems_ops_control.json` 在此场景无效。
+> ⚠️ Plugin 模式下 `SGLANG_FL_PREFER=true` 会使注入代码 `pass`，跳过控制文件逻辑。
+> 必须通过 `SGLANG_FL_FLAGOS_BLACKLIST` 环境变量传递禁用算子，`/root/flaggems_ops_control.json` 在此场景无效。
 
 **步骤 10 服务崩溃处理**：
 ```bash
 # 服务崩溃 → 写 issue + 停止
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
     --type plugin-error \
     --log-path /flagos-workspace/logs/startup_plugin.log \
     --context-yaml /flagos-workspace/shared/context.yaml \
-    --repo flagos-ai/vllm-plugin-FL \
+    --repo flagos-ai/sglang-plugin-FL \
     --output-dir /flagos-workspace/results/ \
     --json"
 # 设置 plugin_workflow.crash_stopped=true → 停止任务
@@ -270,23 +270,23 @@ V3 切 plugin 用的是主流程已达标的算子集，但 plugin 实现路径�
 **第一级 — 记录 issue**
 - 精度不达标：写 `logs/issues_accuracy.log`，`plugin_workflow.accuracy_ok=false`
 - 性能不达标：写 `logs/issues_performance.log`，`plugin_workflow.performance_ok=false`
-- 用 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL` 提交（仅本地文件）
+- 用 `issue_reporter.py full --type plugin-error --repo flagos-ai/sglang-plugin-FL` 提交（仅本地文件）
 
 **第二级 — plugin 模式关算子调优（当前缺失的关键补救步）**
 - 在主流程已达标算子集基础上，用 plugin 模式继续关闭拖累精度/性能的算子：
   ```bash
-  docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
+  docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
       --plugin-mode \
       --final-output-name v3_performance \
       --state-path /flagos-workspace/results/operator_config_v3.json \
       ...（精度不达标用精度评测入口，性能不达标用性能评测入口）"
   ```
-- plugin 模式下走 env_inline（`VLLM_FL_FLAGOS_BLACKLIST`），不写控制文件（见步骤 10 说明）。
+- plugin 模式下走 env_inline（`SGLANG_FL_FLAGOS_BLACKLIST`），不写控制文件（见步骤 10 说明）。
 - 调优达标 → 记录最终算子集，`accuracy_ok/performance_ok=true`，正常继续下一步。
 
 **第三级 — 全关仍不达标才判框架问题**
 - 若把 flaggems 算子全部关闭后精度/性能仍不达标，说明问题不在算子层而在 plugin 框架本身：
-  - 提交 `plugin-error` issue（标注"全关算子仍不达标，判定为框架问题"）到 `flagos-ai/vllm-plugin-FL`
+  - 提交 `plugin-error` issue（标注"全关算子仍不达标，判定为框架问题"）到 `flagos-ai/sglang-plugin-FL`
   - 保持 `accuracy_ok/performance_ok=false`，继续步骤 13
 - 步骤 13 检查 `plugin_workflow.qualified`，不达标则按"Plugin 不达标发布"（Harbor 私有，不更新 README）处理。
 

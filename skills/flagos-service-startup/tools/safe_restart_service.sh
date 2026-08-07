@@ -88,7 +88,7 @@ fi
 docker exec -d "$CONTAINER" bash -c "
     ${ENV_PREFIX}
     cd /flagos-workspace && \
-    PATH=/opt/conda/bin:\$PATH \
+    PATH=/usr/local/python3.11.14/bin:\$PATH \
     bash /flagos-workspace/scripts/start_service.sh --mode ${MODE} \
         > ${LOG_PATH} 2>&1
 "
