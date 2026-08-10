@@ -250,17 +250,24 @@ def build_command(config: Dict[str, Any], test_case: Dict[str, Any]) -> List[str
 
     cmd = [
         sys.executable, "-m", "sglang.bench_serving",
-        "--backend", "openai",
+        "--backend", "sglang-oai",
         "--base-url", f"http://{server['host']}:{server['port']}",
-        "--model", model["name"],
+        # --model 传本地 tokenizer 路径：bench_serving 的 check_chat_template()
+        # 会按 --model 值 AutoTokenizer.from_pretrained 检查 chat_template，
+        # 传模型名会触发 HF 网络查询（离线环境重试 5 次后失败/卡顿）。
+        "--model", model["tokenizer_path"],
+        "--served-model-name", model["name"],
         "--tokenizer", model["tokenizer_path"],
-        "--dataset-name", bench.get("dataset_name", "random"),
+        # random-ids = 纯随机 token id 合成压测（零下载零网络）。
+        # 注意不能用 "random"：sglang 的 random 数据集会从 ShareGPT 下载真实
+        # 文本做 token 采样（random.py: random_sample=(dataset_name=="random")），
+        # 离线环境（无 DNS/代理）下每轮卡 HF 下载重试后失败。
+        "--dataset-name", bench.get("dataset_name", "random-ids"),
         "--random-input-len", str(test_case["input_len"]),
         "--random-output-len", str(test_case["output_len"]),
     ]
 
-    if bench.get("trust_remote_code", True):
-        cmd.append("--trust-remote-code")
+    # sglang 0.5.11 bench_serving 无 --trust-remote-code（本地 tokenizer 路径无需远端解析）
 
     return cmd
 
@@ -280,7 +287,8 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
     """执行单次基准测试"""
     full_cmd = cmd + ["--num-prompts", str(num_prompts)]
     if max_concurrency:
-        full_cmd += ["--concurrency", str(max_concurrency)]
+        # sglang 0.5.11 bench_serving 并发参数是 --max-concurrency（--concurrency 不存在）
+        full_cmd += ["--max-concurrency", str(max_concurrency)]
 
     if dry_run:
         print(f"  [DRY RUN] {' '.join(full_cmd)}")
