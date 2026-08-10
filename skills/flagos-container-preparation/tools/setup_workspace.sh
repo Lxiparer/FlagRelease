@@ -261,6 +261,8 @@ SCRIPT_MAP=(
     "skills/flagos-component-install/tools/install_flagtree.sh:scripts/install_flagtree.sh"
     # 补丁保护（sglang 分支核心机制：FlagGems 安装/升级后自动恢复三手工补丁）
     "skills/flagos-component-install/tools/apply_patches.sh:scripts/apply_patches.sh"
+    # native 纯净基线 qwen_vl_processor 兼容修复（sitecustomize 注入，start_service.sh 引 PYTHONPATH）
+    "skills/flagos-service-startup/tools/npu_qwen_vl_fix/sitecustomize.py:npu_qwen_vl_fix/sitecustomize.py"
     # GPQA Diamond 快速精度评测（eval/ 兼容 SKILL.md 引用，scripts/ 供编排层统一调用）
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:eval/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"

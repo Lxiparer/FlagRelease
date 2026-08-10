@@ -204,12 +204,26 @@ if [ "$MODE" = "native" ]; then
     unset SGLANG_FL_PREFER SGLANG_FL_PER_OP 2>/dev/null || true
     unset SGLANG_FL_FLAGOS_BLACKLIST SGLANG_FL_FLAGOS_WHITELIST 2>/dev/null || true
     unset SGLANG_FL_OOT_BLACKLIST SGLANG_FL_OOT_WHITELIST 2>/dev/null || true
+    # 纯净基线关键：sglang serve 经 entry_points 自动发现并加载全部插件，
+    # USE_FLAGGEMS=0 只是不 enable flaggems，load_plugin() 仍会注册
+    # Communicator/vendor hooks（sglang.srt.plugins: allowed_set=None → 加载全部）。
+    # 设一个非空且不匹配任何插件的 SGLANG_PLUGINS 值 → 全部跳过（日志 Skipping plugin sglang_fl）
+    # 优先级低于 --sglang-plugins 显式覆盖与持久化继承（见下方 SGLANG_PLUGINS 决策块）
+    SGLANG_PLUGINS_NATIVE_FALLBACK="__none__"
+    # qwen_vl_processor 兼容修复（独立注入，不加载插件本体）：
+    # sglang 原生 npu qwen_vl_processor 的 _preprocess 把 interpolation 声明为
+    # 无默认值必需参数，transformers 调用时不传 → TypeError → 服务端 warmup
+    # 带图请求 500 → 启动失败。修复版由 sglang_fl 插件携带（*args/**kwargs 兼容），
+    # 经 sitecustomize 注入 sys.modules（npu_qwen_vl_fix/ 目录随 setup_workspace.sh 部署）。
+    export SGLANG_FL_QWEN_VL_FIX=1
+    export PYTHONPATH="/flagos-workspace/npu_qwen_vl_fix:${PYTHONPATH:-}"
 fi
 
 # SGLANG_PLUGINS 决策（优先级从高到低）：
 #   1. 显式 --sglang-plugins（含空串）→ 强制覆盖
 #   2. 持久化/继承值（含空串）→ 沿用（baseline_selector.py / persist_op_config.py 固化）
-#   3. 均未设置 → 自动兜底（USE_FLAGGEMS=1 且 sglang_fl 存在 → sglang_fl）
+#   3. 均未设置 → native 模式兜底 __none__（跳过插件加载，纯净基线）；否则
+#      自动兜底（USE_FLAGGEMS=1 且 sglang_fl 存在 → sglang_fl）
 #   sglang_fl 插件本身经 entry_points 自动发现；显式指定 SGLANG_PLUGINS 用于
 #   多插件过滤与 baseline 纯净场景（配合 USE_FLAGGEMS=0 + SGLANG_FL_OOT_ENABLED=0）
 if [ "$SGLANG_PLUGINS_OVERRIDE_SET" = "1" ]; then
@@ -222,6 +236,11 @@ if [ "$SGLANG_PLUGINS_OVERRIDE_SET" = "1" ]; then
 elif [ -n "${SGLANG_PLUGINS+x}" ]; then
     export SGLANG_PLUGINS
     echo "[start_service.sh] 继承持久化 plugin 配置：SGLANG_PLUGINS='${SGLANG_PLUGINS}'"
+elif [ "$MODE" = "native" ]; then
+    # native 纯净基线：跳过全部插件（含 sglang_fl），否则 load_plugin() 的
+    # Communicator/vendor hooks 仍会注册，污染 V1 基线
+    export SGLANG_PLUGINS="${SGLANG_PLUGINS_NATIVE_FALLBACK}"
+    echo "[start_service.sh] native 纯净基线：SGLANG_PLUGINS=${SGLANG_PLUGINS_NATIVE_FALLBACK}（跳过插件加载）"
 elif [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
     HAS_PLUGIN=$("${PYTHON}" -c "
 import importlib.util

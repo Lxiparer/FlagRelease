@@ -551,6 +551,74 @@ def probe_throughput(
 
 
 # =============================================================================
+# 评测前预热（剥离 Triton/FlagGems kernel 编译成本）
+# =============================================================================
+
+# 预热输入长度档位：覆盖 GPQA 题面+选项的常见长度分布（~300-2000 tokens）。
+# Triton/FlagGems 按输入形状编译 prefill kernel，首次遇到新长度会触发编译，
+# 实测让评测前几题慢到 ~100s/题；用合成占位文本提前触发编译可将其剥离出评测计时。
+_WARMUP_LENGTHS = (512, 1024, 2048)
+# 预热 max_tokens：只生成少量 token 触发 decode kernel，不做长输出
+_WARMUP_OUTPUT_TOKENS = 256
+
+
+def warmup_service(
+    api_base: str,
+    api_key: str,
+    model_name: str,
+    max_tokens: int,
+    is_thinking: bool,
+) -> float:
+    """评测前预热服务端 kernel 编译（纯占位文本，不参与评测、不影响结果）。
+
+    每个长度档位发 1 个请求（串行，避免服务端并发编译争用），请求内生成
+    _WARMUP_OUTPUT_TOKENS 个 token 即停。预热耗时计入报告 warmup_seconds，
+    并从 eval_duration_seconds 中扣除（编译成本不再算进评测计时）。
+
+    Returns:
+        预热总耗时（秒）
+    """
+    base = api_base.rstrip('/')
+    if not base.endswith('/v1'):
+        base = base + '/v1'
+    url = f"{base}/chat/completions"
+    headers = {'Content-Type': 'application/json'}
+    if api_key and api_key != 'EMPTY':
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    # 占位填充句（约 12 tokens/句），仅用于撑长输入，与评测内容无关
+    filler_sentence = "The quick brown fox jumps over the lazy dog. "
+    sentence_tokens = 12
+
+    def _send(length: int) -> float:
+        prompt = GPQA_SAMPLE_QUESTION + "\n\n" + filler_sentence * max(1, length // sentence_tokens)
+        payload = {
+            'model': model_name,
+            'messages': [{'role': 'user', 'content': prompt}],
+            'max_tokens': min(_WARMUP_OUTPUT_TOKENS, max_tokens),
+            'temperature': 0.6 if is_thinking else 0.0,
+        }
+        t0 = time.time()
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=600)
+            resp.raise_for_status()
+            return time.time() - t0
+        except Exception as e:
+            print(f"[WARMUP] 输入长度 ~{length} 预热失败: {e}")
+            return 0.0
+
+    print(f"[WARMUP] 预热 kernel 编译（长度档位 {_WARMUP_LENGTHS}, 每档 1 请求, "
+          f"max_tokens={_WARMUP_OUTPUT_TOKENS}）...")
+    total = 0.0
+    for length in _WARMUP_LENGTHS:
+        dt = _send(length)
+        total += dt
+        print(f"[WARMUP] 输入长度 ~{length}: {dt:.1f}s")
+    print(f"[WARMUP] 预热完成，共 {total:.1f}s（已从评测计时中剥离）")
+    return total
+
+
+# =============================================================================
 # 结果解析
 # =============================================================================
 
@@ -675,6 +743,8 @@ def run_fast_gpqa(
     dataset_hub: str = 'modelscope',
     limit: Optional[int] = 50,
     output_path: Optional[str] = None,
+    warmup: bool = True,
+    eval_batch_size: Optional[int] = None,
 ) -> Dict:
     """
     GPQA Diamond 快速评测主流程。
@@ -728,15 +798,31 @@ def run_fast_gpqa(
     if dataset_dir:
         evalscope_config['dataset_dir'] = dataset_dir
 
-    # Step 6: 探测吞吐，选并发
-    batch_size, probe_time = probe_throughput(
-        model_name=model_name,
-        api_url=api_base,
-        api_key=api_key,
-        generation_config=gen_config,
-        dataset_args=dataset_args,
-        evalscope_config=evalscope_config,
-    )
+    # Step 6: 探测吞吐，选并发（--eval-batch-size 显式指定时跳过探测，
+    # 探测在长输出/慢速场景会退化：单条延迟 >60s 时候选并发只剩 [1,2,4]，
+    # 并发验证又受 300s 超时限制，可能退化到并发 1-2 → 50 题需数小时）
+    if eval_batch_size is not None:
+        batch_size = eval_batch_size
+        probe_time = 0.0
+        print(f"[PROBE] 显式指定并发: {batch_size}（跳过自动探测）")
+    else:
+        batch_size, probe_time = probe_throughput(
+            model_name=model_name,
+            api_url=api_base,
+            api_key=api_key,
+            generation_config=gen_config,
+            dataset_args=dataset_args,
+            evalscope_config=evalscope_config,
+        )
+
+    # Step 6.5: 预热 kernel 编译（剥离 Triton/FlagGems 编译成本，前几题不再 100s/题）
+    warmup_seconds = 0.0
+    if warmup:
+        warmup_seconds = warmup_service(
+            api_base, api_key, model_name, max_tokens, is_thinking,
+        )
+    else:
+        print("[WARMUP] 跳过预热（--no-warmup）")
 
     # Step 7: 正式评测
     print("-" * 60)
@@ -831,7 +917,8 @@ def run_fast_gpqa(
         'truncation_detected': truncation_detected,
         'temperature': gen_config['temperature'],
         'probe_time_seconds': probe_time,
-        'eval_duration_seconds': round(total_elapsed - probe_time, 2),
+        'warmup_seconds': round(warmup_seconds, 2),
+        'eval_duration_seconds': round(total_elapsed - probe_time - warmup_seconds, 2),
         'total_duration_seconds': total_elapsed,
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
         'work_dir': work_dir,
@@ -853,7 +940,8 @@ def run_fast_gpqa(
             'truncation_detected': '是否检测到输出被截断（true 时分数可能偏低）',
             'temperature': '采样温度（0.0=贪心解码）',
             'probe_time_seconds': '并发探测阶段耗时（秒）',
-            'eval_duration_seconds': '实际评测阶段耗时（秒）',
+            'warmup_seconds': '评测前预热耗时（秒，kernel 编译成本剥离项）',
+            'eval_duration_seconds': '实际评测阶段耗时（秒，不含探测与预热）',
             'total_duration_seconds': '总耗时（含探测，秒）',
             'work_dir': 'evalscope 原始输出目录（含预测、报告、日志）',
             'runaway_detection': '防线2 复读检测：评测完成后扫描逐题回答，标记 runaway 复读题（checked/runaway_count/runaway_indices）；runaway_count>0 说明该轮分数可能被复读污染',
@@ -920,6 +1008,12 @@ def main():
                         help='限制评测题数（默认 50 题，传 0 或 198 为全量）')
     parser.add_argument('--output', type=str, default=None,
                         help='结果 JSON 输出路径（如 /flagos-workspace/results/gpqa_native.json）')
+    parser.add_argument('--no-warmup', action='store_true', default=False,
+                        help='跳过评测前 kernel 预热（默认开启，可剥离 Triton/FlagGems 编译成本）')
+    parser.add_argument('--eval-batch-size', type=int, default=None,
+                        help='显式指定评测并发（跳过自动探测）。自动探测在长输出/慢速场景会退化：'
+                             '单条延迟 >60s 时候选并发只剩 [1,2,4]，300s 超时又可能压到并发 1-2，'
+                             '50 题需数小时。默认 None=自动探测。')
     args = parser.parse_args()
 
     # 加载配置
@@ -998,6 +1092,8 @@ def main():
             dataset_hub=dataset_hub,
             limit=args.limit or None,
             output_path=args.output,
+            warmup=not args.no_warmup,
+            eval_batch_size=args.eval_batch_size,
         )
         sys.exit(0 if report.get('score') is not None else 1)
     except Exception as e:
