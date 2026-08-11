@@ -47,11 +47,16 @@ DEFAULT_CONTEXT = "/flagos-workspace/shared/context.yaml"
 
 def parse_value(val_str):
     """自动类型推断: true/false→bool, 数字→int/float, 其余→str"""
-    if val_str.lower() == "true":
+    lowered = val_str.lower()
+    if lowered == "true":
         return True
-    if val_str.lower() == "false":
+    if lowered == "false":
         return False
-    if val_str.lower() in ("null", "none", "~"):
+    # null 别名: null(任意大小写)/~/None(Python 字面量) → None。
+    # 注意小写 "none" 是业务状态值（如 baseline.v1_variant: none，V1 三选全失败），
+    # 必须保留为字符串——此前 "none" 被吞成 null，双 tag 判断(v1_variant=="none")失效，
+    # 导致 V1.3/none 场景从"一次发布 v2+v3"降级为"只发 v2、V3 重跑"
+    if lowered == "null" or val_str == "~" or val_str == "None":
         return None
     try:
         return int(val_str)
