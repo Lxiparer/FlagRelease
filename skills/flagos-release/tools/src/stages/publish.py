@@ -262,7 +262,7 @@ class PublishStage(BaseStage):
         # 只有实际执行发布且成功(publish_*_publish=True 且未失败)才记录对外 URL。
         # 步骤8 V2 精度不达标时 publish_modelscope=False → 不写 URL(仓库未创建)，
         # 否则 config.py:578 无条件填充的 ms_model_id 会产出"幽灵 URL"写进 context，
-        # 步骤13 会误判"已有仓库"走更新 README(对不存在仓库 upload 必失败)，
+        # 步骤12 会误判"已有仓库"走更新 README(对不存在仓库 upload 必失败)，
         # 而非 full-publish 补发(创建仓库+权重+README)。
         ms_published = publish_config.publish_modelscope and not ms_failed
         hf_published = publish_config.publish_huggingface and not hf_failed

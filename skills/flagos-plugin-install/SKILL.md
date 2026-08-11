@@ -169,7 +169,7 @@ docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-worksp
 
 步骤 8（自动发布）完成后，检查 `workflow.qualified`：
 - `qualified=true` → 进入步骤 9，设置 `plugin_workflow.triggered=true`
-- `qualified=false` → 跳过步骤 9-13，设置 `plugin_workflow.skip_reason="主流程不达标"`
+- `qualified=false` → 跳过步骤 9-12，设置 `plugin_workflow.skip_reason="主流程不达标"`
 
 ### ⚠ 分支分流（进入步骤 9 前必读）
 
@@ -296,9 +296,9 @@ V3 切 plugin 用的是主流程已达标的算子集，但 plugin 实现路径�
 ### 步骤 13（Plugin 发布）
 
 **触发条件（仅精度硬闸门，性能不门控）**：`plugin_workflow.accuracy_ok=true`
-- 与 run_pipeline.sh 段4 一致：只要 V3 plugin 精度达标（`accuracy_ok=true`）就**必须**执行步骤13发布 V3，**`performance_ok` 不再作为发布门控**——性能不达标只决定发布 tag 的 qualified 标签（达标→更新 README；不达标→私有发布不更新 README），**绝不阻止 V3 产出**。
-- ⚠ **禁止**把 `plugin_workflow.performance_ok=false` 传导成 `qualified=false` 而跳过步骤13：这会导致精度已达标的 V3 被误判漏发（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，被错误当硬闸门漏发 V3）。
-- 精度不达标（`accuracy_ok=false`，含三级递进全关算子仍不达标的框架问题）时：仍执行步骤13，但走"Plugin 不达标发布"（Harbor 私有 / 打 incompatible 标记，不更新 README），**不得让 V3 版位留空**。
+- 与 run_pipeline.sh 段4 一致：只要 V3 plugin 精度达标（`accuracy_ok=true`）就**必须**执行步骤12发布 V3，**`performance_ok` 不再作为发布门控**——性能不达标只决定发布 tag 的 qualified 标签（达标→更新 README；不达标→私有发布不更新 README），**绝不阻止 V3 产出**。
+- ⚠ **禁止**把 `plugin_workflow.performance_ok=false` 传导成 `qualified=false` 而跳过步骤12：这会导致精度已达标的 V3 被误判漏发（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，被错误当硬闸门漏发 V3）。
+- 精度不达标（`accuracy_ok=false`，含三级递进全关算子仍不达标的框架问题）时：仍执行步骤12，但走"Plugin 不达标发布"（Harbor 私有 / 打 incompatible 标记，不更新 README），**不得让 V3 版位留空**。
 
 ```bash
 # 宿主机执行 plugin 发布

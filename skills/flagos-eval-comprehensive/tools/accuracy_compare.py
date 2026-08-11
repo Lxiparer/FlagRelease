@@ -402,7 +402,7 @@ def print_human(result: Dict[str, Any]):
 def main():
     parser = argparse.ArgumentParser(description="GPQA Diamond 精度达标判定（本地 V1 或 NV 基线）")
     parser.add_argument("--v1", help="V1 (Native) 评测结果 JSON（本地 V1 基线模式）")
-    parser.add_argument("--v2", required=True, help="待判定的评测结果 JSON（V2/V3/V4/V5）")
+    parser.add_argument("--v2", required=True, help="待判定的评测结果 JSON（V2/V3/V4）")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
                         help=f"本地 V1 模式：相对退化容差，比例值（默认 {DEFAULT_THRESHOLD} = {DEFAULT_THRESHOLD*100:.0f}%%）")
     # NV 基线模式

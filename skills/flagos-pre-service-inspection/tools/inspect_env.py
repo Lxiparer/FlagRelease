@@ -429,7 +429,7 @@ def classify_entry_image_type(capabilities, flagtree):
     elif has_plugin:
         entry_type = "gems_tree_plugin"
         branch = "B"
-        reason = "flaggems + plugin（+tree）预装，走分支 B（复杂路径，V1 二选/V2 分支）"
+        reason = "flaggems + plugin（+tree）预装，走分支 B（复杂路径，V1 三选/V2 分支）"
     else:
         # sglang 分支：无代码注入态，无 plugin 的 flaggems 无法经框架控制 → 按 native 处理
         entry_type = "native"

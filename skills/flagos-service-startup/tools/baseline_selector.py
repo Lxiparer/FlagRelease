@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-baseline_selector.py — V1 基线选择 — 分支 B (gems+tree+plugin) 专用（sglang 分支二态）
+baseline_selector.py — V1 基线三选状态机 — 分支 B (gems+tree+plugin) 专用（sglang 分支）
 
 sglang 分支：无 vllm 式"厂商 platform plugin"概念（sglang_fl 是算子调度插件、
-不注册 platform），V1 基线收敛为二态：
+不注册 platform），V1 基线为三态（对应四阶段 15 步的步骤3）：
 
-  v1.1  原生 sglang 启动 = 不加载 sglang_fl 插件（SGLANG_PLUGINS=''）
+  v1.1  纯净基线 = 不加载 sglang_fl 插件（SGLANG_PLUGINS=__none__）
         + 不开 flaggems（USE_FLAGGEMS=0，SGLANG_FL_PREFER=reference）
-  none  依赖 flaggems 无法起服务（sglang_fl 与 sglang 深度耦合），
-        精度基线回退 NV（nv_baseline.yaml），性能基线由 V2 初始性能合成
+  v1.3  插件层加载但不开替换 = SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0
+        （load_plugin() 注册 Communicator/vendor hooks 与 qwen_vl 兼容修复，
+        但不 enable flaggems 算子替换——可测"插件层固定开销"，即 V1.3 与 V1.1
+        的性能差 = sglang_fl 层的纯开销）
+  none  v1.1/v1.3 均失败 → 依赖 flaggems 无法起服务（sglang_fl 与 sglang
+        深度耦合），精度基线回退 NV（nv_baseline.yaml），性能基线由 V2
+        初始性能合成
 
-vllm 分支的三选（纯净 / 厂商 plugin / fl plugin 不开 flaggems）在 sglang 场景
-收敛为二选：插件要么加载（flagos 模式）要么不加载（基线），无"厂商插件半加载"
-中间态。SGLANG_PLUGINS='' 过滤 entry_points 自动加载（sglang.srt.plugins），
-USE_FLAGGEMS=0 为 Layer 1 总开关双保险。
+SGLANG_PLUGINS 过滤 entry_points 自动加载（sglang.srt.plugins）；v1.3 经
+--sglang-plugins sglang_fl 显式覆盖（优先级高于 start_service.sh native 兜底
+__none__），USE_FLAGGEMS=0 为 Layer 1 总开关双保险。
 
 Usage:
     python3 baseline_selector.py \
@@ -54,6 +58,15 @@ BASELINE_ENV = {
     "SGLANG_FL_PREFER": "reference",
 }
 
+# v1.3 插件层加载但不开替换 env（SGLANG_PLUGINS=sglang_fl 经 --sglang-plugins
+# 显式覆盖 start_service.sh 的 native 兜底 __none__；load_plugin() 注册 hooks，
+# USE_FLAGGEMS=0 不 enable 算子替换 → 测插件层固定开销）
+PLUGIN_LAYER_ENV = {
+    "SGLANG_PLUGINS": "sglang_fl",
+    "USE_FLAGGEMS": "0",
+    "SGLANG_FL_PREFER": "reference",
+}
+
 
 def run_cmd(cmd: str, timeout: int = 300) -> tuple:
     try:
@@ -90,8 +103,9 @@ def env_to_inline(env: Dict[str, str]) -> str:
 def _persist_state(result: Dict[str, Any]) -> Dict[str, Any]:
     """选定后确定性落盘（不靠编排层转记）：
 
-    1. v1.1 场景持久化 SGLANG_PLUGINS='' + USE_FLAGGEMS=0 + SGLANG_FL_PREFER=reference
-       → start_service.sh 后续启动（V2 等）未显式传参时继承，V2 强制走 plugin 调度路径
+    1. v1.1/v1.3 场景持久化 SGLANG_PLUGINS + USE_FLAGGEMS=0 + SGLANG_FL_PREFER=reference
+       → start_service.sh 后续启动（V2 等）未显式传参时继承；V2 flagos 模式显式
+         设 USE_FLAGGEMS=1 强制覆盖
     2. none 场景持久化 USE_FLAGGEMS=1 + SGLANG_FL_PREFER=flagos
        → V2 强制 flagos 路径，与 V3 同镜像（2.2 双 tag 前提），避免 V2/V3 拆成
          两次独立评测产生噪声跨比误判
@@ -133,6 +147,15 @@ def _persist_state(result: Dict[str, Any]) -> Dict[str, Any]:
             clear_env("SGLANG_PLUGINS")
             persisted["env_persisted"] = True
             print("  ✓ V1=none：持久化 USE_FLAGGEMS=1 + SGLANG_FL_PREFER=flagos（V2 强制 flagos 路径，与 V3 同镜像）")
+        elif result["v1_variant"] == "v1.3":
+            # v1.3 插件层加载不开替换：持久化 SGLANG_PLUGINS=sglang_fl + 关闭 flaggems
+            # （V2 会显式 USE_FLAGGEMS=1 强制覆盖 → 插件层已注册 hooks，flag_gems
+            #   enable 后即 flagos 调度路径，天然衔接 V2）
+            persist_env("SGLANG_PLUGINS", "sglang_fl")
+            persist_env("USE_FLAGGEMS", "0")
+            persist_env("SGLANG_FL_PREFER", "reference")
+            persisted["env_persisted"] = True
+            print("  ✓ 持久化 SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0 + SGLANG_FL_PREFER=reference（V2 起强制 flagos 覆盖）")
         else:
             # v1.1 纯净基线：持久化 SGLANG_PLUGINS='' + 关闭 flaggems
             persist_env("SGLANG_PLUGINS", "")
@@ -340,10 +363,11 @@ def try_variant(variant: str, env: Dict[str, str],
 
 def select_v1(service_cmd: str, wait_script: str,
               port: int, model_name: str, max_timeout: int) -> Dict[str, Any]:
-    """按 v1.1 → none 依次尝试，返回选择结果（sglang 二态）。"""
-    # 候选列表：仅 v1.1（纯净基线，不加载插件 + 不开 flaggems）
+    """按 v1.1 → v1.3 → none 依次尝试，返回选择结果（sglang 三态，对应步骤3 三选基线）。"""
+    # 候选列表：v1.1 纯净基线（不加载插件 + 不开 flaggems）→ v1.3 插件层加载不开替换
     candidates = [
         ("v1.1", dict(BASELINE_ENV)),
+        ("v1.3", dict(PLUGIN_LAYER_ENV)),
     ]
 
     attempts: List[Dict[str, Any]] = []
@@ -371,7 +395,7 @@ def select_v1(service_cmd: str, wait_script: str,
             "message": f"选定 V1 变体: {selected['variant']} (SGLANG_PLUGINS='{selected['sglang_plugins']}', USE_FLAGGEMS={selected['use_flaggems']})",
         }
     else:
-        # v1.1 失败 → 无独立 V1，强依赖 flaggems，精度基线回退 NV
+        # v1.1/v1.3 均失败 → 无独立 V1，强依赖 flaggems，精度基线回退 NV
         result = {
             "v1_variant": "none",
             "sglang_plugins": "",
@@ -380,14 +404,14 @@ def select_v1(service_cmd: str, wait_script: str,
             "smoke_passed": False,
             "nv_baseline_used": True,
             "attempts": attempts,
-            "message": "v1.1 失败 → 无独立 V1（强依赖 flaggems），精度基线回退 NV",
+            "message": "v1.1/v1.3 均失败 → 无独立 V1（强依赖 flaggems），精度基线回退 NV",
         }
 
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="V1 基线选择（分支 B，sglang 二态）")
+    parser = argparse.ArgumentParser(description="V1 基线选择（分支 B，sglang 三态：v1.1/v1.3/none）")
     parser.add_argument("--service-startup-cmd", required=True,
                         help="服务启动命令（不含 --mode/--sglang-plugins，本脚本自动追加）")
     parser.add_argument("--wait-script", default=DEFAULT_WAIT_SCRIPT)

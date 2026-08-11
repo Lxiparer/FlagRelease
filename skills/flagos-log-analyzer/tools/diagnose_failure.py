@@ -336,7 +336,7 @@ def detect_gated_termination(
 ) -> Optional[dict]:
     """识别「非中断，而是闸门未过正常终止」的场景。
 
-    典型：精度/性能硬闸门未达标 → 后续 Plugin/V4/V5 按设计 skip，流程收尾停服。
+    典型：精度/性能硬闸门未达标 → 后续 Plugin/V4 按设计 skip，流程收尾停服。
     此时 checkpoint 停留在某已 success 的步骤（如 06_quick_performance），
     若直接按 checkpoint 报「中断 + 服务未运行」会误导。
 

@@ -171,13 +171,13 @@ plugin_control:
   dispatch_mode: ""             # flagos | vendor | reference
 
 # ============================================================================
-# Plugin 验证流程状态 (由步骤 9-13 写入)
+# Plugin 验证流程状态 (由步骤 9-12 写入)
 # ============================================================================
 plugin_workflow:
   triggered: false              # 是否触发了 plugin 流程（步骤8 qualified=true 后触发）
-  service_ok: false             # 步骤10 plugin 服务启动是否成功
-  accuracy_ok: false            # 步骤11 plugin 精度是否达标
-  performance_ok: false         # 步骤12 plugin 性能是否达标
+  service_ok: false             # 步骤9 plugin 服务启动是否成功
+  accuracy_ok: false            # 步骤10 plugin 精度是否达标
+  performance_ok: false         # 步骤11 plugin 性能是否达标
   qualified: false              # service_ok AND accuracy_ok AND performance_ok
   plugin_image_url: ""          # plugin 版本 Harbor 镜像地址
   plugin_modelscope_url: ""     # plugin 版本 ModelScope 仓库地址
@@ -352,13 +352,13 @@ timing:
     quick_performance: 0        # 步骤6 性能评测（含 V1+V2）
     performance_tuning: 0       # 步骤7 性能算子调优
     release: 0                  # 步骤8 自动发布
-    plugin_install: 0            # 步骤9 Plugin 安装
-    plugin_service_startup: 0    # 步骤10 Plugin 服务启动
-    plugin_accuracy: 0           # 步骤11 Plugin 精度评测
-    plugin_performance: 0        # 步骤12 Plugin 性能评测
-    plugin_release: 0            # 步骤13 Plugin 发布
-    v5_expansion: 0              # 步骤14 V5 算子扩展
-    v5_release: 0                # 步骤15 V5 发布
+    plugin_install: 0            # 步骤9 启动插件（verify+启动）
+    plugin_service_startup: 0    # 步骤9 启动插件（verify+启动）
+    plugin_accuracy: 0           # 步骤10 Plugin 精度评测
+    plugin_performance: 0        # 步骤11 Plugin 性能评测
+    plugin_release: 0            # 步骤12 Plugin 发布
+    v4_reduction: 0              # 步骤13-14 V4 性能调优+精度对齐
+    v4_release: 0                # 步骤15 V4 发布
 
 # ============================================================================
 # 发布信息 (由步骤8 flagos-release 写入)
@@ -466,7 +466,7 @@ workflow_ledger:
       fail_reason: ""
       skip_reason: ""
     - step: "09_plugin_install"
-      name: "Plugin 安装"
+      name: "启动插件"
       status: "pending"
       started_at: ""
       finished_at: ""
@@ -510,8 +510,8 @@ workflow_ledger:
       notes: ""
       fail_reason: ""
       skip_reason: ""
-    - step: "14_v5_expansion"
-      name: "V5算子扩展"
+    - step: "13_v4_reduction"
+      name: "V4性能调优+精度对齐"
       status: "pending"
       started_at: ""
       finished_at: ""
@@ -519,8 +519,8 @@ workflow_ledger:
       notes: ""
       fail_reason: ""
       skip_reason: ""
-    - step: "15_v5_release"
-      name: "V5发布"
+    - step: "14_v4_release"
+      name: "V4发布"
       status: "pending"
       started_at: ""
       finished_at: ""

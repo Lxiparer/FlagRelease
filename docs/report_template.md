@@ -2,8 +2,7 @@
 > - V1：tree版本=基础版：只带flagtree不开启任何flagos组件
 > - V2：tree+gems=Pro版：开启flaggems且性能达到V1的80%，与V1的精度误差在5%以内
 > - V3：tree+gems+plugin=Max版：在V2的基础上安装使用plugin，且性能达到V1的80%，与V1的精度误差在5%以内
-> - V4：tree+gems+plugin=Flag-express版：在V3的基础上，性能表现超过V1版本
-> - V5：tree+gems(应开尽开)+plugin=Royal Megamaster交付版本：携带了所有的FlagOS组件，所有算子能开尽开，只要服务能够顺利启动就ok
+> - V4：tree+gems+plugin=Flag-express版：在V3的基础上减算子优化，性能表现超过V1版本（新流程 v3.1 已无 V5，V3 Max 为最终交付版本）
 
 # 基本信息
 
@@ -106,11 +105,6 @@ include:
 |--------|---------|-----------|-----------|-----------|
 | GPQA_Diamond | - | - | - | - |
 
-### V5
-| 数据集 | 评测条数 | 正确率(%) | 开启算子数 | FlagOS配置 |
-|--------|---------|-----------|-----------|-----------|
-| GPQA_Diamond | 50 | 22.0 | 29 | Royal Megamaster |
-
 ### 结果对比
 | 对比项 | 结果 |
 |--------|------|
@@ -141,11 +135,6 @@ include:
 |--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|------|
 | LLM-Research/Llama-3.2-1B-Instruct | Ascend | 296 | 8 | 2368 | - | - | - | - | - | - | Flag-express | - |
 
-### V5
-| 模型名 | 厂商 | TFLOPS（单卡） | 卡数 | TFLOPS（单卡） × 卡数 | 4k-1k 64并发 - mean TTFT（ms） | 4k-1k 64并发 - P99 TTFT（ms） | 4k-1k 64并发 - output toks/s | 4k-1k 64并发 - total tok/s | 4k-1k 64并发 - Mean TPOT (ms) | 开算子数 | FlagOS配置 | 单算力吞吐 |
-|--------|------|---------------|------|---------------------|------|------|------|------|------|------|------|------|
-| LLM-Research/Llama-3.2-1B-Instruct | Ascend | 296 | 8 | 2368 | 11402 | 22015 | 690.3 | 3480.1 | 63.27 | 29 | Royal Megamaster | 1.469637 |
-
 ### 结果对比
 | 对比项 | 结果 |
 |--------|------|
@@ -168,7 +157,6 @@ include:
   - V2：harbor.baai.ac.cn/flagrelease-public/flagrelease-ascend-release-model_llama-3.2-1b-instruct-tree_0.5.0-gems_5.0.1rc0-cx_none-python_3.11.14-torch_npu-2.8.0-pcp_cann2.8.0-gpu_ascend001-arc_arm64-driver_25.2.3:202506041400-v2
   - V3：-
   - V4：-
-  - V5：-
 
 - ModelScope: https://www.modelscope.cn/models/FlagRelease/Llama-3.2-1B-Instruct-ascend-FlagOS
 - HuggingFace: https://huggingface.co/FlagRelease/Llama-3.2-1B-Instruct-ascend-FlagOS

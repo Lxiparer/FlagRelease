@@ -24,7 +24,7 @@ PYTHON="${PY_BIN_DIR}/python3"
 # 取值: "" | "sglang_fl" | 逗号分隔多值
 SGLANG_PLUGINS_OVERRIDE_SET=0
 SGLANG_PLUGINS_OVERRIDE=""
-# 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 二选各 variant 独立日志）
+# 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
 # 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
 LOG_FILE_OVERRIDE=""
 

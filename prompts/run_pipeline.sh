@@ -1102,7 +1102,7 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 05_v2_release --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1 || true
-    for STEP_KEY in 06_v3_environment 07_v3_delivery 08_v4_reduction 09_v4_release; do
+    for STEP_KEY in 06_v3_environment 07_v3_delivery 13_v4_reduction 14_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段1越界回滚' \
             --json" >/dev/null 2>&1 || true
@@ -1210,7 +1210,7 @@ fi
 
 # ===== 双 pipeline 路由：读取段1 inspect_env 产出的 entry_image_type =====
 # sglang 分支收敛为两态：native（无 flaggems，仅评测）| gems_tree_plugin（唯一非 native 路径，B）
-# 分支 B: 复杂路径 — V1二选(v1.1/none) → V2(plugin 全量+调优) → V3(plugin 复测) → V4(减算子)
+# 分支 B: 复杂路径 — V1三选(v1.1/v1.3/none) → V2(plugin 全量+调优) → V3(plugin 复测) → V4(减算子)
 # 分类是确定性的（inspect_env.classify_entry_image_type），此处只读结果不做判断。
 ENTRY_IMAGE_TYPE=$(python3 -c "
 import yaml
@@ -1258,10 +1258,10 @@ case "${PIPELINE_BRANCH}" in
         # sglang 分支 entry_image_type 收敛为 native|gems_tree_plugin，无 gems_tree（代码注入）态。
         # 若出现视为 inspect_env 分类异常，按分支 B 语义兜底执行并提示。
         echo "⚠ 警告: entry_image_type=gems_tree 在 sglang 分支不应出现（无代码注入态），按分支 B 语义执行"
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 二选确定 v1.1/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
         ;;
     B)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 二选确定 v1.1/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
         ;;
     native)
         BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
@@ -1306,7 +1306,7 @@ ${SEG2_CTX_SUMMARY}
 4. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
 
 **无 V1 场景性能基线合成（条件触发，在步骤4之前执行）**：
-- 触发条件：context 的 baseline.v1_available=false（分支 B 二选=none），或 V1 服务无法启动（步骤3已确认）——即 V1 性能基线完全不可测
+- 触发条件：context 的 baseline.v1_available=false（分支 B 三选=none），或 V1 服务无法启动（步骤3已确认）——即 V1 性能基线完全不可测
 - 执行（此时算子集为步骤3幸存的初始状态，尚未被步骤5削减，正是合成基线要求的\"使能 flaggems 后首次可正常启动\"口径）：
   1. 以 flagos 模式启动 V2 服务（当前算子集，不做任何调优改动）
   2. quick 模式测一轮：PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance
@@ -1460,21 +1460,21 @@ echo "  容器名: ${SEG_CTR}"
 # 段2末确定性兜底刷新报告
 regenerate_report "${SEG_CTR}"
 
-# ===== 分支 B V1 二选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
+# ===== 分支 B V1 三选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
 # 动机：baseline_selector.py 全程无 shell 强制调用点，Claude 可能自起服务测一下就把
 # baseline.v1_variant/v1_available 写成臆断值，导致下游 V2 分支(2.1/2.2)、合成基线触发、
-# 精度基线回退 NV 全部建立在未经二选验证的判据上。v1_gate.py 只认 v1_baseline_selection.json
+# 精度基线回退 NV 全部建立在未经三选验证的判据上。v1_gate.py 只认 v1_baseline_selection.json
 # 里 baseline_selector 产出的 attempts[] 真实痕迹(每变体 service_ok/smoke_passed)，
-# needed=缺真实二选产物 → shell 兜底直调 baseline_selector.py。仅分支 B 需要二选。
+# needed=缺真实三选产物 → shell 兜底直调 baseline_selector.py。仅分支 B 需要三选。
 if [ "${PIPELINE_BRANCH:-}" = "B" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
     RES_DIR_V1="/data/flagos-workspace/${MODEL}/results"
     V1_SELECTION="${RES_DIR_V1}/v1_baseline_selection.json"
     V1_GATE=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE="needed"
     if [ "$V1_GATE" = "ok" ]; then
-        echo "  ✓ V1 二选闸门：baseline_selector.py 已真实执行过（v1_baseline_selection.json 含完整 attempts 痕迹）"
+        echo "  ✓ V1 三选闸门：baseline_selector.py 已真实执行过（v1_baseline_selection.json 含完整 attempts 痕迹）"
     else
-        echo "  ⚠ V1 二选闸门：缺 baseline_selector 真实产物（Claude 疑似臆断 v1_variant）→ shell 兜底直调二选状态机..."
-        # 取端口与模型名供二选启动服务/冒烟使用（一次 docker exec 读全，read_context 不含 port）
+        echo "  ⚠ V1 三选闸门：缺 baseline_selector 真实产物（Claude 疑似臆断 v1_variant）→ shell 兜底直调三选状态机..."
+        # 取端口与模型名供三选启动服务/冒烟使用（一次 docker exec 读全，read_context 不含 port）
         V1_META=$(docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
 import yaml
 try:
@@ -1491,7 +1491,7 @@ except: print('8000|')
             --model-name '${V1_MODEL_NAME}' \
             --output /flagos-workspace/results/v1_baseline_selection.json \
             --json" 2>&1 | tee -a "${LOG_FILE}" || true
-        # 同步二选产出的 context 与结果回宿主机
+        # 同步三选产出的 context 与结果回宿主机
         if [ -f "${SHARED_CTX}" ]; then
             cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
         else
@@ -1501,9 +1501,9 @@ except: print('8000|')
         # 复检
         V1_GATE_RECHECK=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE_RECHECK="needed"
         if [ "$V1_GATE_RECHECK" = "ok" ]; then
-            echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 二选已确定"
+            echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 三选已确定"
         else
-            echo "  ✗ shell 兜底后仍无有效二选产物（容器/脚本异常），下游将按 v1_available 现状继续"
+            echo "  ✗ shell 兜底后仍无有效三选产物（容器/脚本异常），下游将按 v1_available 现状继续"
         fi
     fi
 fi
@@ -1893,7 +1893,7 @@ print(','.join(overflow_steps) if overflow_steps else '')
 
 if [ -n "${SEG2_OVERFLOW}" ]; then
     echo "  ⚠ 段2越界检测：以下步骤被段2提前执行，将回滚为 pending 状态: ${SEG2_OVERFLOW}"
-    for STEP_KEY in 05_v2_release 06_v3_environment 07_v3_delivery 08_v4_reduction 09_v4_release; do
+    for STEP_KEY in 05_v2_release 06_v3_environment 07_v3_delivery 13_v4_reduction 14_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段2越界回滚' \
             --json" >/dev/null 2>&1 || true
@@ -1988,7 +1988,7 @@ except: print('')
 if [ "${V1_VARIANT}" = "none" ]; then
     SEG3_RELEASE_ARGS="--version-tag v2 --also-tag v3"
     SEG3_V13_NOTE="
-**V1=${V1_VARIANT} 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 二选结果为 ${V1_VARIANT}（v1.1=纯净基线不加载 sglang_fl；none=强依赖 flaggems，baseline_selector 已固化 USE_FLAGGEMS=1+SGLANG_FL_PREFER=flagos 使 V2 走 plugin 路径），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤13：ledger 仍只更新 08_release，步骤 9-13（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
+**V1=${V1_VARIANT} 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 ${V1_VARIANT}（v1.1=纯净基线不加载 sglang_fl；v1.3=插件层加载但不开替换；none=强依赖 flaggems，baseline_selector 已固化 USE_FLAGGEMS=1+SGLANG_FL_PREFER=flagos 使 V2 走 plugin 路径），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤12：ledger 仍只更新 08_release，步骤 9-12（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
     echo "[段3] V1=${V1_VARIANT} 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
 else
     SEG3_RELEASE_ARGS="--version-tag v2"
@@ -2007,7 +2007,7 @@ ${COMMON_TOKENS}
 - 容器 ${SEG_CTR} 已就绪，评测结果已写入 results/ 目录
 - context.yaml 中 workflow_ledger 的部分步骤状态可能未更新（已知问题），但前段步骤确实已完成
 - **禁止**回头检查或重做步骤1-7，直接执行步骤8
-- **禁止**修改 workflow_ledger 中步骤1-7和步骤9-13的状态。只允许更新步骤8（08_release）的 ledger 条目
+- **禁止**修改 workflow_ledger 中步骤1-7和步骤9-12的状态。只允许更新步骤8（08_release）的 ledger 条目
 - **禁止**使用 --set 'workflow_ledger.steps...' 的 dot notation 写入 ledger，必须使用 --ledger-update API
 
 **关键参数（从 context.yaml 提取，无需重新读取文件）**：
@@ -2032,7 +2032,7 @@ ${SEG3_CTX_SUMMARY}
 全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。
 
 **完成标志**：输出最终迁移报告后，输出 \"[段3] 步骤8完成，流程结束\" 后停止所有操作。
-**绝对禁止**进入步骤9-13（Plugin 流程）。Plugin 流程由下一段独立会话执行。
+**绝对禁止**进入步骤9-12（Plugin 流程）。Plugin 流程由下一段独立会话执行。
 禁止更新 ledger 中 09_plugin_install 及之后步骤的状态。违反此约束将导致重复执行。"
 
 echo ""
@@ -2115,7 +2115,7 @@ print(','.join(overflow_steps) if overflow_steps else '')
 
 if [ -n "${SEG3_OVERFLOW}" ]; then
     echo "  ⚠ 段3越界检测：以下步骤被段3提前执行，将回滚为 pending 状态: ${SEG3_OVERFLOW}"
-    for STEP_KEY in 08_v4_reduction 09_v4_release; do
+    for STEP_KEY in 13_v4_reduction 14_v4_release; do
         docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py \
             --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段3越界回滚' \
             --json" >/dev/null 2>&1 || true
@@ -2136,7 +2136,7 @@ if [ -n "${SEG3_OVERFLOW}" ]; then
     echo "  ✓ 越界状态已回滚，段4 将从步骤8重新开始"
 fi
 
-# ===== 段间检查：是否触发 plugin 流程（步骤 9-13） =====
+# ===== 段间检查：是否触发 plugin 流程（步骤 9-12） =====
 echo ""
 echo "┌──────────────────────────────────────────────────────────────┐"
 echo "│  段3 完成 — 检查是否触发 Plugin 流程                         │"
@@ -2193,7 +2193,7 @@ except: print('False')
 # PLUGIN_ENTRY = service_ok（仅"能起服务"）。plugin/V3 入口门控（用户 2026-07-20 定稿）。
 # 关键解耦：V2(FlagGems 注入)与 V3(plugin) 是两套不同的算子调度路径，V2 注入精度差
 # 不代表 V3 plugin 也差（甚至可能相反）。因此只要 V2 能起服务就应进入 plugin 流程尝试 V3，
-# V3 自己的精度在步骤11单独判（步骤13发布门控用 plugin_workflow.accuracy_ok）。
+# V3 自己的精度在步骤10单独判（步骤12发布门控用 plugin_workflow.accuracy_ok）。
 # 历史缺陷：旧逻辑用 V2 的 accuracy_ok 门控 plugin 入口，把 V2 精度不达标的模型直接挡在
 # V3 门外（Mistral-7B/Ministral-8B/LFM2/VibeThinker 从未尝试过 V3）。
 PLUGIN_ENTRY=$(python3 -c "
@@ -2222,7 +2222,7 @@ except: print('')
 
 # V1=none（2.2/3.2 同镜像）：V3 已由段3 --also-tag v3 双 tag 发布，段4 整段跳过
 if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "none" ]; }; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT}（V2=V3 同镜像，2.2/3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-13）"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT}（V2=V3 同镜像，2.2/3.2 场景）：V3 已随段3 双 tag 发布，跳过段4 Plugin 验证（步骤 9-12）"
     if [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
         for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
             docker exec "${SEG_CTR}" bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/update_context.py \
@@ -2230,7 +2230,7 @@ if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "none" ]; }; then
                 --json" >/dev/null 2>&1 || true
         done
         docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
-        echo "  ✓ 步骤 9-13 ledger 已置 skipped，context 已同步"
+        echo "  ✓ 步骤 9-12 ledger 已置 skipped，context 已同步"
     fi
     QUALIFIED_SEG4="False"
 else
@@ -2266,11 +2266,11 @@ try:
 except: print('')
 " 2>/dev/null) || SEG4_BRANCH=""
 
-# 分支专属的步骤9 plugin 安装指令
+# 分支专属的步骤9 启动插件指令
 if [ "${SEG4_BRANCH}" = "B" ]; then
-    SEG4_PLUGIN_DIRECTIVE="**⚠ 分支 B（准入镜像自带 plugin）步骤9 硬约束**：本次准入镜像 entry_image_type=gems_tree_plugin，**已自带可用 plugin**。步骤9 **禁止执行 install_plugin.py --action install（禁止重装 plugin）**——重装会 rm -rf + 重新 clone/pip，覆盖镜像里厂商适配好的 plugin、破坏 V3 对比语义。步骤9 只需 install_plugin.py --action verify 确认可用 + 记状态；plugin 通过启动环境变量 SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=1 在步骤10 使能。（即便误调 install，工具内置分支闸门也会拒绝重装返回 skipped，但仍不应主动调 install。）"
+    SEG4_PLUGIN_DIRECTIVE="**⚠ 分支 B（准入镜像自带 plugin）步骤9 硬约束**：本次准入镜像 entry_image_type=gems_tree_plugin，**已自带可用 plugin**。步骤9 **禁止执行 install_plugin.py --action install（禁止重装 plugin）**——重装会 rm -rf + 重新 clone/pip，覆盖镜像里厂商适配好的 plugin、破坏 V3 对比语义。步骤9 只需 install_plugin.py --action verify 确认可用 + 记状态；plugin 通过启动环境变量 SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=1 在步骤9 内使能。（即便误调 install，工具内置分支闸门也会拒绝重装返回 skipped，但仍不应主动调 install。）"
 else
-    SEG4_PLUGIN_DIRECTIVE="**步骤9 plugin 安装**：按 skills/flagos-plugin-install/SKILL.md 编排层指令执行（先读 workflow.entry_image_type：native 场景无 plugin 流程；gems_tree_plugin 分支 B 自带 plugin 禁止重装，仅 install_plugin.py --action verify 确认可用 + 记状态，SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=1 在步骤10 使能）。"
+    SEG4_PLUGIN_DIRECTIVE="**步骤9 启动插件（安装 verify + 启动）**：按 skills/flagos-plugin-install/SKILL.md 编排层指令执行（先读 workflow.entry_image_type：native 场景无 plugin 流程；gems_tree_plugin 分支 B 自带 plugin 禁止重装，仅 install_plugin.py --action verify 确认可用 + 记状态，SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=1 在步骤9 内使能）。"
 fi
 
 if [ "${QUALIFIED_SEG4}" = "True" ]; then
@@ -2316,14 +2316,14 @@ print(f'''- container_name: {ctr.get('name','')}
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
-按 CLAUDE.md 工作流定义执行步骤 9-13 Plugin 验证流程。
+按 CLAUDE.md 工作流定义执行步骤 9-12 Plugin 验证流程。
 
 ${SEG4_PLUGIN_DIRECTIVE}
 
 **前段状态（段1+段2+段3已完成，无需验证）**：
 - 步骤 1-8 已在前三段全部完成
 - 容器 ${SEG_CTR} 已就绪，主流程发布已完成
-- plugin/V3 入口门控 = service_ok（服务可起）；**V2 精度是否达标不影响是否尝试 V3**——V2(注入)与 V3(plugin)是两套算子调度路径，V3 精度以步骤11为准
+- plugin/V3 入口门控 = service_ok（服务可起）；**V2 精度是否达标不影响是否尝试 V3**——V2(注入)与 V3(plugin)是两套算子调度路径，V3 精度以步骤10为准
 - **禁止**回头检查或重做步骤 1-8，直接执行步骤 9
 
 **关键参数（从 context.yaml 提取）**：
@@ -2333,30 +2333,29 @@ ${SEG4_CTX_SUMMARY}
   docker exec \${CONTAINER} bash -c \"PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set key.path=value --json\"
 
 **步骤编号（严格遵守）**：
-- [步骤9] Plugin 安装
-- [步骤10] Plugin 服务启动
-- [步骤11] Plugin 精度评测
-- [步骤12] Plugin 性能评测
-- [步骤13] Plugin 发布
+- [步骤9] 启动插件（verify 确认可用 + plugin 模式起服务）
+- [步骤10] Plugin 精度评测
+- [步骤11] Plugin 性能评测
+- [步骤12] Plugin 发布
 
 **执行前**：
 1. 读取容器内 context.yaml 获取已达标算子集、GPU 配置、V1 基线结果
 2. 读取 skills/flagos-plugin-install/SKILL.md 了解 plugin 安装流程
-3. 读取 skills/flagos-service-startup/SKILL.md（步骤10复用）
-4. 读取 skills/flagos-eval-comprehensive/SKILL.md（步骤11复用）
-5. 读取 skills/flagos-performance-testing/SKILL.md（步骤12复用）
+3. 读取 skills/flagos-service-startup/SKILL.md（步骤9复用）
+4. 读取 skills/flagos-eval-comprehensive/SKILL.md（步骤10复用）
+5. 读取 skills/flagos-performance-testing/SKILL.md（步骤11复用）
 
 **Plugin 流程特殊规则**：
 - 步骤 9 安装失败 → issue_reporter.py --type plugin-error --repo flagos-ai/sglang-plugin-FL → 停止任务
 - 步骤 10 服务崩溃 → issue_reporter.py --type plugin-error --repo flagos-ai/sglang-plugin-FL → 停止任务
-- **流程哲学（用户 2026-07 定稿）：性能不看重、不阻断**。步骤12（plugin 性能评测）无论达标与否都不阻断步骤13发布，性能仅影响发布标签 qualified。**精度是唯一硬闸门**（rel_drop≤5%）。
+- **流程哲学（用户 2026-07 定稿）：性能不看重、不阻断**。步骤11（plugin 性能评测）无论达标与否都不阻断步骤12发布，性能仅影响发布标签 qualified。**精度是唯一硬闸门**（rel_drop≤5%）。
 - 步骤 11 精度不达标 → **三级递进**（精度专用，不直接放弃）：
   ① 先写 issue 到 flagos-ai/sglang-plugin-FL 记录问题；
   ② plugin 模式关算子调优：operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json（走 env_inline SGLANG_FL_FLAGOS_BLACKLIST，在已达标算子集基础上继续关拖累精度算子直到精度达标）；精度达标即置 accuracy_ok=true 继续；
   ③ 全关 flaggems 算子仍精度不达标 → 判定为框架问题，提交 plugin-error issue（标注全关仍不达标），保持 accuracy_ok=false（精度硬闸门未过 → V3 不产出）。
-- 步骤 12 性能不达标 → 仅写 performance-degraded issue 记录 + 标 performance_ok=false，**照常继续步骤13**（可选：跑一次 plugin 模式性能调优尽力提升，达上限即停，不强求达标）。
+- 步骤 11 性能不达标 → 仅写 performance-degraded issue 记录 + 标 performance_ok=false，**照常继续步骤12**（可选：跑一次 plugin 模式性能调优尽力提升，达上限即停，不强求达标）。
 - 步骤 13 触发条件：plugin_workflow.accuracy_ok=true（**仅精度硬闸门**；performance_ok 不再门控，仅决定发布 tag 的 qualified 标签）
-- **⚠ 步骤13硬约束（不可跳过）**：只要步骤11精度达标（accuracy_ok=true），**必须**立即执行步骤13发布 V3，**禁止**因 performance_ok=false / qualified=false 而跳过步骤13；**禁止**在步骤13完成前进入 V4 或结束会话。若精度达标却未发 V3，即为流程违规（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，agent误把performance_ok=false当门控、跳过步骤13直接跑V4致V3漏发）。步骤11→步骤13之间除步骤12性能记录外不得插入任何其他阶段。
+- **⚠ 步骤12硬约束（不可跳过）**：只要步骤10精度达标（accuracy_ok=true），**必须**立即执行步骤12发布 V3，**禁止**因 performance_ok=false / qualified=false 而跳过步骤12；**禁止**在步骤12完成前进入 V4 或结束会话。若精度达标却未发 V3，即为流程违规（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，agent误把performance_ok=false当门控、跳过步骤12直接跑V4致V3漏发）。步骤10→步骤12之间除步骤11性能记录外不得插入任何其他阶段。
 - 所有 issue 提交到 flagos-ai/sglang-plugin-FL（非 FlagGems）
 - 算子集以主流程已达标版本为起点；**精度达标则不重新调优，精度不达标则进入上述精度三级递进允许在 plugin 模式下继续调优**（性能不达标不强制重调，按上条尽力即可）
 - 启动环境变量：USE_FLAGGEMS=1 SGLANG_FL_PREFER=flagos SGLANG_PLUGINS=sglang_fl + 已有 blacklist
@@ -2386,7 +2385,7 @@ ${SEG4_CTX_SUMMARY}
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
-**⚠ 段边界**：本段执行步骤 9-13，最后一个步骤完成后停止。
+**⚠ 段边界**：本段执行步骤 9-12，最后一个步骤完成后停止。
 完成标志：输出 \"[段4] Plugin 流程完成\" 后停止所有操作。"
 
     echo ""
@@ -2442,7 +2441,7 @@ else
     if [ "${PLUGIN_ENTRY}" = "True" ] && { [ "${V1_VARIANT}" = "none" ]; }; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] V1=${V1_VARIANT} 同镜像场景，段4 已跳过（V3 已随段3 双 tag 发布）"
     else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] plugin_entry=${PLUGIN_ENTRY}（service_ok 未满足=服务起不来），跳过 Plugin 流程（步骤 9-13）"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] plugin_entry=${PLUGIN_ENTRY}（service_ok 未满足=服务起不来），跳过 Plugin 流程（步骤 9-12）"
     fi
 fi
 
@@ -2499,7 +2498,7 @@ SEG4_ELAPSED=0
 SEG4_MIN=0
 SEG4_SEC=0
 
-# 幂等检查：V4 是否已完成（ledger 08_v4_reduction 非 pending）
+# 幂等检查：V4 是否已完成（ledger 13_v4_reduction 非 pending）
 SEG4_V4DONE=$(python3 -c "
 import yaml
 try:
@@ -2508,7 +2507,7 @@ try:
     ledger = ctx.get('workflow_ledger', {}).get('steps', [])
     items = ledger if isinstance(ledger, list) else list(ledger.values()) if isinstance(ledger, dict) else []
     for s in items:
-        if isinstance(s, dict) and str(s.get('step','')).startswith('08_v4') and s.get('status') in ('success','failed','skipped'):
+        if isinstance(s, dict) and str(s.get('step','')).startswith('13_v4') and s.get('status') in ('success','failed','skipped'):
             print('yes'); exit()
 except: pass
 print('no')
@@ -2539,7 +2538,7 @@ if baseline <= 0:
 print(baseline)
 \"" 2>/dev/null) || V4_ACC_BASELINE="0.0"
 
-# V4 路径参数：读取 V1 二选结果确定 V2 路径（2.1 或 2.2），供 operator_reduction.py 使用
+# V4 路径参数：读取 V1 三选结果确定 V2 路径（2.1 或 2.2），供 operator_reduction.py 使用
 V4_V2_PATH=$(python3 -c "
 import yaml
 try:
@@ -2585,12 +2584,12 @@ PROMPT_SEG4V4="容器名: ${SEG_CTR}，模型名: ${MODEL}
 **变量定义**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
-执行步骤8（V4 减算子）和步骤9（V4 发布）。
+执行步骤13-14（V4 性能调优+精度对齐）和步骤15（V4 发布）。
 
 **前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-7 已全部完成，V3(Max) 已发布且精度达标。
 V4 从 V3 的算子列表里随机选 1~3 个算子只开（极简组合），若性能超优化基线且精度达标则采纳，循环≤2轮，保底≥1算子。2轮内无达标组合 → 回退到起点（精度已合格版）。
 
-**步骤8 V4 减算子（通过脚本自动执行）**：
+**步骤13-14 V4 性能调优+精度对齐（operator_reduction.py 一条命令顺序执行阶段1性能搜索→阶段2精度回溯，通过脚本自动执行）**：
 operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性能>优化基线+精度达标即采纳，≤2轮，2轮无果回退起点。
 优化基线来源：V2.1 路径=起点交集实测吞吐；V2.2/无V1路径=V2首测×1.05。一条命令执行：
   docker exec \${CONTAINER} bash -c \"PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/operator_reduction.py \\
@@ -2614,12 +2613,12 @@ operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性�
 - 命令返回后，**必须**回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志。
 脚本退出码 0 = V4 成立（有提升+精度达标 或 回退起点——回退版等价 V3，精度继承 V3 已验证结论，不重复终检）；1 = 不成立（仅\"采纳新随机组合但独立精度终检不达标\"时才会出现）。
 **重要**：回退到起点（fell_back_to_start=true）时脚本已跳过重复精度终检、直接继承 V3 精度结论（accuracy_ok=true），退出码必为 0 —— 回退版就是 V3 等价配置，绝不因 GPQA 评测抖动被二次否定。
-读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/fell_back_to_start/beats_baseline/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 08_v4_reduction）。
+读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/fell_back_to_start/beats_baseline/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 13_v4_reduction）。
 产出文件：operator_config_v4.json / v4_performance.json / v4_oplist.txt / gpqa_v4.json / v4_reduction.done（完成标记）。
 
 **说明**：若 --accuracy-baseline 为 0（NV 基线缺失），脚本跳过精度终检并标记 accuracy_verified=false，V4 仍产出但报告注明未验证。
 
-**步骤9 V4 发布（V4 无论成立与否都必须产出发布物，缺 V4 时由 V3 无条件兜底）**：
+**步骤15 V4 发布（V4 无论成立与否都必须产出发布物，缺 V4 时由 V3 无条件兜底）**：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 - **情况 A：V4 成立**（退出码 0，含回退到起点的等价 V3 情况）→ 正常发布 V4：
     python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v4
@@ -2627,11 +2626,11 @@ operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性�
   设计初衷：V4 产不出更优配置时必须由 V3 兜底替换，绝不出现\"V3 已发布、V4 版位空缺/失败\"的空档。
   兜底做法：把容器内算子配置恢复为 V3 全量配置（即 V3 已验证达标的算子集），再以 V4 tag 发布——V4 == V3 等价交付：
     1) 恢复 V3 配置：docker exec ${SEG_CTR} bash -c \"PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action restore-v3\" （或写回 V3 的 operator_config；V3 算子集在 context.versions.v3.enabled_ops）
-    2) 更新 context：置 v4_reduction.fell_back_to_start=true、v4_reduction.equivalent_v3=true、accuracy_ok=true（继承 V3），workflow_ledger 步骤 08_v4_reduction=success（注明\"V4 等价 V3 兜底\"）
+    2) 更新 context：置 v4_reduction.fell_back_to_start=true、v4_reduction.equivalent_v3=true、accuracy_ok=true（继承 V3），workflow_ledger 步骤 13_v4_reduction=success（注明\"V4 等价 V3 兜底\"）
     3) 发布 V4：python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v4
   README 注明\"V4 未找到更优组合，等价 V3 交付\"。发布后 V4 版位必须有产出，退出前回读确认 -v4 镜像已推送。
 
-**进度输出**：步骤开始/完成时输出 [步骤8] / [步骤9] 标记。
+**进度输出**：步骤开始/完成时输出 [步骤13]/[步骤14]/[步骤15] 标记。
 **完成标志**：输出 \"[段4] V4 减算子+发布完成\" 后停止所有操作。"
 
 mkdir -p "${LOG_DIR}"
@@ -2718,7 +2717,7 @@ else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] qualified_core_v3=${QUALIFIED_CORE_V3}（V3 精度硬闸门未过：service_ok/accuracy_ok 或 plugin V3 精度不达标），跳过段4（V4 减算子，不基于不合格 V3 减算子）"
     elif [ "${SEG4_V4DONE}" = "yes" ]; then
         echo ""
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 已完成（ledger 08_v4_reduction 非 pending），跳过段4"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] V4 已完成（ledger 13_v4_reduction 非 pending），跳过段4"
     fi
 fi
 
@@ -2951,7 +2950,7 @@ if summary:
         ctx = yaml.safe_load(f) or {}
     release = ctx.setdefault('release', {})
     # 无条件覆盖(允许清空)：修复前 V2 精度不达标时可能写入"未建仓库的幽灵 URL"，
-    # 若仅非空才写，存量幽灵 URL 无法清除，步骤13 仍会误判"已有仓库"走更新 README
+    # 若仅非空才写，存量幽灵 URL 无法清除，步骤12 仍会误判"已有仓库"走更新 README
     # 而非 full-publish 补发。summary 解析失败时 summary=None 不会进本分支，安全。
     release['modelscope_url'] = summary.get('modelscope_url', '')
     release['huggingface_url'] = summary.get('huggingface_url', '')

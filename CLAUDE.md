@@ -62,39 +62,52 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 ## 工作流（新模型迁移发布）
 
-**用户提供目标（容器名或镜像地址）+ 模型名后，1-8 全自动执行，零交互。**
+**用户提供目标（容器名或镜像地址）+ 模型名后，四阶段 15 步全自动执行，零交互。**
 **自动识别**：含 `:` 或 `/` 的目标视为镜像地址，否则通过 `docker inspect --type=container` 判断是否为已有容器。模型路径自动搜索，无需手动指定。
 
 ```
+输入: 镜像 + 模型名  →  输出: 多版本镜像 + 报告
+
+阶段一 确定基线 (V1)
 1 容器准备           → 自动识别容器/镜像 + 模型权重搜索/下载 + 工具部署
 2 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
-3 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
+3 三选基线           → baseline_selector.py 三选状态机确定 V1 依赖:
+                        V1.1 纯净基线(SGLANG_PLUGINS=__none__+USE_FLAGGEMS=0)
+                        V1.3 插件层不开替换(SGLANG_PLUGINS=sglang_fl+USE_FLAGGEMS=0)
+                        none 均失败→NV 兜底(精度回退 nv_baseline.yaml, 性能基线合成)
+                      → 启动验证 + 冒烟 → 异常自动 issue
+阶段二 使能 GT (V2)
 4 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
-5 精度算子调优       → [条件] env_type≠native 且 V2精度相对退化>5% 时分组排查定位问题算子（最多3轮）
+5 精度调优           → [条件] env_type≠native 且 V2精度相对退化>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
-7 性能算子调优       → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
-8 V2发布(Pro)        → 打包 Harbor 私有(始终) + V2 精度达标才对外传权重/README，tag 后缀 -v2
---- Plugin 验证流程（plugin_entry=service_ok 触发，V2 精度不阻塞；性能不阻断）---
-9  Plugin 安装       → install_plugin.py 安装 sglang-plugin-FL → 失败则 issue + 停止
-10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
-11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
-12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
-13 V3发布(Max)       → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
---- V4 减算子流程（service_ok AND V3(plugin)精度达标 触发，紧接 V3；性能不阻断，精度硬闸门）---
-13.5 V4减算子(Flag-express) → operator_reduction.py 两阶段（阶段1性能搜索不测精度、阶段2精度回溯）在 V3 达标算子集上减算子提性能，追求性能绝对值最大化、达标基准是超越 V3（不与 V1 比），保底≥1算子，精度相对退化≤5% 为成立前提 → tag 后缀 -v4，plugin 镜像模式发布
+7 性能调优           → [条件] env_type≠native 且 ratio<80% 时逐个禁用直到达标
+8 产出GT镜像         → 打包 Harbor 私有(始终) + V2 精度达标才对外传权重/README，tag 后缀 -v2
+阶段三 使能插件 (V3)   ← sglang 场景 V2 已走 sglang_fl 调度路径，此阶段=plugin 模式复测+交付
+9 启动插件           → [plugin_entry=service_ok 触发] 以达标算子集 + plugin 模式启动
+                        （install_plugin.py verify 确认可用，禁止重装）→ 崩溃则 issue + 停止
+10 精度评测          → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+11 性能评测          → 与 V1 基线对比 → 不达标则算子调优（plugin 模式）
+12 产出高覆盖度镜像   → tag 后缀 -v3，[不达标]issue + 镜像上传(私有) / [达标]镜像上传 + 更新 README
+阶段四 性能优化 (V4)   ← 紧接 V3，V3 精度达标触发；性能不阻断，精度硬闸门
+13 性能调优          → operator_reduction.py 阶段1 性能搜索（从 V3 算子池选 1~3 个只开，
+                        仅当吞吐>当前基线才提交、基线动态推进，全程不测精度）
+14 精度对齐          → operator_reduction.py 阶段2 精度回溯（按性能从高到低取组合测精度，
+                        达标即产出，不达标回退次优，最坏回退 V3 等价；
+                        保底≥1算子，精度相对退化≤5% 为成立前提）
+15 产出高性能镜像     → tag 后缀 -v4，plugin 镜像模式发布
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [plugin_entry=service_ok] → 9 → 10 → 11 → 12 → 13 → [V3 精度达标] → 13.5(V4)
+执行顺序：1 → 2 → 3 → 4 → [5] → 6 → [7] → 8 → [plugin_entry=service_ok] → 9 → 10 → 11 → 12 → [V3 精度达标] → 13 → 14 → 15
 （**plugin/V3 入口 = service_ok**：V2 精度不阻塞 V3 尝试；**V4 入口 = service_ok AND V3(plugin)精度达标**，不叠加 V2 精度；性能全程不阻断，仅影响发布 tag 的 qualified 标签）
-（对外发布(魔搭/HF)门控：V2 精度达标→步骤8建仓+传权重+README；V2 精度不达标→步骤8仅 Harbor 私有、不对外，若 V3 达标由步骤13 full-publish 补发；**V2 与 V3 都不达标→对外都不发**，仅留私有镜像）
+（对外发布(魔搭/HF)门控：V2 精度达标→步骤8建仓+传权重+README；V2 精度不达标→步骤8仅 Harbor 私有、不对外，若 V3 达标由步骤12 full-publish 补发；**V2 与 V3 都不达标→对外都不发**，仅留私有镜像）
 
-**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 11/12 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
+**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 9-11 以步骤 5/7 的最终算子集为起点：**精度达标则不重新调优；精度不达标按精度三级递进（先 issue → plugin 模式关算子调优 → 全关仍不达标才判框架问题）在 plugin 模式下继续调优；性能不达标不强制重调，尽力即可、达上限即停**（见步骤 10/11 说明）。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
 
 **Plugin 流程特殊规则**：
-- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2 精度不达标不阻塞 V3 尝试**——V2 与 V3 在 sglang 场景同走 sglang_fl 调度路径，但 V2 达标算子集与 V3 复测调优独立判定；V3 自己的精度在步骤11单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-13，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-13。
-- 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
-- Issue 路由：步骤 9-13 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/sglang-plugin-FL` 提交（只保存本地文件）
-- **Plugin 阶段算子调优（精度三级递进）**：步骤 11 **精度**不达标时按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭拖累精度的算子直到精度达标；③若全关 flaggems 算子仍精度不达标，判定为框架问题，提交 plugin-error issue，accuracy_ok=false（精度硬闸门未过 → V3 不产出）。步骤 12 **性能**不达标：仅写 performance-degraded issue + 标 performance_ok=false，**照常继续步骤13**（可选跑一次 plugin 性能调优尽力提升，达上限即停，不强求达标）。
+- 触发条件（用户 2026-07-20 定稿，**入口只看能否起服务**）：步骤 8 完成且 `workflow.service_ok`（记为 **plugin_entry**，即 V2 环境能起服务）。**V2 精度不达标不阻塞 V3 尝试**——V2 与 V3 在 sglang 场景同走 sglang_fl 调度路径，但 V2 达标算子集与 V3 复测调优独立判定；V3 自己的精度在步骤10单独判。**性能不看重、不阻断**：performance_ok=false 不阻止步骤 9-12，性能仅决定发布 tag 的 qualified 标签。仅当 V2 服务起不来(service_ok=false)才 skip 步骤 9-12。
+- 崩溃停止：步骤 9 启动插件（安装 verify + 服务启动）失败或崩溃 → 写 issue → 设 `plugin_workflow.crash_stopped=true` → **停止任务**
+- Issue 路由：步骤 9-12 所有 issue 通过 `issue_reporter.py full --type plugin-error --repo flagos-ai/sglang-plugin-FL` 提交（只保存本地文件）
+- **Plugin 阶段算子调优（精度三级递进）**：步骤 10 **精度**不达标时按三级递进处理：①先提交 issue 记录问题；②用 `operator_search.py run --plugin-mode --final-output-name v3_performance --state-path operator_config_v3.json` 在 Plugin 模式下继续关闭拖累精度的算子直到精度达标；③若全关 flaggems 算子仍精度不达标，判定为框架问题，提交 plugin-error issue，accuracy_ok=false（精度硬闸门未过 → V3 不产出）。步骤 11 **性能**不达标：仅写 performance-degraded issue + 标 performance_ok=false，**照常继续步骤12**（可选跑一次 plugin 性能调优尽力提升，达上限即停，不强求达标）。
 - 算子集初始化：以主流程已达标的算子集（含步骤 5/7 的禁用列表）为起点，在此基础上累加禁用
 - 镜像 tag：原 date_tag 追加 `-v3`（如 `202603301143-v3`）
 - Plugin 不达标发布：调优后仍不达标时，先提交 issue，再打包镜像上传 Harbor（私有），不更新 ModelScope/HuggingFace README
@@ -107,8 +120,8 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | **V1** (基础版) | 原生 sglang，不加载 sglang_fl 插件、不开启 FlagGems（或关闭 flaggems 后无法起服务→无 V1） | `-v1` | 阶段一手动发布 |
 | **V0** (中间态) | FlagGems 全量算子开启的初始状态 | — | 不发布（仅作为调优起点） |
 | **V2** (Pro版) | FlagGems（sglang_fl plugin），精度相对退化≤5%，性能≥80% of V1 | `-v2` | 步骤8自动发布 |
-| **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤13自动发布 |
-| **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | operator_reduction.py 自动发布 |
+| **V3** (Max版) | V2 + Plugin，精度相对退化≤5%，性能≥80% of V1 | `-v3` | 步骤12自动发布 |
+| **V4** (精简版/Flag-express) | V3 基础上减算子以提升性能，追求性能绝对值最大化、**达标基准是超越 V3（不与 V1 比较）**，**精度相对退化≤5%（版本成立前提）**，保底≥1算子 | `-v4` | 步骤15自动发布（operator_reduction.py） |
 
 - **V1 基线**：不开启 flaggems 算子替换的版本（不加载 sglang_fl 插件 + USE_FLAGGEMS=0 的原生 sglang），作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务（sglang_fl 与 sglang 深度耦合），则标记"无 V1"，跳过 V1 基线测试，精度基线回退 NV 基线（`nv_baseline.yaml`），**性能基线合成**：V2 使能 flaggems 后首次可正常启动时（步骤4之前、精度调优削减算子之前），quick 测一轮初始性能（`v2_initial_performance`），经 `synthesize_perf_baseline.py` ×1.05 合成基线（全芯片统一标准；吞吐×1.05、延迟÷1.05），按 `native_performance.json` 标准格式落盘（`_meta.synthetic=true` + `target_ratio_override=1.0` 标记），下游对比/调优/报告照常消费。合成基线场景达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效，实测 V1 不受影响）
 - **V0**：进入自动化时 flaggems 全量开启状态。服务启动后以运行时 [GEMS] 日志 / dispatch 记录的实际启用算子为准
@@ -123,18 +136,19 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 | entry_image_type | 分支 | 准入镜像组成 | 版本路径 |
 |------------------|------|--------------|---------|
-| `gems_tree_plugin` | **B**（复杂） | flaggems + plugin（sglang_fl） | V1(二选 v1.1/none) → V2(plugin 全量+调优) → V3(plugin 复测) → V4(减算子) |
+| `gems_tree_plugin` | **B**（复杂） | flaggems + plugin（sglang_fl） | V1(三选 v1.1/v1.3/none) → V2(plugin 全量+调优) → V3(plugin 复测) → V4(减算子) |
 | `native` | native | 无 flaggems | 仅精度/性能评测，不做算子调优与多版本发布 |
 
 （sglang 分支无 `gems_tree` 代码注入态：flaggems 必须经 sglang_fl 插件生效，entry_image_type 收敛为 native | gems_tree_plugin）
 
 **分支 B（gems_tree_plugin）工作流**：
-- V1：**二选状态机**（`baseline_selector.py`）确定基础版依赖——
-  - `v1.1` SGLANG_PLUGINS='' + USE_FLAGGEMS=0 纯净基线（原生 sglang，不加载插件不开替换）
-  - 失败 → `none`（强依赖 flaggems，sglang_fl 与 sglang 深度耦合），精度基线回退 `nv_baseline.yaml`
+- V1：**三选状态机**（`baseline_selector.py`，步骤3）确定基础版依赖——
+  - `v1.1` SGLANG_PLUGINS=__none__ + USE_FLAGGEMS=0 纯净基线（原生 sglang，不加载插件不开替换）
+  - `v1.3` SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0 插件层加载但不开算子替换（可测插件层固定开销）
+  - 均失败 → `none`（强依赖 flaggems，sglang_fl 与 sglang 深度耦合），精度基线回退 `nv_baseline.yaml`
 - V2：plugin 全量开启（USE_FLAGGEMS=1 + SGLANG_FL_PREFER=flagos），经步骤5/7 精度/性能调优达标
-- V3：plugin 流程精度复测调优（步骤9-13），V2 与 V3 同走 sglang_fl 调度路径；V1=none 时 V2=V3 同镜像 `--also-tag` 双 tag 发布
-- V4：`operator_reduction.py` 减算子优化性能
+- V3：plugin 流程精度复测调优（步骤9-12），V2 与 V3 同走 sglang_fl 调度路径；V1=none 时 V2=V3 同镜像 `--also-tag` 双 tag 发布
+- V4：`operator_reduction.py`（步骤13-15）减算子优化性能
 
 - **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）
 
@@ -187,10 +201,10 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
 | 性能调优触发 | `performance_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
 | V3 验证 benchmark | quick 模式 | 不询问策略 |
-| Plugin 流程触发 | `workflow.qualified=true` 后自动进入步骤 9-13 | 不询问是否安装 plugin |
+| Plugin 流程触发 | `workflow.qualified=true` 后自动进入步骤 9-12 | 不询问是否安装 plugin |
 | Plugin 安装失败 | 写 issue 到 `flagos-ai/sglang-plugin-FL` → 停止任务 | 不尝试恢复 |
 | Plugin 服务崩溃 | 写 issue 到 `flagos-ai/sglang-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
-| Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/sglang-plugin-FL` | 非 FlagGems 仓库 |
+| Plugin issue 路由 | 步骤 9-12 所有 issue → `flagos-ai/sglang-plugin-FL` | 非 FlagGems 仓库 |
 | Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
 | Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 达标不重新调优；不达标进三级递进继续调优 |
 | 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
@@ -393,8 +407,8 @@ docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-worksp
 
 ### 算子控制约束
 
-26. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。算子控制方式按场景区分：
-    - **sglang 场景（`sglang_plugin_flaggems`，含步骤 10-12）**：无代码注入控制文件机制（`FLAGGEMS_CONTROL_MODE` / `/root/flaggems_ops_control.json` 均不适用），算子配置统一走 SGLANG_FL_* env。步骤 9 安装成功后通过 `persist_op_config.py --auto --env-type sglang_plugin_flaggems` 将算子配置固化到容器 `/etc/environment`（`USE_FLAGGEMS`、`SGLANG_FL_PREFER`、`SGLANG_FL_FLAGOS_WHITELIST`/`BLACKLIST`、`SGLANG_PLUGINS`）。步骤 10-12 启动服务优先使用 `start_service.sh --mode flagos`（自动加载固化变量），无需编排层手动传递内联环境变量。兜底时仍可通过 `apply_op_config.py --mode custom --flagos-blacklist "op1,op2,..."` 生成 `env_inline` 内联传递
+26. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤9-11 Plugin，每步在前序基础上累加禁用。算子控制方式按场景区分：
+    - **sglang 场景（`sglang_plugin_flaggems`，含步骤 9-11）**：无代码注入控制文件机制（`FLAGGEMS_CONTROL_MODE` / `/root/flaggems_ops_control.json` 均不适用），算子配置统一走 SGLANG_FL_* env。步骤 9 启动插件前通过 `persist_op_config.py --auto --env-type sglang_plugin_flaggems` 将算子配置固化到容器 `/etc/environment`（`USE_FLAGGEMS`、`SGLANG_FL_PREFER`、`SGLANG_FL_FLAGOS_WHITELIST`/`BLACKLIST`、`SGLANG_PLUGINS`）。步骤 9-11 启动服务优先使用 `start_service.sh --mode flagos`（自动加载固化变量），无需编排层手动传递内联环境变量。兜底时仍可通过 `apply_op_config.py --mode custom --flagos-blacklist "op1,op2,..."` 生成 `env_inline` 内联传递
     - 两种场景均禁止使用 `toggle_flaggems.py --action enable`（会重置为全量开启）
 27. **算子列表以运行时 txt（`flaggems_enable_oplist.txt` 或 `gems.txt`）为唯一权威来源**。每次服务启动后必须检查该文件。不在此文件中的算子必须被显式关闭。算子调优中的关闭列表只是控制输入，实际生效以运行时 txt 为准
 

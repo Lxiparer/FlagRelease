@@ -140,7 +140,7 @@ qualified 状态记录到报告中:
 
 **对外发布(魔搭/HF)建仓门控（需求 D，用户 2026-07-20 定稿）**——与"可见性"无关，决定是否建仓/传权重：
 - 步骤8(V2, 非 plugin 模式)：Harbor 镜像**始终**推送(私有)；**仅当 V2 精度达标(`workflow.accuracy_ok=true`)** 才创建 ModelScope/HuggingFace 仓库并上传权重。V2 精度不达标 → 只留 Harbor 私有镜像(过程产物)，**不建对外仓库**。
-- 步骤13(V3, plugin 模式)：若步骤8已建仓(V2 达标)→更新其 README；若步骤8未建仓(V2 不达标)但 V3 精度达标 → **full-publish 补发**(建仓+传权重+README)。
+- 步骤12(V3, plugin 模式)：若步骤8已建仓(V2 达标)→更新其 README；若步骤8未建仓(V2 不达标)但 V3 精度达标 → **full-publish 补发**(建仓+传权重+README)。
 - 净效果：V2 达标→对外发布；V2 不达标+V3 达标→V3 时补发；**V2 与 V3 都不达标→对外一律不发**，仅私有镜像。
 
 **qualified 判定细节**（仅用于报告展示）：
@@ -166,7 +166,7 @@ qualified 状态记录到报告中:
 # 镜像命名规范
 
 镜像名主体由 `get_image_name.sh`（权威工具，进容器 `docker exec` 采集全部版本）生成，
-`generate_image_tag` 调用它拿主体，再拼 registry 前缀与版本后缀（`-v1`..`-v5`）。
+`generate_image_tag` 调用它拿主体，再拼 registry 前缀与版本后缀（`-v1`..`-v4`）。
 
 ## Tag 格式
 
@@ -195,7 +195,7 @@ harbor.baai.ac.cn/flagrelease-public/GLM5.2-ascend001-gems5.3.0-treenone-cx3.5.1
   iluvatar=`ixml`、tsingmicro=`raisa`、zhenwu=`hggc`
 - 架构：`x86_64→x64`、`aarch64→a64`
 - 采集不到的版本填 `none`（如 `xrtnone`），属规范预期，非错误
-- **版本后缀 `-v1..-v5` 必须保留**：由 config.py 拼在 date_tag 上，
+- **版本后缀 `-v1..-v4` 必须保留**：由 config.py 拼在 date_tag 上，
   脚本自带时间戳被丢弃改用该 date_tag；双 tag/不适配 tag 靠 `-v[0-9]+$`
   正则替换，依赖此后缀
 - 厂商别名归一化：`huawei→ascend`、`tianshu→iluvatar`、`moore→mthreads` 等
@@ -343,7 +343,7 @@ docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-worksp
 
 ---
 
-## 编排层指令（步骤13 Plugin 发布 — 固化决策）
+## 编排层指令（步骤12 Plugin 发布 — 固化决策）
 
 ### 触发条件
 
@@ -370,7 +370,7 @@ python3 skills/flagos-release/tools/main.py \
 
 `--plugin-mode` 标志使发布脚本执行以下差异化逻辑：
 
-| 步骤 | 主流程（步骤8） | Plugin 模式（步骤13） |
+| 步骤 | 主流程（步骤8） | Plugin 模式（步骤12） |
 |------|---------------|---------------------|
 | 镜像 tag | `{date_tag}` | `{date_tag}-plugin` |
 | 仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 复用步骤8仓库（不创建新仓库） |

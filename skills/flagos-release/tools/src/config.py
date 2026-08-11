@@ -307,8 +307,8 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # ===== 需求 D（用户 2026-07-20 定稿）：V2 精度不达标时不对外发布 =====
     # 非 plugin 模式(步骤8 V2 发布)：仅当 V2 精度达标(workflow.accuracy_ok=true) 才创建
     # ModelScope/HuggingFace 仓库并上传权重；V2 精度不达标 → 仅 Harbor 私有镜像(过程产物)，
-    # 不对外发布。若后续 V3(plugin)达标，由步骤13的 full-publish 兜底补发对外仓库。
-    # 说明：plugin 模式(步骤13)不走此分支，其 README/发布门控由 plugin_qualified 决定。
+    # 不对外发布。若后续 V3(plugin)达标，由步骤12的 full-publish 兜底补发对外仓库。
+    # 说明：plugin 模式(步骤12)不走此分支，其 README/发布门控由 plugin_qualified 决定。
     if not config.plugin_image_mode:
         v2_accuracy_ok = bool(workflow.get('accuracy_ok'))
         if not v2_accuracy_ok:

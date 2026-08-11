@@ -914,7 +914,7 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| gems+tree版本上传时间 | {_fmt_dt(v2_upload_time)} |")
 
     # 发布时间 = 发布镜像产出时间。优先从最高版本镜像 tag 的时间戳解析
-    # （最贴合“镜像产出”口径），取不到再回退 ledger 步骤13/步骤8 完成时间。
+    # （最贴合“镜像产出”口径），取不到再回退 ledger 步骤12/步骤8 完成时间。
     _versions_ctx = ctx.get("versions", {}) or {}
     _v4c = _versions_ctx.get("v4", {}) or {}
     _v3c = _versions_ctx.get("v3", {}) or {}
