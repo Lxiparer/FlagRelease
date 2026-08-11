@@ -745,6 +745,72 @@ def _inject_single_file(code_path, caps):
     }
 
 
+def _find_cold_inject_anchors():
+    """冷注入锚点：vllm worker 的 model runner 模块（每个 worker 都会 import）
+
+    优先从已安装的 vllm 包定位；找不到再兜底扫描常见 site-packages。
+    """
+    anchors = []
+    # 1. import vllm 定位包路径
+    try:
+        import vllm
+        pkg_dir = os.path.dirname(vllm.__file__)
+        candidate = os.path.join(pkg_dir, "worker", "model_runner.py")
+        if os.path.isfile(candidate):
+            anchors.append(candidate)
+    except (ImportError, AttributeError):
+        pass
+    # 2. 兜底：扫描常见 site-packages 目录
+    if not anchors:
+        for env_root in (sys.prefix, "/opt/conda"):
+            site = os.path.join(
+                env_root, "lib",
+                "python{}.{}".format(sys.version_info.major, sys.version_info.minor),
+                "site-packages")
+            candidate = os.path.join(site, "vllm", "worker", "model_runner.py")
+            if os.path.isfile(candidate) and candidate not in anchors:
+                anchors.append(candidate)
+    return anchors
+
+
+def _cold_inject_single_file(filepath, caps):
+    """对无 flag_gems.enable() 调用点的文件从零插入注入块（冷注入）
+
+    插入位置：跳过 shebang 与模块 docstring，插到第一个语句前——
+    模块加载时注入逻辑即生效，等价于 enable() 在 import 时执行。
+    """
+    if not filepath or not os.path.isfile(filepath):
+        return {"injected": False, "file": filepath, "error": "file not found"}
+
+    content = Path(filepath).read_text(encoding="utf-8", errors="ignore")
+
+    if FLAGGEMS_INJECT_MARKER in content:
+        return {"injected": True, "already": True, "file": filepath}
+
+    lines = content.splitlines(keepends=True)
+    idx = 0
+    if lines and lines[0].startswith("#!"):
+        idx = 1  # 跳过 shebang
+    if idx < len(lines) and lines[idx].lstrip().startswith(('"""', "'''")):
+        quote = lines[idx].lstrip()[:3]  # 跳过模块 docstring
+        for j in range(idx, len(lines)):
+            if quote in lines[j]:
+                idx = j + 1
+                break
+
+    inject_block = _build_inject_block(caps, indent="")
+
+    backup_path = filepath + ".flagos_backup"
+    Path(backup_path).write_text(content, encoding="utf-8")
+
+    new_content = "".join(lines[:idx]) + inject_block + "\n\n" + "".join(lines[idx:])
+    Path(filepath).write_text(new_content, encoding="utf-8")
+
+    print(f"  ✓ 冷注入环境变量驱动代码到 {filepath}")
+    print(f"    备份: {backup_path}")
+    return {"injected": True, "file": filepath, "backup": backup_path}
+
+
 def _inject_control_code(code_details, caps):
     """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件
 
