@@ -220,8 +220,42 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 ## Thinking 模型检测规则
 
-模型名（不区分大小写）包含以下关键词即判定为 thinking model：
-- `qwen3`、`qwq`、`deepseek-r1`、`deepseek-r2`
+模型名（不区分大小写）包含以下关键词即判定为 thinking model（与 fast_gpqa.py THINKING_PATTERNS 一致）：
+- `qwen3`、`qwq`、`deepseek-r1`、`deepseek-r2`、`mimo`、`hunyuan`
+- 或 context.yaml 的 `runtime.thinking_model=true` / `model.thinking_model=true`（优先级最高）
+
+## 评测时间预算（2026-08-10 定稿）
+
+**背景**：thinking 模型正常评测 7-10h（慢速芯片思考链 500-720s/题），原 max-timeout 写死 2h 必然超时 → 评测反复失败 → 自发跳过评测 → 数据缺失。本规则按题数×单题预算×1.25 缓冲计算确定性预算，消除超时根因。
+
+| 模型类型 | --limit | 单题预算 | max_timeout | Bash timeout(ms) |
+|---------|---------|---------|-------------|------------------|
+| thinking | 30 | 600s | 22500（约 6.3h） | 22560000 |
+| 普通 | 50 | 60s | 7200（维持原 2h 语义） | 7260000 |
+
+- **V1 与 V2 必须使用相同参数**：thinking 模型两侧均 `--limit 30`，普通模型两侧均默认 50 题（同样本可对比，禁止一方 30 一方 50）
+- **禁止因耗时长跳过评测**：评测耗时长（尤其 thinking 模型 6h+）是预算内预期，严禁因等待时间长主动跳过、放弃或截断评测；预算内完成即为正常，超时按等待策略重试
+- **Bash timeout 降级**：若部署端 Bash 工具拒绝超大 timeout 参数（各环境上限可能不同），改用部署端允许的最大值——eval_wrapper 内层 `--max-timeout` 才是真正总闸，外层仅防工具先超时，评测完整性不受影响
+- 安全网保障：预算调大不会让 runaway 无限拖 —— fast_gpqa max_tokens cap（防线1）锁死复读生成窗口；eval_wrapper 收尾停滞看门狗照杀（防线3），生成中停滞仅提示不杀（慢≠死），给足预算不会误杀正常长推理
+- 两个完整命令模板（二选一）：
+
+```bash
+# thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）：
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
+    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output <输出路径>' \
+    --service-log <服务日志路径> \
+    --stall-timeout 300 --max-timeout 22500"
+# Bash 工具参数：timeout=22560000（覆盖脚本上限 22500s + 60s 余量）
+
+# 普通模型：
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
+    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 50 --output <输出路径>' \
+    --service-log <服务日志路径> \
+    --stall-timeout 300 --max-timeout 7200"
+# Bash 工具参数：timeout=7260000（覆盖脚本上限 7200s + 60s 余量）
+```
 
 ## 迁移流程中的用法
 
@@ -250,13 +284,14 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\
 docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
 ```
 
-3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度）：
+3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度；**参数按上方「评测时间预算」表选择**——thinking 模型 `--limit 30 --max-timeout 22500`，普通模型 `--limit 50 --max-timeout 7200`，Bash timeout 相应取 22560000/7260000）：
 ```bash
+# 以 thinking 模型为例（普通模型把 --limit 30 --max-timeout 22500 换为 50/7200）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_native.json' \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output /flagos-workspace/results/gpqa_native.json' \
     --service-log /flagos-workspace/logs/startup_native.log \
-    --stall-timeout 300 --max-timeout 3600"
+    --stall-timeout 300 --max-timeout 22500"
 ```
 eval_wrapper.py 会阻塞直到评测完成或异常，无需轮询。退出码 0 表示成功（最后一行为结果 JSON），非 0 表示异常（输出 [EVAL_ERROR] 错误摘要）。
 
@@ -274,13 +309,14 @@ sleep 5
    - `start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`
    - 通过 `start_service.sh` 以 flagos 模式启动
 
-2. 运行评测：
+2. 运行评测（**参数与 V1 完全一致**——同一模型同一套 `--limit`/`--max-timeout`，thinking 模型两侧均 `--limit 30 --max-timeout 22500`，普通模型两侧均 `--limit 50 --max-timeout 7200`；禁止 V1/V2 参数不同）：
 ```bash
+# 以 thinking 模型为例（与 V1 相同）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/gpqa_flagos.json' \
+    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output /flagos-workspace/results/gpqa_flagos.json' \
     --service-log /flagos-workspace/logs/startup_flagos.log \
-    --stall-timeout 300 --max-timeout 3600"
+    --stall-timeout 300 --max-timeout 22500"
 ```
 
 **强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。
@@ -315,7 +351,7 @@ tools/
 5. 截断检测 → 发样题检查 finish_reason，必要时自动调整 max_tokens
 6. 设置 generation_config
 7. 三阶段并发探测（API 延迟 → 候选估算 → 并发验证）→ 选并发
-8. 正式评测（默认 50 题；仅 `--limit 0` 时才跑全量 198 题，常规流程不使用）
+8. 正式评测（默认 50 题；thinking 模型按时间预算用 `--limit 30`；仅 `--limit 0` 时才跑全量 198 题，常规流程不使用）
 9. 解析结果 → 输出 JSON 报告 + 终端打印
 
 | CLI 参数 | 说明 |

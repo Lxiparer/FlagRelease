@@ -1264,6 +1264,50 @@ case "${PIPELINE_BRANCH}" in
         BRANCH_DIRECTIVE=""
         ;;
 esac
+
+# ===== 评测时间预算计算（2026-08-10）：解决 thinking 模型评测必超时问题 =====
+# 背景：thinking 模型（QwQ/DeepSeek-R1 等）正常评测 7-10h，原 max-timeout 写死
+# 7200s(2h) 必然超时 → 评测反复失败 → agent 自发跳过评测 → 数据缺失。
+# 公式：max_timeout = 题数 × 单题预算 × 1.25 缓冲
+#   thinking：单题 600s（慢速芯片思考链实测上界 12min），默认 30 题（时长分级；
+#             fast_gpqa 按序取前 N 题，V1/V2 同样本，精度判据不受影响；
+#             30 题样本下 noise_zone 容忍绝对差异 ≤2 题判达标）
+#   普通：     单题 60s，默认 50 题，固定 7200s（50×60×1.25=3750 < 7200，
+#             clamp 上界生效 → 与改动前的 2h 语义完全一致，零回归）
+# clamp：thinking [7200, 43200]，普通固定 7200
+# 安全网：max_timeout 调大不会让 runaway 无限拖——fast_gpqa max_tokens cap（防线1）
+# 锁死复读生成窗口；eval_wrapper 进度看门狗（防线3）收尾停滞照杀。生成中停滞只
+# 提示不杀（慢≠死），所以给足预算不会误杀正常长推理。
+# 函数化：启动时调用一次供 PROMPT 注入（snapshot 尚不存在，走模型名模式匹配）；
+# 段1结束后兜底函数再调用一次（snapshot 已同步，runtime.thinking_model 生效）。
+compute_eval_budget() {
+    THINKING_PATTERNS="qwen3|qwq|deepseek-r1|deepseek-r2|mimo|hunyuan"
+    IS_THINKING=$(python3 -c "
+import re, yaml
+mn = '${MODEL}'.lower()
+rt = False
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        rt = bool(yaml.safe_load(f).get('runtime', {}).get('thinking_model', False))
+except Exception:
+    pass
+print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
+" 2>/dev/null || echo "false")
+    if [ "${IS_THINKING}" = "true" ]; then
+        EVAL_LIMIT=30
+        EVAL_MAX_TO=$(( EVAL_LIMIT * 600 * 125 / 100 ))   # 22500s ≈ 6.3h
+        [ "${EVAL_MAX_TO}" -lt 7200 ] && EVAL_MAX_TO=7200
+        [ "${EVAL_MAX_TO}" -gt 43200 ] && EVAL_MAX_TO=43200
+        EVAL_BUDGET_NOTE="**评测时间预算（thinking 模型）**：${EVAL_LIMIT} 题 × 单题 600s × 1.25 缓冲 = ${EVAL_MAX_TO}s（约 $(( EVAL_MAX_TO / 3600 ))h）。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**；超时按评测等待策略重试规则处理，GPU 调度由编排层负责。**V1 与 V2 必须使用相同参数：均加 --limit ${EVAL_LIMIT}**（同样本可对比，不得一方 50 题一方 30 题）。"
+    else
+        EVAL_LIMIT=50
+        EVAL_MAX_TO=7200   # 固定 2h：公式值 3750s < 7200，clamp 上界生效，与改动前一致
+        EVAL_BUDGET_NOTE="**评测时间预算（普通模型）**：${EVAL_LIMIT} 题 × 单题 60s × 1.25 缓冲 = ${EVAL_MAX_TO}s（维持原 2h 语义）。"
+    fi
+    EVAL_BASH_MS=$(( (EVAL_MAX_TO + 60) * 1000 ))   # Bash 工具超时（ms）= 脚本上限 + 60s 余量
+}
+compute_eval_budget
+
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}，pipeline分支: ${PIPELINE_BRANCH:-未定}
 
 ${BRANCH_DIRECTIVE}
@@ -1335,13 +1379,15 @@ ${SEG2_CTX_SUMMARY}
 
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
+${EVAL_BUDGET_NOTE}
 **评测等待策略（硬性）**：
 - 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py）：
-  python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 7200
+  python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit ${EVAL_LIMIT} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
 - eval_wrapper.py 会阻塞直到评测完成或异常退出，无需轮询
-- 使用 Bash(timeout=7260000) 前台执行 eval_wrapper.py，不要用后台任务（Bash timeout 单位毫秒，7260000ms = 121 分钟，覆盖脚本 --max-timeout 7200s/2h + 60s 余量）
+- 使用 Bash(timeout=${EVAL_BASH_MS}) 前台执行 eval_wrapper.py，不要用后台任务（Bash timeout 单位毫秒，覆盖脚本 --max-timeout ${EVAL_MAX_TO}s + 60s 余量）。若部署端 Bash 工具拒绝超大 timeout 参数（各环境上限可能不同），改用部署端允许的最大值——eval_wrapper 内层 --max-timeout 才是真正总闸，外层仅防工具先超时，评测完整性不受影响
 - 退出码 0 = 成功（最后一行 [RESULT_JSON] 为结果），非 0 = 异常（[EVAL_ERROR] 为错误摘要）
 - 异常时根据 error type 决定处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+- **评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过、放弃或截断评测**；预算上限已按题数×单题时间×1.25 缓冲计算，预算内完成即为正常
 - 禁止使用 TaskOutput 轮询，禁止每隔 N 秒检查评测状态
 - **禁止**直接 import evalscope 或内联编写评测代码，必须通过 eval_wrapper.py 执行
 - eval_wrapper.py 自动从 context.yaml 获取端口和模型名，无需手动指定 --model-name 或 --api-base
@@ -1554,38 +1600,19 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     fi
 
     # 直接执行 eval_wrapper.py
-    # Thinking model 需要更长超时（输出 token 多 5-10x）
-    local STALL_TO=300
-    local MAX_TO=7200
-    IS_THINKING_MODEL=$(python3 -c "
-import yaml
-try:
-    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
-        ctx = yaml.safe_load(f)
-    rt = ctx.get('runtime', {})
-    mn = ctx.get('model', {}).get('name', '').lower()
-    thinking_patterns = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
-    if rt.get('thinking_model') or any(p in mn for p in thinking_patterns):
-        print('true')
-    else:
-        print('false')
-except:
-    print('false')
-" 2>/dev/null) || IS_THINKING_MODEL="false"
-    if [ "${IS_THINKING_MODEL}" = "true" ]; then
-        STALL_TO=600
-        MAX_TO=7200
-        echo "  [thinking model] 使用加长超时: stall=${STALL_TO}s, max=${MAX_TO}s"
-    fi
+    # 超时预算复用顶部 compute_eval_budget（此刻 snapshot 已同步，runtime.thinking_model 生效；
+    # thinking 模型 30 题 × 600s × 1.25 = 22500s，普通 50 题 × 60s × 1.25 = 7200s 封顶）
+    compute_eval_budget
+    echo "  [${IS_THINKING}] 评测预算: limit=${EVAL_LIMIT}, max_timeout=${EVAL_MAX_TO}s, bash_ms=${EVAL_BASH_MS}"
 
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
     docker exec "${SEG_CTR}" bash -c "
         cd /flagos-workspace/scripts && \
         PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/${OUTPUT_FILE}' \
+            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit ${EVAL_LIMIT} --output /flagos-workspace/results/${OUTPUT_FILE}' \
             --context-yaml /flagos-workspace/shared/context.yaml \
             --service-log \$(ls -t /flagos-workspace/logs/startup_*.log 2>/dev/null | head -1) \
-            --stall-timeout ${STALL_TO} --max-timeout ${MAX_TO}
+            --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
     "
     return $?
 }
@@ -2364,7 +2391,8 @@ ${SEG4_CTX_SUMMARY}
 本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部必须**前台阻塞执行**：
 - **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
 - **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志或 ps/docker exec 检查进程状态。脚本内部已自带日志监控/进度/失败检测，无需外部干预；命令前台阻塞返回退出码后才继续。
-- **精度评测**：必须通过 eval_wrapper.py 前台执行（会阻塞直到评测完成或异常退出，无需轮询）。使用 Bash(timeout=7260000) 前台执行，不要用后台任务（Bash timeout 单位毫秒，7260000ms = 121 分钟，覆盖脚本 --max-timeout 7200s/2h + 60s 余量）。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。
+${EVAL_BUDGET_NOTE}
+- **精度评测**：必须通过 eval_wrapper.py 前台执行（会阻塞直到评测完成或异常退出，无需轮询）。eval-cmd 加 --limit ${EVAL_LIMIT}（与 V2 评测同样本可对比）。使用 Bash(timeout=${EVAL_BASH_MS}) 前台执行，不要用后台任务（Bash timeout 单位毫秒，覆盖脚本 --max-timeout ${EVAL_MAX_TO}s + 60s 余量）。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。**评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过评测**。
 - **服务等待**：wait_for_service.sh 使用 Bash(timeout=5820000) 前台执行（5820000ms = 97 分钟，覆盖脚本上限 5760s/1.6h + 60s 余量），禁止 TaskOutput 轮询。
 - **性能/调优**：benchmark_runner.py 与 operator_search.py --plugin-mode 使用 Bash(timeout=7260000) 前台执行，脚本自带完整循环，禁止手动轮询其进度。
 - **注意**：Bash 工具的 timeout 参数单位是毫秒。设置过小会导致命令被转为后台任务，进而诱发 TaskOutput 轮询空转、反复全量重发上下文、烧掉大量 token。宁可 timeout 设大也不要设小。

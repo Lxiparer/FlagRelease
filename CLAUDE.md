@@ -177,6 +177,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 宿主机模型路径 | `check_model_local.py --no-download` 自动搜索。找到则使用实际路径挂载；未找到则使用 `/mnt/data/models/<model_name>` | `${MODEL_PATH}` 和 `${CONTAINER_MODEL_PATH}` 均取此路径 |
 | docker run | 模板优先：严格按 SKILL.md 中 GPU 厂商对应模板执行。模板失败时先修正变量重试；仍失败则 `docker inspect` 借鉴已有容器重试一次；仍失败则终止 | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
+| 评测时长预算 | thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）`--limit 30 --max-timeout 22500`；普通模型 `--limit 50 --max-timeout 7200`。V1/V2 参数必须相同 | 评测耗时长（thinking 6h+）是预算内预期，**禁止因耗时长跳过/放弃/截断评测** |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |
 | V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.05 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`，达标线=V2初始×1.05） | 报告按 native 基线展示 |
