@@ -976,12 +976,15 @@ def main():
         print(f"[ERROR] API 不可达 ({api_base}): {e}")
         sys.exit(1)
 
-    # 检查 evalscope
+    # 检查 evalscope（统一版本 1.5.1，见 setup_workspace.sh 预装）
     try:
         import evalscope
         print(f"[OK] evalscope {getattr(evalscope, '__version__', 'unknown')} 已安装")
+        if getattr(evalscope, '__version__', None) != "1.5.1":
+            print(f"[WARN] evalscope 版本 {getattr(evalscope, '__version__', 'unknown')} != 1.5.1 "
+                  f"(统一评测版本)，评测行为可能与验证环境不一致")
     except ImportError:
-        print("[ERROR] evalscope 未安装，请执行: pip install evalscope")
+        print("[ERROR] evalscope 未安装，请执行: pip install 'evalscope==1.5.1'")
         sys.exit(1)
 
     # 运行

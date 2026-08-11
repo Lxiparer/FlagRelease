@@ -350,7 +350,7 @@ fi
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
-    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
+    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install 'evalscope==1.5.1' pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
@@ -384,7 +384,7 @@ fi
 
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
 echo "[4.6/6] 预装评测依赖..."
-docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
+docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install 'evalscope==1.5.1' pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
     echo "  ✓ 评测依赖预装完成" || \
     echo "  ⚠ 评测依赖安装失败（非致命，评测阶段会重试）"
 

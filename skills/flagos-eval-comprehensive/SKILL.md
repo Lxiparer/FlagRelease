@@ -153,7 +153,7 @@ docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINE
 **步骤 2：安装依赖**
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests"
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install 'evalscope==1.5.1' pyyaml requests"
 ```
 
 如使用 ModelScope 数据源（默认）：
@@ -825,7 +825,7 @@ ISSUE_EOF"
 
 | 问题 | 原因 | 解决方案 |
 |------|------|----------|
-| `evalscope not found` | 未安装 | `pip install evalscope` |
+| `evalscope not found` | 未安装 | `pip install 'evalscope==1.5.1'` |
 | API 不可达 | 服务未启动或地址错误 | 检查 `--api-base`，确认 `curl <api_base>/models` 正常 |
 | 精度异常低 | max_tokens 不够 | 脚本自动计算+截断检测，检查日志中 `truncation_detected` 是否为 true |
 | 探测选并发偏保守 | thinking 模型延迟波动大 | 三阶段探测已内置 thinking 保守策略，验证阶段会实测选最优 |
