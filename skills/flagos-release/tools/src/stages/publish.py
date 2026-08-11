@@ -122,6 +122,12 @@ class PublishStage(BaseStage):
             self.skip_step("容器 commit", "已有 Harbor 镜像")
             self.skip_step("镜像打 tag", "已有 Harbor 镜像")
             self.skip_step("推送 Harbor", "已有 Harbor 镜像")
+            # 已有镜像场景同样需要双 tag（V1.3/none → V2=V3）：
+            # 主镜像已在 Harbor 不重复推，但 also tag 缺失会导致 V3 交付丢失
+            also_tag = getattr(self.config, "also_tag", "")
+            if also_tag:
+                if not self._tag_and_push_also(also_tag):
+                    harbor_failed = True
         else:
             # 0. 如果输入是容器，先 commit 为镜像（内含强制固化检查）
             if self.config.input_type == 'container':
@@ -144,10 +150,13 @@ class PublishStage(BaseStage):
                     harbor_failed = True
                     print("  ⚠ Harbor 推送失败，继续执行后续步骤（README 生成、数据回传）")
                 else:
-                    # V2=V3 同镜像双 tag：额外打一个 --also-tag 版本 tag 并推送
+                    # V2=V3 同镜像双 tag：额外打一个 --also-tag 版本 tag 并推送。
+                    # 返回值必须检查——also push 失败也是 Harbor 发布失败，
+                    # 不置 harbor_failed 会导致 README/对外发布照常进行而镜像缺失
                     also_tag = getattr(self.config, "also_tag", "")
                     if also_tag and not harbor_failed:
-                        self._tag_and_push_also(also_tag)
+                        if not self._tag_and_push_also(also_tag):
+                            harbor_failed = True
             else:
                 self.skip_step("推送 Harbor", "配置跳过")
 
@@ -888,6 +897,14 @@ except Exception as e:
             also_path = re.sub(r"-v[0-9]+$", also_suffix, source)
         else:
             also_path = f"{source}{also_suffix}"
+
+        # V3 (Max) 双 tag 必须路由到 flagrelease-project（交付 SVT 验收），与独立 V3 发布一致。
+        # 注意不能改 auto_fill_config 的全局 registry——那会把 v2 标签也带进 project 仓库；
+        # 这里只影响 also tag 本身，v2 主标签保持 flagrelease-public。
+        if also_version == "v3":
+            also_path = also_path.replace(
+                "harbor.baai.ac.cn/flagrelease-public/",
+                "harbor.baai.ac.cn/flagrelease-project/", 1)
 
         print(f"[{self.name}] 双 tag 发布: {source} → {also_path}")
         tag_cmd = f"docker tag {source} {also_path}"
