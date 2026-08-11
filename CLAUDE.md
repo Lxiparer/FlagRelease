@@ -178,6 +178,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | docker run | 模板优先：严格按 SKILL.md 中 GPU 厂商对应模板执行。模板失败时先修正变量重试；仍失败则 `docker inspect` 借鉴已有容器重试一次；仍失败则终止 | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
 | 评测时长预算 | thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）`--limit 30 --max-timeout 22500`；普通模型 `--limit 50 --max-timeout 7200`。V1/V2 参数必须相同 | 评测耗时长（thinking 6h+）是预算内预期，**禁止因耗时长跳过/放弃/截断评测** |
+| 长任务执行协议 | 所有可能运行超过 10 分钟的命令（评测、服务等待、性能测试、算子调优、发布推送）一律走协议：写任务命令文件 → `task_runner.py --cmd ... --state ... --log ... --timeout <上限>` detached 启动（容器内 `docker exec -d`、宿主机 `python3 ... &`）→ Claude 每 8 分钟短轮询状态文件（`sleep 480 && cat <state> && tail -3 <log>`，单次调用 <10 分钟且必有输出）→ 会话被杀后任务继续跑、新会话读 state 断点接管 | **禁止** Bash(timeout=大数) 前台阻塞（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败），**禁止** TaskOutput 轮询；启动任务前先检查对应 state 文件，`status=running` 时直接接管禁止重复启动 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |
 | V1 性能基线缺失 | 步骤4前 V2 初始性能 quick 一轮 → `synthesize_perf_baseline.py` ×1.05 合成 `native_performance.json`（全芯片统一，`_meta.synthetic=true`，达标线=V2初始×1.05） | 报告按 native 基线展示 |

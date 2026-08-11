@@ -270,8 +270,10 @@ COMMON_TOKENS=$(cat <<TOKENS_EOF
 **宿主机凭证注入（重要，2026-08-05 发布事故修复）**：
   HARBOR_USER/HARBOR_PASSWORD/MODELSCOPE_TOKEN/HF_TOKEN 已由编排层 export 到本
   Claude 进程的环境变量，宿主机直接执行的 python3 命令【禁止添加 env VAR=...、
-  /opt/conda/bin/python3、nohup 等前缀】，直接按标准形态执行即可：
+  /opt/conda/bin/python3 前缀】，直接按标准形态执行即可：
     python3 skills/flagos-release/tools/main.py --from-context ...
+  长任务（发布等）按长任务执行协议 detached 启动：python3 ... task_runner.py ... &
+  （& 后台符后的 task_runner 继承本进程环境变量，凭证照常可用；禁止 nohup/disown）
   （仅容器内命令才需要 docker exec -e 传凭证，见下）
 
 **容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
@@ -393,14 +395,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 5760 秒 = 1.6 小时），必须使用 Bash(timeout=5820000) 前台执行（5820000 毫秒 = 97 分钟，覆盖脚本上限 + 60s 余量）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。5760 秒 = 5760000 毫秒。设置过小会导致命令被转为后台任务（部分模型服务启动需 1.5 小时以上，故上限设为 1.6h）
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -465,14 +473,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 5760 秒 = 1.6 小时），必须使用 Bash(timeout=5820000) 前台执行（5820000 毫秒 = 97 分钟，覆盖脚本上限 + 60s 余量）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。5760 秒 = 5760000 毫秒。设置过小会导致命令被转为后台任务（部分模型服务启动需 1.5 小时以上，故上限设为 1.6h）
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -1304,7 +1318,8 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
         EVAL_MAX_TO=7200   # 固定 2h：公式值 3750s < 7200，clamp 上界生效，与改动前一致
         EVAL_BUDGET_NOTE="**评测时间预算（普通模型）**：${EVAL_LIMIT} 题 × 单题 60s × 1.25 缓冲 = ${EVAL_MAX_TO}s（维持原 2h 语义）。"
     fi
-    EVAL_BASH_MS=$(( (EVAL_MAX_TO + 60) * 1000 ))   # Bash 工具超时（ms）= 脚本上限 + 60s 余量
+    # EVAL_BASH_MS 概念已废弃（2026-08 长任务执行协议）：Bash 工具 10 分钟硬上限使
+    # 超大 timeout 无效，长任务统一走 task_runner.py detached 启动 + 状态文件 + 短轮询
 }
 compute_eval_budget
 
@@ -1380,18 +1395,26 @@ ${SEG2_CTX_SUMMARY}
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
 ${EVAL_BUDGET_NOTE}
-**评测等待策略（硬性）**：
-- 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py）：
-  python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit ${EVAL_LIMIT} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
-- eval_wrapper.py 会阻塞直到评测完成或异常退出，无需轮询
-- 使用 Bash(timeout=${EVAL_BASH_MS}) 前台执行 eval_wrapper.py，不要用后台任务（Bash timeout 单位毫秒，覆盖脚本 --max-timeout ${EVAL_MAX_TO}s + 60s 余量）。若部署端 Bash 工具拒绝超大 timeout 参数（各环境上限可能不同），改用部署端允许的最大值——eval_wrapper 内层 --max-timeout 才是真正总闸，外层仅防工具先超时，评测完整性不受影响
-- 退出码 0 = 成功（最后一行 [RESULT_JSON] 为结果），非 0 = 异常（[EVAL_ERROR] 为错误摘要）
-- 异常时根据 error type 决定处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+**评测等待策略（长任务执行协议 — 硬性）**：
+Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——**禁止**用 Bash(timeout=大数) 前台阻塞等待评测，**禁止** TaskOutput 轮询（转后台后轮询会全量重发上下文烧 token）。按三步执行：
+1. 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），先写任务命令文件：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit ${EVAL_LIMIT} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2.cmd' --state /flagos-workspace/logs/tasks/eval_v2.state --log /flagos-workspace/logs/tasks/eval_v2.log --timeout ${EVAL_MAX_TO}\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/eval_v2.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 评测成功（日志最后一行 [RESULT_JSON] 为结果），读取结果文件继续
+   - status=error → 读日志按 error type 处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+   - status=timeout → 超过 --max-timeout 总闸，读日志诊断
+- 启动前检查 /flagos-workspace/logs/tasks/eval_v2.state：若存在且 status=running，说明上一会话已启动评测（会话被杀任务继续跑）——**直接接管轮询，禁止重复启动评测**；status=done/error 则按终态直接处理
 - **评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过、放弃或截断评测**；预算上限已按题数×单题时间×1.25 缓冲计算，预算内完成即为正常
-- 禁止使用 TaskOutput 轮询，禁止每隔 N 秒检查评测状态
 - **禁止**直接 import evalscope 或内联编写评测代码，必须通过 eval_wrapper.py 执行
 - eval_wrapper.py 自动从 context.yaml 获取端口和模型名，无需手动指定 --model-name 或 --api-base
-- V1 结果路径: /flagos-workspace/results/gpqa_native.json，V2 结果路径: /flagos-workspace/results/gpqa_flagos.json
+- V1 结果路径: /flagos-workspace/results/gpqa_native.json，V2 结果路径: /flagos-workspace/results/gpqa_flagos.json（eval_v1.cmd/eval_v1.state 同理替换）
 
 **Issue 强制规则**（达到条件必须生成 issue 文件）：
 GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
@@ -1433,7 +1456,7 @@ GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 - 推荐使用 safe_restart_service.sh 一条命令完成重启（自动 restart + start + wait）
 - 禁止在不 restart 容器的情况下启动新的 vLLM 服务（旧进程会占用端口导致启动失败）
 - wait_for_service.sh 检测到残留服务会 exit 2 并提示需要 docker restart
-- **wait_for_service.sh 等待策略**：使用 Bash(timeout=5820000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，5820000ms = 97 分钟（覆盖脚本上限 5760s/1.6h + 60s 余量）"
+- **wait_for_service.sh 等待策略**：按上方「长任务执行协议」三步执行（写 startup_default.cmd → docker exec -d 启动 task_runner.py → sleep 480 短轮询 state），**禁止** Bash(timeout=大数) 前台阻塞或 TaskOutput 轮询"
 
 # native 场景追加硬性约束：只执行步骤4/6，跳过5/7
 if [ "${IS_NATIVE}" = "true" ]; then
@@ -1603,7 +1626,7 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     # 超时预算复用顶部 compute_eval_budget（此刻 snapshot 已同步，runtime.thinking_model 生效；
     # thinking 模型 30 题 × 600s × 1.25 = 22500s，普通 50 题 × 60s × 1.25 = 7200s 封顶）
     compute_eval_budget
-    echo "  [${IS_THINKING}] 评测预算: limit=${EVAL_LIMIT}, max_timeout=${EVAL_MAX_TO}s, bash_ms=${EVAL_BASH_MS}"
+    echo "  [${IS_THINKING}] 评测预算: limit=${EVAL_LIMIT}, max_timeout=${EVAL_MAX_TO}s"
 
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
     docker exec "${SEG_CTR}" bash -c "
@@ -2047,7 +2070,14 @@ ${SEG3_CTX_SUMMARY}
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}
+**发布长任务协议（硬性 — main.py 可能运行数小时，镜像推送 54 分钟级）**：**禁止**用 Bash(timeout=大数) 前台阻塞等待发布（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、发布中断），按三步执行：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}' --state ${LOG_DIR}/tasks/release_v2.state --log ${LOG_DIR}/tasks/release_v2.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v2.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v2.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v2.state——status=running 说明上一会话已启动发布，直接接管轮询，**禁止重复发布**（重复发布会推同名 tag 覆盖，浪费数小时）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -2387,15 +2417,26 @@ ${SEG4_CTX_SUMMARY}
 
 **进度输出**：步骤开始/完成时输出 [步骤N] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
-**执行等待策略（硬性）**：
-本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部必须**前台阻塞执行**：
-- **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志或 ps/docker exec 检查进程状态。脚本内部已自带日志监控/进度/失败检测，无需外部干预；命令前台阻塞返回退出码后才继续。
+**执行等待策略（长任务执行协议 — 硬性）**：
+本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。统一按三步执行（以精度评测为例，其余命令同样式替换 <TASK_ID>）：
+1. 写任务命令文件（一条 docker exec，内容自由写无转义问题）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/<TASK_ID>.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+<完整原命令>
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/<TASK_ID>.cmd' --state /flagos-workspace/logs/tasks/<TASK_ID>.state --log /flagos-workspace/logs/tasks/<TASK_ID>.log --timeout <上限秒>\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/<TASK_ID>.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/<TASK_ID>.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 任务成功，按各步骤规则读取结果文件继续
+   - status=error → 读日志按原错误处理规则处理（如重启服务后重试等）
+   - status=timeout → 超过总闸，读日志诊断
+- **断点恢复（硬性）**：启动任务前先检查 /flagos-workspace/logs/tasks/<TASK_ID>.state——若存在且 status=running，说明上一会话已启动该任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**；status=done/error 则按终态直接处理
 ${EVAL_BUDGET_NOTE}
-- **精度评测**：必须通过 eval_wrapper.py 前台执行（会阻塞直到评测完成或异常退出，无需轮询）。eval-cmd 加 --limit ${EVAL_LIMIT}（与 V2 评测同样本可对比）。使用 Bash(timeout=${EVAL_BASH_MS}) 前台执行，不要用后台任务（Bash timeout 单位毫秒，覆盖脚本 --max-timeout ${EVAL_MAX_TO}s + 60s 余量）。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。**评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过评测**。
-- **服务等待**：wait_for_service.sh 使用 Bash(timeout=5820000) 前台执行（5820000ms = 97 分钟，覆盖脚本上限 5760s/1.6h + 60s 余量），禁止 TaskOutput 轮询。
-- **性能/调优**：benchmark_runner.py 与 operator_search.py --plugin-mode 使用 Bash(timeout=7260000) 前台执行，脚本自带完整循环，禁止手动轮询其进度。
-- **注意**：Bash 工具的 timeout 参数单位是毫秒。设置过小会导致命令被转为后台任务，进而诱发 TaskOutput 轮询空转、反复全量重发上下文、烧掉大量 token。宁可 timeout 设大也不要设小。
+- **精度评测**（<TASK_ID>=plugin_eval）：必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），eval-cmd 加 --limit ${EVAL_LIMIT}（与 V2 评测同样本可对比）。cmd 文件内容：python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit ${EVAL_LIMIT} --output <V3评测输出路径>' --service-log <服务日志> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}；task_runner --timeout ${EVAL_MAX_TO}。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。**评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过评测**。
+- **服务等待**（<TASK_ID>=startup_plugin）：wait_for_service.sh 命令（--timeout 180 --max-timeout 5760 --mode flagos）写入 cmd 文件执行，task_runner --timeout 6000。
+- **性能/调优**（<TASK_ID>=benchmark_v3 / search_v3）：benchmark_runner.py 命令（--output-name flagos_optimized）与 operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json 命令写入 cmd 文件执行，task_runner --timeout 86400（调优可能数小时，脚本内部已有完整循环）。
 
 - Issue 模板：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
@@ -2405,7 +2446,14 @@ ${EVAL_BUDGET_NOTE}
 **步骤 13 发布**：
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3
+发布工具在宿主机执行，main.py 可能运行数小时（镜像推送），按宿主机长任务协议三步执行：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3' --state ${LOG_DIR}/tasks/release_v3.state --log ${LOG_DIR}/tasks/release_v3.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v3.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v3.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v3.state——status=running 说明上一会话已启动发布，直接接管轮询，禁止重复发布
 （3.1 特殊情况：若本段验证确认厂商 platform plugin 与 fl plugin 均不适配本模型——即 plugin 模式无论怎么调优都无法启动/达标且已按三级递进判定为框架问题——发布时追加 --incompatible-tag '<模型名>-flagos-<厂商>-incompatible' 打不适配标记）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
@@ -2631,11 +2679,21 @@ operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性�
     --output-dir /flagos-workspace/results/ \\
     --state-path /flagos-workspace/results/operator_config_v4.json \\
     --json\"
-**执行方式（严格遵守，否则产出会残缺）**：
-- 必须用 Bash(timeout=86400000) **前台阻塞执行**，等待脚本真正退出后再继续。脚本可能运行数小时。
-- **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
-- **禁止**在脚本\"看起来在运行/有输出\"时就认为完成并结束会话——必须等到命令返回退出码。
-- 命令返回后，**必须**回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志。
+**执行方式（长任务执行协议 — 严格遵守，否则产出会残缺）**：
+operator_reduction.py 可能运行数小时，**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec，上方完整参数命令写入 cmd 文件）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/v4_reduction.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/v4_reduction.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/v4_reduction.log\"
+   - status=running → 继续轮询。**禁止**在脚本"看起来在运行/有输出"时就认为完成并结束会话——必须等到 status=done/error/timeout；若 state 长时间停在 running 且日志停止增长，pgrep -f operator_reduction 确认任务进程：存活=任务仍在跑，继续等待；消失=任务已死，读日志诊断
+   - status=done → 任务真正结束，**必须**再回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志
+   - status=error/timeout → 读日志诊断，不得静默继续
+- 断点恢复：启动前检查 /flagos-workspace/logs/tasks/v4_reduction.state——status=running 说明上一会话已启动减算子任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**。
 脚本退出码 0 = V4 成立（有提升+精度达标 或 回退起点——回退版等价 V3，精度继承 V3 已验证结论，不重复终检）；1 = 不成立（仅\"采纳新随机组合但独立精度终检不达标\"时才会出现）。
 **重要**：回退到起点（fell_back_to_start=true）时脚本已跳过重复精度终检、直接继承 V3 精度结论（accuracy_ok=true），退出码必为 0 —— 回退版就是 V3 等价配置，绝不因 GPQA 评测抖动被二次否定。
 读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/fell_back_to_start/beats_baseline/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 08_v4_reduction）。

@@ -228,34 +228,39 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 **背景**：thinking 模型正常评测 7-10h（慢速芯片思考链 500-720s/题），原 max-timeout 写死 2h 必然超时 → 评测反复失败 → 自发跳过评测 → 数据缺失。本规则按题数×单题预算×1.25 缓冲计算确定性预算，消除超时根因。
 
-| 模型类型 | --limit | 单题预算 | max_timeout | Bash timeout(ms) |
-|---------|---------|---------|-------------|------------------|
-| thinking | 30 | 600s | 22500（约 6.3h） | 22560000 |
-| 普通 | 50 | 60s | 7200（维持原 2h 语义） | 7260000 |
+| 模型类型 | --limit | 单题预算 | max_timeout |
+|---------|---------|---------|-------------|
+| thinking | 30 | 600s | 22500（约 6.3h） |
+| 普通 | 50 | 60s | 7200（维持原 2h 语义） |
 
 - **V1 与 V2 必须使用相同参数**：thinking 模型两侧均 `--limit 30`，普通模型两侧均默认 50 题（同样本可对比，禁止一方 30 一方 50）
 - **禁止因耗时长跳过评测**：评测耗时长（尤其 thinking 模型 6h+）是预算内预期，严禁因等待时间长主动跳过、放弃或截断评测；预算内完成即为正常，超时按等待策略重试
-- **Bash timeout 降级**：若部署端 Bash 工具拒绝超大 timeout 参数（各环境上限可能不同），改用部署端允许的最大值——eval_wrapper 内层 `--max-timeout` 才是真正总闸，外层仅防工具先超时，评测完整性不受影响
+- **执行方式（2026-08 长任务执行协议）**：Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败。**禁止**用 Bash(timeout=大数) 前台阻塞等待评测（旧 Bash timeout(ms) 列已废弃），**禁止** TaskOutput 轮询。评测命令写入任务文件后经 task_runner.py detached 启动（`--timeout <max_timeout>`），Claude 每 8 分钟短轮询状态文件，见下方「长任务执行协议」三步模板
 - 安全网保障：预算调大不会让 runaway 无限拖 —— fast_gpqa max_tokens cap（防线1）锁死复读生成窗口；eval_wrapper 收尾停滞看门狗照杀（防线3），生成中停滞仅提示不杀（慢≠死），给足预算不会误杀正常长推理
-- 两个完整命令模板（二选一）：
+
+### 长任务执行协议（评测等待 — 硬性三步）
 
 ```bash
-# thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）：
-docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output <输出路径>' \
-    --service-log <服务日志路径> \
-    --stall-timeout 300 --max-timeout 22500"
-# Bash 工具参数：timeout=22560000（覆盖脚本上限 22500s + 60s 余量）
+# 1. 写任务命令文件（一条 docker exec，内容自由写无转义问题）：
+docker exec $CONTAINER bash -c "mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 22500
+CMD_EOF"
 
-# 普通模型：
-docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
-    --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 50 --output <输出路径>' \
-    --service-log <服务日志路径> \
-    --stall-timeout 300 --max-timeout 7200"
-# Bash 工具参数：timeout=7260000（覆盖脚本上限 7200s + 60s 余量）
+# 2. detached 启动（一条命令立即返回，不等待）：
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2.cmd' --state /flagos-workspace/logs/tasks/eval_v2.state --log /flagos-workspace/logs/tasks/eval_v2.log --timeout 22500"
+
+# 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+sleep 480 && docker exec $CONTAINER bash -c "cat /flagos-workspace/logs/tasks/eval_v2.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2.log"
+#   status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f 'eval_v2.cmd' 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+#   status=done    → 评测成功（日志最后一行 [RESULT_JSON] 为结果），读取结果文件继续
+#   status=error   → 读日志按 error type 处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+#   status=timeout → 超过 --max-timeout 总闸，读日志诊断
 ```
+
+**断点恢复（硬性）**：启动评测前先检查 `/flagos-workspace/logs/tasks/eval_v2.state`——若存在且 `status=running`，说明上一会话已启动评测（会话被杀任务继续跑），**直接接管轮询，禁止重复启动评测**；`status=done/error` 则按终态直接处理。
+
+（普通模型把 `--limit 30 --max-timeout 22500` 换为 `50/7200`；V1 评测用 `eval_v1.cmd/eval_v1.state`，V2 用 `eval_v2.*`，Plugin 步骤11 用 `plugin_eval.*`。）
 
 ## 迁移流程中的用法
 
@@ -279,21 +284,22 @@ sleep 5
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
 docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
 ```
-等待服务就绪：
+等待服务就绪（**长任务执行协议**：写 startup_native.cmd → task_runner detached 启动 → sleep 480 短轮询，见上方协议模板；此处 --max-timeout 900 较短可前台直跑，但服务启动可能超过 10 分钟时一律走协议）：
 ```bash
 docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
 ```
 
-3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度；**参数按上方「评测时间预算」表选择**——thinking 模型 `--limit 30 --max-timeout 22500`，普通模型 `--limit 50 --max-timeout 7200`，Bash timeout 相应取 22560000/7260000）：
+3. 运行评测（通过 eval_wrapper.py 包装，自动监控服务状态和评测进度；**参数按上方「评测时间预算」表选择**——thinking 模型 `--limit 30 --max-timeout 22500`，普通模型 `--limit 50 --max-timeout 7200`）：
 ```bash
 # 以 thinking 模型为例（普通模型把 --limit 30 --max-timeout 22500 换为 50/7200）
+# 评测命令（写入 eval_v1.cmd 经 task_runner detached 启动，禁止 Bash(timeout=大数) 前台阻塞）：
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py \
     --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output /flagos-workspace/results/gpqa_native.json' \
     --service-log /flagos-workspace/logs/startup_native.log \
     --stall-timeout 300 --max-timeout 22500"
 ```
-eval_wrapper.py 会阻塞直到评测完成或异常，无需轮询。退出码 0 表示成功（最后一行为结果 JSON），非 0 表示异常（输出 [EVAL_ERROR] 错误摘要）。
+按上方「长任务执行协议」三步执行（eval_v1.cmd/eval_v1.state）。eval_wrapper.py 退出码 0 表示成功（最后一行为结果 JSON），非 0 表示异常（输出 [EVAL_ERROR] 错误摘要）；状态文件 status=done/error 对应处理，断点恢复见协议（禁止重复启动评测）。
 
 4. **V1 评测完成后，必须停止服务释放 GPU**：
 ```bash
@@ -328,7 +334,8 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 ```
 tools/
-├── eval_wrapper.py            ← 评测包装器（启动+监控，阻塞等待，无需轮询）
+├── task_runner.py            ← 长任务执行器（detached 启动 + 状态文件 + 超时管理 + 断点恢复，长任务执行协议核心）
+├── eval_wrapper.py            ← 评测包装器（启动+监控，输出结果 JSON / [EVAL_ERROR]，经 task_runner 协议执行）
 ├── fast_gpqa.py              ← 快速 GPQA Diamond 评测（主入口）
 ├── fast_gpqa_config.yaml     ← 快速评测配置模板
 ├── accuracy_compare.py       ← V1 vs V2 精度对比与阈值判定

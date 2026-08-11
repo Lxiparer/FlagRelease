@@ -239,7 +239,7 @@ SCRIPT_MAP=(
     "skills/flagos-performance-testing/tools/benchmark_runner.py:scripts/benchmark_runner.py"
     # 性能对比
     "skills/flagos-performance-testing/tools/performance_compare.py:scripts/performance_compare.py"
-    # 无 V1 场景性能基线合成（V2 初始 ×1.2）
+    # 无 V1 场景性能基线合成（V2 初始 ×1.05）
     "skills/flagos-performance-testing/tools/synthesize_perf_baseline.py:scripts/synthesize_perf_baseline.py"
     # 算子优化
     "skills/flagos-operator-replacement/tools/operator_optimizer.py:scripts/operator_optimizer.py"
@@ -270,6 +270,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/persist_tuning_checkpoint.py:scripts/persist_tuning_checkpoint.py"
     # 远端评测监控
     "skills/flagos-eval-comprehensive/tools/eval_monitor.py:scripts/eval_monitor.py"
+    # 长任务执行器（长任务执行协议：detached 启动 + 状态文件 + 超时管理 + 断点恢复）
+    "skills/flagos-eval-comprehensive/tools/task_runner.py:scripts/task_runner.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # Plugin 安装
