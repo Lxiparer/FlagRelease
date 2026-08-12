@@ -122,9 +122,31 @@ eval:
 
 ---
 
-# 模块 A：本地快速评测（GPQA Diamond）
+# 模块 A：本地快速评测（GPQA Diamond / MMLU / MATH-500）
 
-主模式：**GPQA Diamond 快速评测** — 一条命令跑完，自动适配所有模型（thinking/non-thinking），自动探测吞吐选并发。
+主模式：**快速评测** — 一条命令跑完，自动适配所有模型（thinking/non-thinking），自动探测吞吐选并发。数据集通过 `--dataset` 指定（默认 `gpqa_diamond`）：
+
+| 数据集 | --dataset 值 | 默认 few-shot | 默认题数 | 说明 |
+|--------|-------------|--------------|---------|------|
+| GPQA Diamond | `gpqa_diamond` | 0-shot | 50（--limit 0 全量 198） | 主流程 V1/V2 精度判据 |
+| MMLU | `mmlu` | 5-shot | 100/子集 | **per-subset 语义**：57 子集各取 limit 题（--limit 100 = 5700 题，全量 14042 的 40%） |
+| MATH-500 | `math_500` | 0-shot | 500（全量） | 500 题 test，`\boxed{}` 答案；**同为 per-subset 语义**（实测 1.5.1：5 子集 Level 1-5 各取 limit 题，--limit 10 = 50 题，--limit 0 = 全量 500） |
+
+**多数据集**：`--dataset` 支持一次指定多个（空格或逗号分隔），依次评测、每数据集独立结果文件；多数据集时 `--output` 视为目录（写 `{dir}/{dataset}_result.json`），单数据集时仍为文件路径：
+
+```bash
+# 一次跑多个数据集（mmlu 5700 题 + math_500 全量 500 题，各用默认题数）
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 \
+    --dataset mmlu math_500 --output /flagos-workspace/results/multi"
+
+# 逗号分隔等价写法
+--dataset mmlu,math_500
+
+# 也可在 config 指定多数据集: dataset: "mmlu, math_500"
+```
+
+多数据集时 `--limit` 对所有数据集生效（per-subset 数据集按各子集取数）；不传则各数据集用默认题数。结果汇总表在终端打印，退出码 = 所有数据集得分都解析成功才为 0。
 
 ## 核心特性
 
@@ -173,6 +195,7 @@ model:
 
 dataset_dir: ""                         # 可选，预下载缓存目录
 dataset_hub: "modelscope"               # modelscope 或 huggingface
+dataset: "gpqa_diamond"                 # 可选，gpqa_diamond / mmlu / math_500
 ```
 
 **步骤 4：运行评测**
@@ -185,11 +208,17 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 # 方式二：命令行参数（无需改配置文件）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
+
+# 方式三：指定数据集（MMLU 57 子集各 100 题 / MATH-500 全量 500 题）
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu --limit 100"
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset math_500 --limit 0"
 ```
 
 ## 输出
 
-终端打印 + `gpqa_result.json`：
+终端打印 + `{dataset}_result.json`（gpqa_diamond → `gpqa_result.json`，mmlu → `mmlu_result.json`，math_500 → `math_500_result.json`）：
 
 ```
 ============================================================
@@ -215,7 +244,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 | top_p | thinking → 0.95；standard → 1.0 |
 | dataset_filters | thinking → `remove_until: </think>`；standard → 无 |
 | eval_batch_size | 三阶段探测：API 延迟 → 候选估算 → 并发验证；探测失败 → 16 |
-| few_shot | 始终 0-shot |
+| few_shot | 按数据集：gpqa_diamond/math_500 → 0-shot；mmlu → 5-shot（evalscope 内置 few-shot 示例） |
 | stream | 始终开启 |
 
 ## Thinking 模型检测规则
@@ -234,6 +263,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 | 普通 | 50 | 60s | 7200（维持原 2h 语义） |
 
 - **V1 与 V2 必须使用相同参数**：thinking 模型两侧均 `--limit 30`，普通模型两侧均默认 50 题（同样本可对比，禁止一方 30 一方 50）
+- **非 gpqa 数据集预算**：mmlu `--limit 100` = 5700 题（57 子集 × 100），math_500 全量 = 500 题。task_runner `--timeout` 按「题数 × 单题耗时（实测 1.5B 模型约 0.2-3s/题）× 1.25 缓冲」估算，如 mmlu 5700 题建议 ≥21600s，math_500 500 题 ≥7200s（慢速芯片需翻倍）
 - **禁止因耗时长跳过评测**：评测耗时长（尤其 thinking 模型 6h+）是预算内预期，严禁因等待时间长主动跳过、放弃或截断评测；预算内完成即为正常，超时按等待策略重试
 - **执行方式（2026-08 长任务执行协议）**：Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败。**禁止**用 Bash(timeout=大数) 前台阻塞等待评测（旧 Bash timeout(ms) 列已废弃），**禁止** TaskOutput 轮询。评测命令写入任务文件后经 task_runner.py detached 启动（`--timeout <max_timeout>`），Claude 每 8 分钟短轮询状态文件，见下方「长任务执行协议」三步模板
 - 安全网保障：预算调大不会让 runaway 无限拖 —— fast_gpqa max_tokens cap（防线1）锁死复读生成窗口；eval_wrapper 收尾停滞看门狗照杀（防线3），生成中停滞仅提示不杀（慢≠死），给足预算不会误杀正常长推理
@@ -272,6 +302,8 @@ sleep 480 && docker exec $CONTAINER bash -c "cat /flagos-workspace/logs/tasks/ev
 > 推荐使用 `safe_restart_service.sh --container $CONTAINER --mode flagos` 一条命令完成。
 
 **步骤4 — V1 (Native) 精度**（始终执行）：
+
+> **多数据集**：以下模板为默认场景 gpqa_diamond 单数据集。`--datasets` 指定多数据集（或 mmlu/math_500）时，**每个数据集独立评测**：eval-cmd 加 `--dataset {ds}`（如 `--dataset mmlu`）、输出 `{ds}_native.json`、任务文件 `eval_v1_{ds}.cmd`；`--limit` 仅 gpqa_diamond 单数据集时传（30/50），mmlu/math_500 及多数据集不传（fast_gpqa 按数据集默认题数：mmlu 100/子集=5700、math_500 全量 500）。判定见模块 C 与下方编排层指令（per-dataset、`--metric {ds}`、输出 `accuracy_compare_{ds}.json`）。
 
 1. 停止现有服务，释放 GPU 显存：
 ```bash
@@ -864,15 +896,16 @@ ISSUE_EOF"
 
 ## 编排层指令（步骤4 精度评测 — 固化决策）
 
-主流程步骤4使用**模块 A（本地 GPQA Diamond）+ 模块 C（精度对比）+ 模块 D（错误处理）**，不使用模块 B（远端 flageval）。
+主流程步骤4使用**模块 A（本地快速评测）+ 模块 C（精度对比）+ 模块 D（错误处理）**，不使用模块 B（远端 flageval）。数据集由 `--datasets` 参数指定（默认 gpqa_diamond，可多数据集：mmlu/math_500，见模块 A），**每个数据集独立评测、独立判定，全部达标才 `accuracy_ok=true`**。
 
 执行顺序（固定）：
-1. 关闭 flaggems → 启动服务 → GPQA Diamond V1 精度基线 → 停服务
-2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
-3. V1 vs V2 精度对比（下降阈值 5%）
-4. 结果判定：
-   - 下降 ≤5%（含V2高于V1）→ `workflow.accuracy_ok=true`，进入步骤6
-   - 下降 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5
+1. 关闭 flaggems → 启动服务 → 各数据集 V1 精度基线（评测命令加 `--dataset {ds}`，输出 `/flagos-workspace/results/{ds}_native.json`）→ 停服务
+2. 开启 flaggems → 启动服务 → 各数据集 V2 精度（输出 `/flagos-workspace/results/{ds}_flagos.json`）
+   - `--limit`：仅 gpqa_diamond 单数据集时显式传（thinking 30 / 普通 50）；mmlu/math_500 及多数据集**不传**（fast_gpqa 按数据集默认题数：mmlu 100/子集=5700、math_500 全量 500）。V1/V2 参数必须完全相同
+3. 每数据集独立对比：`accuracy_compare.py --v1 {ds}_native.json --v2 {ds}_flagos.json --metric {ds} --output accuracy_compare_{ds}.json`（下降阈值 5%；本地 V1 基线模式下 `--metric` 不影响判据，仅报告标题）
+4. 结果判定（per-dataset）：
+   - 该数据集下降 ≤5%（含V2高于V1）→ 该数据集通过；**全部数据集通过** → `workflow.accuracy_ok=true`，进入步骤6（update_context.py 写入 true 前自动校验全部 `accuracy_compare_{ds}.json` 均 aligned，缺失或任一不达标则拒绝）
+   - 任一数据集下降 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5（按不达标数据集逐个调优）
    - 服务崩溃 → issue_reporter.py --type operator-crash（同步骤3）
 
 精度评测+精度调优全部完成后才进入性能测试。
@@ -881,8 +914,9 @@ ISSUE_EOF"
 
 ## 编排层指令（步骤5 精度算子调优 — 固化决策）
 
-**触发条件**：`workflow.accuracy_ok = false` 且 `env_type ≠ native`
-**跳过条件**：`accuracy_ok = true`（不触发时显示已完成）
+**触发条件**：`workflow.accuracy_ok = false` 且 `env_type ≠ native`（多数据集时任一数据集判定不达标即触发）
+**跳过条件**：`accuracy_ok = true`（不触发时显示已完成；多数据集时全部数据集达标才为 true）
+**多数据集调优语义**：**按不达标数据集逐个进行**——每轮只针对一个数据集（该数据集 V1/V2 判定 rel_drop >5% 才调优，调优评测用 `--dataset <该数据集>` 与判定同参；已达标数据集不重复评测）。每轮 checkpoint 的 SCORE/BASELINE 均为**当前调优数据集**的单分数（persist_tuning_checkpoint.py 单分数接口不变）。全部数据集达标才 `accuracy_ok=true`（update_context.py 校验兜底）。
 
 ### 步骤5入口 — 恢复检测（必须先执行）
 

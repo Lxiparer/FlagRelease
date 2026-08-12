@@ -115,7 +115,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
 - **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
-- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`
+- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`。**多数据集（`--datasets`）**：每个数据集独立判定（`accuracy_compare_{dataset}.json`），全部达标才 `accuracy_ok=true`；V3/V4 精度终检与 V4 基线取**主数据集**（第一个）
 
 ### 双 pipeline 分支（准入镜像分类驱动）
 
@@ -177,7 +177,8 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | 宿主机模型路径 | `check_model_local.py --no-download` 自动搜索。找到则使用实际路径挂载；未找到则使用 `/mnt/data/models/<model_name>` | `${MODEL_PATH}` 和 `${CONTAINER_MODEL_PATH}` 均取此路径 |
 | docker run | 模板优先：严格按 SKILL.md 中 GPU 厂商对应模板执行。模板失败时先修正变量重试；仍失败则 `docker inspect` 借鉴已有容器重试一次；仍失败则终止 | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
-| 评测时长预算 | thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）`--limit 30 --max-timeout 22500`；普通模型 `--limit 50 --max-timeout 7200`。V1/V2 参数必须相同 | 评测耗时长（thinking 6h+）是预算内预期，**禁止因耗时长跳过/放弃/截断评测** |
+| 数据集参数 | `--datasets` 逗号分隔（`gpqa_diamond`/`mmlu`/`math_500`），默认 `gpqa_diamond`，作用于 run_pipeline.sh/run_batch.sh | 每个数据集独立评测、独立判定（per-dataset accuracy_compare_{dataset}.json），**全部达标才 accuracy_ok=true**（update_context.py 自动校验） |
+| 评测时长预算 | thinking 模型（qwen3/qwq/deepseek-r1/r2/mimo/hunyuan 或 runtime.thinking_model=true）`--limit 30 --max-timeout 22500`；普通模型 `--limit 50 --max-timeout 7200`。V1/V2 参数必须相同。**数据集预算**：gpqa_diamond 显式传 `--limit`（30/50）；mmlu `--max-timeout 21600`（默认 100/子集=5700 题，不传 `--limit`）；math_500 `--max-timeout 7200`（默认全量 500 题，不传 `--limit`）；多数据集取各数据集 max_timeout 最大值，一律不传 `--limit` | 评测耗时长（thinking 6h+）是预算内预期，**禁止因耗时长跳过/放弃/截断评测** |
 | 长任务执行协议 | 所有可能运行超过 10 分钟的命令（评测、服务等待、性能测试、算子调优、发布推送）一律走协议：写任务命令文件 → `task_runner.py --cmd ... --state ... --log ... --timeout <上限>` detached 启动（容器内 `docker exec -d`、宿主机 `python3 ... &`）→ Claude 每 8 分钟短轮询状态文件（`sleep 480 && cat <state> && tail -3 <log>`，单次调用 <10 分钟且必有输出）→ 会话被杀后任务继续跑、新会话读 state 断点接管 | **禁止** Bash(timeout=大数) 前台阻塞（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败），**禁止** TaskOutput 轮询；启动任务前先检查对应 state 文件，`status=running` 时直接接管禁止重复启动 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80%；comprehensive: 每个用例每个并发级别均 ≥ 80%。**判定粒度：每个数据点的 min ratio** | 不询问 |

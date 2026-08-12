@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -13,6 +13,8 @@
 #   --verbose         透传给 run_pipeline.sh，显示全量终端输出
 #   --stop-on-error   某个任务失败后终止整个批次（默认继续下一个）
 #   --force           强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --datasets        精度评测数据集（逗号分隔，gpqa_diamond/mmlu/math_500），全局透传给每个任务；
+#                     默认 gpqa_diamond（任务列表格式不变）
 #   --feishu-webhook  飞书自定义机器人 Webhook 地址；不传则不发送飞书通知
 #
 # 双 pipeline 说明:
@@ -34,7 +36,7 @@ set -uo pipefail
 
 # ========== 参数解析 ==========
 if [ $# -lt 6 ]; then
-    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--feishu-webhook URL]"
+    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--feishu-webhook URL]"
     echo ""
     echo "任务列表文件格式（每行 | 分隔）:"
     echo "  镜像地址或容器名 | 模型名"
@@ -48,12 +50,14 @@ STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
 PROXY_FLAG=""
+DATASET_FLAG=""
 MODEL_TIMEOUT=86400  # 单模型超时（秒），默认 24 小时
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
         --force) FORCE=true; shift ;;
         --verbose) VERBOSE_FLAG="--verbose"; shift ;;
+        --datasets) DATASET_FLAG="--datasets $2"; shift 2 ;;
         --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
         --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
         # export 后 detached worker 与子进程 run_pipeline.sh 均自动继承此变量。
@@ -318,7 +322,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         --batch-elapsed-seconds "$(( TASK_START_TS - BATCH_START_TS ))" || :
     FLAGOS_BATCH_MODE=1 \
     timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
-        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
+        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $DATASET_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
     TASK_END_TS=$(date +%s)
     TASK_ELAPSED=$(( TASK_END_TS - TASK_START_TS ))

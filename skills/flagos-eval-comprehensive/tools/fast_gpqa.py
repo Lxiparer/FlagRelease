@@ -74,6 +74,48 @@ THINKING_PATTERNS = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'huny
 THINKING_MAX_TOKENS_CAP = 20000
 
 
+# =============================================================================
+# 评测数据集配置（--dataset 参数）
+# =============================================================================
+# 每个数据集的 evalscope 注册名、全量题数、默认 few-shot 与预加载信息。
+# 注意：mmlu 是 evalscope reformat 模式，limit 为 per-subset 语义——
+# limit=100 表示 57 个子集各取 100 题（共 5700 题，全量 14042 的 40%）。
+DATASET_CONFIG = {
+    'gpqa_diamond': {
+        'full_count': 198,          # limit=0 全量题数
+        'few_shot_num': 0,
+        'default_limit': 50,        # 默认题数（--limit 未指定时）
+        'preload': {                # 预加载（探测阶段计时不含下载）：hub -> (repo, subset, split)
+            'modelscope': ('AI-ModelScope/gpqa_diamond', None, 'train'),
+            'huggingface': ('Idavidrein/gpqa', 'gpqa_diamond', 'train'),
+        },
+        'benchmark_name': 'GPQA Diamond',
+    },
+    'mmlu': {
+        'full_count': 14042,
+        'few_shot_num': 5,
+        'default_limit': 100,
+        'per_subset_limit': True,   # limit 应用在每个子集（57 子集 × limit 题）
+        'preload': {
+            'modelscope': ('AI-ModelScope/mmlu', None, 'test'),
+            'huggingface': ('cais/mmlu', None, 'test'),
+        },
+        'benchmark_name': 'MMLU',
+    },
+    'math_500': {
+        'full_count': 500,
+        'few_shot_num': 0,
+        'default_limit': 500,       # 全量（--limit 0 时同全量）
+        'per_subset_limit': True,   # limit 应用在每个子集（5 子集 Level 1-5 × limit 题，实测 1.5.1 行为）
+        'preload': {
+            'modelscope': ('AI-ModelScope/MATH-500', None, 'test'),
+            'huggingface': ('HuggingFaceH4/MATH-500', None, 'test'),
+        },
+        'benchmark_name': 'MATH-500',
+    },
+}
+
+
 def detect_thinking(model_name: str) -> bool:
     """根据模型名或 context.yaml 检测是否为 thinking model。"""
     name_lower = model_name.lower()
@@ -152,6 +194,12 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
         else:
             tokens = max(tokens, 4096)
             tokens = min(tokens, 32768)
+        # 防御: 小上下文服务(max_model_len<=16384)下 max_tokens 收敛到上下文一半,
+        # 给 prompt 留余量——vllm 以 max_model_len 同时约束 prompt+output 总长,
+        # thinking 下限 8192 + 任意非空 prompt 必超限被拒(错误文本当输出, 全题 0 分)。
+        # 真实流水线服务 max_model_len>=32768 不触发此分支, 行为不变。
+        if max_model_len <= 16384:
+            tokens = min(tokens, max_model_len // 2)
         return tokens, max_model_len
     # fallback
     return (16384 if is_thinking else 8192), None
@@ -311,7 +359,7 @@ def detect_runaway(text: str, finish_reason: str = "") -> Tuple[bool, Dict]:
     return False, evidence
 
 
-def analyze_predictions_runaway(work_dir: str, model_id: str) -> Dict:
+def analyze_predictions_runaway(work_dir: str, model_id: str, dataset: str = 'gpqa_diamond') -> Dict:
     """评测完成后扫描 predictions jsonl，标记 runaway 题。
 
     evalscope 是黑盒（生成+判分在其内部完成），fast_gpqa 拿不到逐题文本；
@@ -319,43 +367,56 @@ def analyze_predictions_runaway(work_dir: str, model_id: str) -> Dict:
     用途：标记 runaway 题 → 报告提示该轮分数可能被垃圾复读污染（不改分，
     仅数据真实性提示；真正止血靠防线3 进程外看门狗）。
 
+    多数据集：主预测文件（{dataset}_default.jsonl）不存在时（mmlu 等
+    reformat 模式按子集输出多个文件），扫描 predictions 目录下全部 jsonl。
+
     Returns:
         {"checked": int, "runaway_count": int, "runaway_indices": [...]}
         runaway_indices = [{"index": int, "reason": str, "diversity": float,
                             "compress_ratio": float, "finish_reason": str}]
     """
     result = {"checked": 0, "runaway_count": 0, "runaway_indices": []}
-    pred_path = os.path.join(work_dir, "predictions", model_id, "gpqa_diamond_default.jsonl")
-    if not os.path.isfile(pred_path):
+    pred_dir = os.path.join(work_dir, "predictions", model_id)
+    pred_paths = [os.path.join(pred_dir, f"{dataset}_default.jsonl")]
+    if not os.path.isfile(pred_paths[0]):
+        # mmlu 等 reformat 模式：按子集输出多文件，全部扫描
+        pred_paths = sorted(
+            os.path.join(pred_dir, f) for f in os.listdir(pred_dir)
+            if f.endswith('.jsonl')
+        ) if os.path.isdir(pred_dir) else []
+    if not pred_paths:
         return result
-    try:
-        with open(pred_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                result["checked"] += 1
-                choices = (rec.get("model_output") or {}).get("choices") or []
-                if not choices:
-                    continue
-                content = (choices[0].get("message") or {}).get("content") or ""
-                stop_reason = choices[0].get("stop_reason") or ""
-                is_ra, ev = detect_runaway(content, stop_reason)
-                if is_ra:
-                    result["runaway_count"] += 1
-                    result["runaway_indices"].append({
-                        "index": rec.get("index"),
-                        "reason": ev["reason"],
-                        "diversity": ev["diversity"],
-                        "compress_ratio": ev["compress_ratio"],
-                        "finish_reason": ev["finish_reason"],
-                    })
-    except OSError:
-        pass
+    for pred_path in pred_paths:
+        if not os.path.isfile(pred_path):
+            continue
+        try:
+            with open(pred_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    result["checked"] += 1
+                    choices = (rec.get("model_output") or {}).get("choices") or []
+                    if not choices:
+                        continue
+                    content = (choices[0].get("message") or {}).get("content") or ""
+                    stop_reason = choices[0].get("stop_reason") or ""
+                    is_ra, ev = detect_runaway(content, stop_reason)
+                    if is_ra:
+                        result["runaway_count"] += 1
+                        result["runaway_indices"].append({
+                            "index": rec.get("index"),
+                            "reason": ev["reason"],
+                            "diversity": ev["diversity"],
+                            "compress_ratio": ev["compress_ratio"],
+                            "finish_reason": ev["finish_reason"],
+                        })
+        except OSError:
+            pass
     return result
 
 
@@ -368,20 +429,28 @@ def _sanitize_model_id(model_name: str) -> str:
     return model_name.strip('/').split('/')[-1] or model_name
 
 
-def _preload_dataset(dataset_hub: str, dataset_dir: Optional[str] = None):
-    """预加载 gpqa_diamond 数据集到缓存，确保探测阶段计时不含下载时间。"""
+def _preload_dataset(dataset_hub: str, dataset_dir: Optional[str] = None,
+                     dataset: str = 'gpqa_diamond'):
+    """预加载数据集到缓存，确保探测阶段计时不含下载时间。"""
+    cfg = DATASET_CONFIG.get(dataset, DATASET_CONFIG['gpqa_diamond'])
+    preload = cfg.get('preload', {})
+    repo, subset, split = preload.get(dataset_hub, (None, None, None))
+    if not repo:
+        return
     try:
         if dataset_dir:
-            # 检查本地缓存是否存在
+            # 检查本地缓存是否存在（按数据集名前缀匹配）
             import glob as glob_mod
-            if glob_mod.glob(os.path.join(dataset_dir, '**', 'gpqa*'), recursive=True):
+            prefix = dataset.split('_')[0]  # gpqa/mmlu/math
+            if glob_mod.glob(os.path.join(dataset_dir, '**', f'{prefix}*'), recursive=True):
                 return
         if dataset_hub == 'modelscope':
             from modelscope import MsDataset
-            MsDataset.load('AI-ModelScope/gpqa_diamond', split='train', trust_remote_code=True)
+            MsDataset.load(repo, split=split, trust_remote_code=True)
         else:
             import datasets as hf_datasets
-            hf_datasets.load_dataset('Idavidrein/gpqa', name='gpqa_diamond', split='train', trust_remote_code=True)
+            hf_datasets.load_dataset(repo, name=subset or None, split=split,
+                                     trust_remote_code=True)
     except Exception:
         pass  # 预加载失败不影响后续，evalscope 会自行下载
 
@@ -673,22 +742,31 @@ def run_fast_gpqa(
     api_key: str = 'EMPTY',
     dataset_dir: Optional[str] = None,
     dataset_hub: str = 'modelscope',
-    limit: Optional[int] = 50,
+    dataset: str = 'gpqa_diamond',
+    limit: Optional[int] = None,
     output_path: Optional[str] = None,
 ) -> Dict:
     """
-    GPQA Diamond 快速评测主流程。
+    快速精度评测主流程（GPQA Diamond / MMLU / MATH-500）。
 
+    Args:
+        dataset: 数据集名（DATASET_CONFIG 的 key）
+        limit: 题数上限。None → 数据集默认题数；0 → 全量。
+               mmlu 为 per-subset 语义（每个子集各取 limit 题）。
     Returns:
         结果 dict
     """
     from evalscope import TaskConfig, run_task
     from evalscope.constants import EvalType
 
+    cfg = DATASET_CONFIG.get(dataset, DATASET_CONFIG['gpqa_diamond'])
+    if limit is None:
+        limit = cfg['default_limit']
+
     total_start = time.time()
 
     print("=" * 60)
-    print("  GPQA Diamond 快速精度评测")
+    print(f"  {cfg['benchmark_name']} 快速精度评测")
     print("=" * 60)
     print(f"  模型: {model_name}")
     print(f"  API:  {api_base}")
@@ -717,10 +795,10 @@ def run_fast_gpqa(
     # 读取失败/缺失时无声回退现有默认；纯增强层，绝不新增评测报错点）
     gen_config = resolve_gen_params(is_thinking, max_tokens)
 
-    # Step 5: 构建 dataset_args
-    dataset_args = {'gpqa_diamond': {'few_shot_num': 0}}
+    # Step 5: 构建 dataset_args（few-shot 按数据集配置；thinking 模型加 remove_until 过滤）
+    dataset_args = {dataset: {'few_shot_num': cfg['few_shot_num']}}
     if is_thinking:
-        dataset_args['gpqa_diamond']['filters'] = {'remove_until': '</think>'}
+        dataset_args[dataset]['filters'] = {'remove_until': '</think>'}
 
     evalscope_config = {
         'dataset_hub': dataset_hub,
@@ -740,12 +818,13 @@ def run_fast_gpqa(
 
     # Step 7: 正式评测
     print("-" * 60)
-    total_questions = limit if limit else 198
-    print(f"[EVAL] 正式评测: gpqa_diamond ({total_questions}题, 并发={batch_size})")
+    total_questions = limit if limit else cfg['full_count']
+    limit_note = f"（每子集 {limit} 题）" if limit and cfg.get('per_subset_limit') else ""
+    print(f"[EVAL] 正式评测: {dataset}{limit_note} ({total_questions}题, 并发={batch_size})")
     print("-" * 60)
 
     model_id = _sanitize_model_id(model_name)
-    work_dir = f'outputs/gpqa_diamond/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    work_dir = f'outputs/{dataset}/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
 
     task_kwargs = dict(
         model=model_name,
@@ -753,7 +832,7 @@ def run_fast_gpqa(
         api_url=api_base,
         api_key=api_key,
         eval_type=EvalType.OPENAI_API,
-        datasets=['gpqa_diamond'],
+        datasets=[dataset],
         dataset_args=dataset_args,
         eval_batch_size=batch_size,
         generation_config=gen_config,
@@ -806,12 +885,21 @@ def run_fast_gpqa(
 
     # Step 8: 解析结果
     score, raw_details = parse_result(result)
+    # 以 evalscope 报告的实际评测数为准（mmlu per-subset 时为 57×limit 而非 limit）
+    for _k in ('metrics', 'metric'):
+        for _m in (raw_details.get(_k) or []) if isinstance(raw_details, dict) else []:
+            if isinstance(_m, dict) and _m.get('num'):
+                total_questions = int(_m['num'])
+                break
+        else:
+            continue
+        break
     total_elapsed = round(time.time() - total_start, 2)
     minutes = int(total_elapsed // 60)
     seconds = round(total_elapsed % 60, 1)
 
     # Step 8.5: runaway 复读检测（防线2，评测后逐题内容判别）
-    runaway_analysis = analyze_predictions_runaway(work_dir, model_id)
+    runaway_analysis = analyze_predictions_runaway(work_dir, model_id, dataset=dataset)
     if runaway_analysis.get("runaway_count", 0) > 0:
         print(f"[WARN] 检测到 {runaway_analysis['runaway_count']}/{runaway_analysis.get('checked', 0)} 题 runaway 复读: "
               f"{[r['index'] for r in runaway_analysis['runaway_indices']]}")
@@ -821,7 +909,7 @@ def run_fast_gpqa(
     report = {
         '_producer': 'fast_gpqa.py',
         'model': model_name,
-        'benchmark': 'gpqa_diamond',
+        'benchmark': dataset,
         'mode': mode_str,
         'score': score,
         'total_questions': total_questions,
@@ -843,10 +931,10 @@ def run_fast_gpqa(
         report['crash_reason'] = reason
     report['_meta'] = {
             'model': '模型名称或路径',
-            'benchmark': '评测基准名称（固定 gpqa_diamond）',
+            'benchmark': '评测基准名称（gpqa_diamond / mmlu / math_500）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
-            'score': 'GPQA Diamond 正确率百分比',
-            'total_questions': '评测题目总数（默认 50 题，--limit 0 为全量 198 题）',
+            'score': f'{cfg["benchmark_name"]} 正确率百分比',
+            'total_questions': f'实际评测题数（evalscope 报告为准；mmlu/math_500 为 per-subset：mmlu --limit 100 = 5700 题（57 子集×100）、math_500 --limit 10 = 50 题（5 子集×10），--limit 0 为全量 {cfg["full_count"]} 题）',
             'eval_batch_size': '评测并发数（自动探测选择）',
             'max_tokens': '单次生成最大 token 数',
             'max_model_len': '模型支持的最大上下文长度',
@@ -860,7 +948,7 @@ def run_fast_gpqa(
     }
 
     # 写 JSON 报告
-    report_path = 'gpqa_result.json'
+    report_path = f'{dataset}_result.json'
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
@@ -875,7 +963,7 @@ def run_fast_gpqa(
     # 终端打印
     print()
     print("=" * 60)
-    print("  GPQA Diamond 快速评测结果")
+    print(f"  {cfg['benchmark_name']} 快速评测结果")
     print("=" * 60)
     print(f"  模型:     {model_name}")
     print(f"  模式:     {mode_str} (temperature={gen_config['temperature']}, max_tokens={max_tokens})")
@@ -898,12 +986,17 @@ def run_fast_gpqa(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='GPQA Diamond 快速精度评测',
+        description='快速精度评测（GPQA Diamond / MMLU / MATH-500）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   python fast_gpqa.py --config config.yaml
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1
+  python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu --limit 100
+  python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset math_500 --limit 0
+  # 多数据集（空格或逗号分隔；多数据集时 --output 为目录，每数据集写 {dataset}_result.json）
+  python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu math_500 --output /flagos-workspace/results/multi
+  python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu,math_500
         """,
     )
     parser.add_argument('--config', type=str, default=None,
@@ -916,8 +1009,11 @@ def main():
                         help='API 密钥 (覆盖 config)')
     parser.add_argument('--dataset-dir', type=str, default=None,
                         help='数据集缓存目录 (覆盖 config)')
-    parser.add_argument('--limit', type=int, default=50,
-                        help='限制评测题数（默认 50 题，传 0 或 198 为全量）')
+    parser.add_argument('--dataset', type=str, default=None, nargs='+',
+                        help=f'评测数据集，可多个（空格或逗号分隔）: {" / ".join(DATASET_CONFIG)}'
+                             f'（默认 gpqa_diamond，可被 config 覆盖；多数据集时 --output 视为目录，每数据集写 {{dataset}}_result.json）')
+    parser.add_argument('--limit', type=int, default=None,
+                        help='限制评测题数（None=数据集默认，0=全量；mmlu/math_500 为每子集题数，如 mmlu 100=57子集各100题、math_500 10=5子集各10题）')
     parser.add_argument('--output', type=str, default=None,
                         help='结果 JSON 输出路径（如 /flagos-workspace/results/gpqa_native.json）')
     args = parser.parse_args()
@@ -940,6 +1036,18 @@ def main():
     api_key = args.api_key or model_cfg.get('api_key', 'EMPTY')
     dataset_dir = args.dataset_dir or config.get('dataset_dir', '') or None
     dataset_hub = config.get('dataset_hub', 'modelscope')
+
+    # 数据集解析：--dataset 支持空格/逗号多值，config dataset 支持逗号分隔，均可被 --dataset 覆盖
+    def _split_datasets(raw):
+        parts = raw if isinstance(raw, list) else [raw]
+        return [p.strip() for part in parts for p in str(part).split(',') if p.strip()]
+
+    datasets = _split_datasets(args.dataset) or _split_datasets(config.get('dataset', 'gpqa_diamond'))
+    invalid = [d for d in datasets if d not in DATASET_CONFIG]
+    if invalid:
+        print(f"[ERROR] 未知数据集: {invalid}（可选: {list(DATASET_CONFIG)}）")
+        sys.exit(1)
+    multi_dataset = len(datasets) > 1
 
     if not model_name:
         # 自动从 /v1/models 探测
@@ -987,29 +1095,56 @@ def main():
         print("[ERROR] evalscope 未安装，请执行: pip install 'evalscope==1.5.1'")
         sys.exit(1)
 
-    # 运行
+    # 运行（多数据集时循环评测，每数据集独立结果）
     try:
         step_id = os.environ.get("FLAGOS_STEP_ID", "04_accuracy_eval")
         step_title = os.environ.get("FLAGOS_STEP_TITLE", "精度评测")
         write_checkpoint(step_id, step_title, "running_fast_gpqa",
-                         action_detail=f"fast_gpqa.py --model-name {model_name} --api-base {api_base}")
-        report = run_fast_gpqa(
-            model_name=model_name,
-            api_base=api_base,
-            api_key=api_key,
-            dataset_dir=dataset_dir,
-            dataset_hub=dataset_hub,
-            limit=args.limit or None,
-            output_path=args.output,
-        )
-        sys.exit(0 if report.get('score') is not None else 1)
+                         action_detail=f"fast_gpqa.py --model-name {model_name} --api-base {api_base} "
+                                       f"--dataset {' '.join(datasets)}")
+
+        if multi_dataset and args.output:
+            os.makedirs(args.output, exist_ok=True)
+
+        reports = []
+        for dataset in datasets:
+            print(f"\n{'=' * 60}\n[多数据集 {len(datasets)} 个] 评测 #{datasets.index(dataset) + 1}: {dataset}\n{'=' * 60}")
+            output_path = args.output
+            if multi_dataset and output_path:
+                output_path = os.path.join(output_path, f'{dataset}_result.json')
+            report = run_fast_gpqa(
+                model_name=model_name,
+                api_base=api_base,
+                api_key=api_key,
+                dataset_dir=dataset_dir,
+                dataset_hub=dataset_hub,
+                dataset=dataset,
+                limit=args.limit,
+                output_path=output_path,
+            )
+            reports.append((dataset, report))
+
+        if multi_dataset:
+            print("\n" + "=" * 60)
+            print("  多数据集评测汇总")
+            print("=" * 60)
+            for dataset, report in reports:
+                score = report.get('score')
+                if score is not None:
+                    ok = "✓" if report.get('truncation_detected') is False else "⚠"
+                    print(f"  {ok} {dataset:12s} {score:6.2f}%  ({report.get('total_questions')} 题, "
+                          f"{report.get('eval_duration_seconds', 0):.0f}s)")
+                else:
+                    print(f"  ✗ {dataset:12s} 失败: {report.get('error', '未知错误')}")
+        all_ok = all(r.get('score') is not None for _, r in reports)
+        sys.exit(0 if all_ok else 1)
     except Exception as e:
         write_last_error(
             tool="fast_gpqa.py",
             error_type=type(e).__name__,
             error_message=str(e),
             traceback_str=traceback.format_exc(),
-            context={"model": model_name, "api_base": api_base},
+            context={"model": model_name, "api_base": api_base, "datasets": datasets},
         )
         print(f"[FATAL] fast_gpqa.py 异常退出: {e}")
         traceback.print_exc()
