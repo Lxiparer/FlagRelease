@@ -17,3 +17,6 @@ feishu.env
 
 # 本地记忆记录（跨会话上下文，仅留本地不入库）
 memory/
+.pytest_cache/
+*.egg-info/
+docs/archive/
