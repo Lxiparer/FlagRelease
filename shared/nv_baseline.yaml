@@ -1357,3 +1357,919 @@ models:
       gpqa_diamond: 68
     source: "NV 实测"
     updated_at: "2026-08-05"
+
+  AceInstruct-1.5B:
+    aliases:
+      - nvidia/AceInstruct-1.5B
+      - aceinstruct-1.5b
+      - aceinstruct_1_5b
+    metrics:
+      gpqa_diamond: 37.0        # TODO: 待 NV 实测 GPQA Diamond 分数
+      mmlu: 56.03               # 实测（本地容器，5-shot，5700 题）
+      math_500: 58.20           # 实测（本地容器，0-shot，500 题全量）
+    source: "mmlu/math_500 为 2026-08-12 实测（本地容器）；gpqa_diamond 待补"
+    updated_at: "2026-08-12"
+  # ---- 批次补充 2026-08-12（NV mmlu/math_500 基线）----
+
+  OpenReasoning-Nemotron-1.5B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-1.5B
+      - openreasoning-nemotron-1.5b
+      - openreasoning_nemotron_1_5b
+    metrics:
+      mmlu: 52.21
+      math_500: 84.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  ZR1-1.5B:
+    aliases:
+      - Zyphra/ZR1-1.5B
+      - zr1-1.5b
+      - zr1_1_5b
+    metrics:
+      mmlu: 50.54
+      math_500: 89.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Phi-4-mini-reasoning:
+    aliases:
+      - microsoft/Phi-4-mini-reasoning
+      - phi-4-mini-reasoning
+      - phi_4_mini_reasoning
+    metrics:
+      mmlu: 72.83
+      math_500: 88.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.3-2b-instruct:
+    aliases:
+      - ibm-granite/granite-3.3-2b-instruct
+      - granite-3.3-2b-instruct
+      - granite_3_3_2b_instruct
+    metrics:
+      mmlu: 56.26
+      math_500: 54.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-2.1b-instruct-2505:
+    aliases:
+      - kakaocorp/kanana-1.5-2.1b-instruct-2505
+      - kanana-1.5-2.1b-instruct-2505
+      - kanana_1_5_2_1b_instruct_2505
+    metrics:
+      mmlu: 53.35
+      math_500: 60.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AI21-Jamba-Reasoning-3B:
+    aliases:
+      - ai21labs/AI21-Jamba-Reasoning-3B
+      - ai21-jamba-reasoning-3b
+      - ai21_jamba_reasoning_3b
+    metrics:
+      mmlu: 71.02
+      math_500: 63.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3-4B-SafeRL:
+    aliases:
+      - Qwen/Qwen3-4B-SafeRL
+      - qwen3-4b-saferl
+      - qwen3_4b_saferl
+    metrics:
+      mmlu: 81.39
+      math_500: 94.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Marco-Nano-Instruct:
+    aliases:
+      - ATH-MaaS/Marco-Nano-Instruct
+      - marco-nano-instruct
+      - marco_nano_instruct
+    metrics:
+      mmlu: 68.81
+      math_500: 77.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  gemma-3-4B-T1-it:
+    aliases:
+      - twinkle-ai/gemma-3-4B-T1-it
+      - gemma-3-4b-t1-it
+      - gemma_3_4b_t1_it
+    metrics:
+      mmlu: 55.07
+      math_500: 54.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Apodex-1.0-4B-SFT:
+    aliases:
+      - apodex/Apodex-1.0-4B-SFT
+      - apodex-1.0-4b-sft
+      - apodex_1_0_4b_sft
+    metrics:
+      mmlu: 86.14
+      math_500: 92.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-7B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-7B
+      - openreasoning-nemotron-7b
+      - openreasoning_nemotron_7b
+    metrics:
+      mmlu: 81.49
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker-7B:
+    aliases:
+      - open-thoughts/OpenThinker-7B
+      - openthinker-7b
+      - openthinker_7b
+    metrics:
+      mmlu: 77.0
+      math_500: 88.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Hunyuan-7B-Instruct-0124:
+    aliases:
+      - tencent/Hunyuan-7B-Instruct-0124
+      - hunyuan-7b-instruct-0124
+      - hunyuan_7b_instruct_0124
+    metrics:
+      mmlu: 75.88
+      math_500: 71.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  SynLogic-7B:
+    aliases:
+      - MiniMaxAI/SynLogic-7B
+      - synlogic-7b
+      - synlogic_7b
+    metrics:
+      mmlu: 73.88
+      math_500: 75.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceInstruct-7B:
+    aliases:
+      - nvidia/AceInstruct-7B
+      - aceinstruct-7b
+      - aceinstruct_7b
+    metrics:
+      mmlu: 71.37
+      math_500: 77.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-7B:
+    aliases:
+      - nvidia/AceReason-Nemotron-7B
+      - acereason-nemotron-7b
+      - acereason_nemotron_7b
+    metrics:
+      mmlu: 70.72
+      math_500: 95.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  NextCoder-7B:
+    aliases:
+      - microsoft/NextCoder-7B
+      - nextcoder-7b
+      - nextcoder_7b
+    metrics:
+      mmlu: 70.18
+      math_500: 68.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-7B-DS:
+    aliases:
+      - qihoo360/Light-R1-7B-DS
+      - light-r1-7b-ds
+      - light_r1_7b_ds
+    metrics:
+      mmlu: 69.95
+      math_500: 94.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceMath-RL-Nemotron-7B:
+    aliases:
+      - nvidia/AceMath-RL-Nemotron-7B
+      - acemath-rl-nemotron-7b
+      - acemath_rl_nemotron_7b
+    metrics:
+      mmlu: 59.81
+      math_500: 91.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-1.1-7B:
+    aliases:
+      - nvidia/AceReason-Nemotron-1.1-7B
+      - acereason-nemotron-1.1-7b
+      - acereason_nemotron_1_1_7b
+    metrics:
+      mmlu: 58.82
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dria-Agent-a-7B:
+    aliases:
+      - driaforall/Dria-Agent-a-7B
+      - dria-agent-a-7b
+      - dria_agent_a_7b
+    metrics:
+      mmlu: 53.4
+      math_500: 60.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenR1-Qwen-7B:
+    aliases:
+      - open-r1/OpenR1-Qwen-7B
+      - openr1-qwen-7b
+      - openr1_qwen_7b
+    metrics:
+      mmlu: 51.46
+      math_500: 88.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker3-7B:
+    aliases:
+      - open-thoughts/OpenThinker3-7B
+      - openthinker3-7b
+      - openthinker3_7b
+    metrics:
+      mmlu: 50.04
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-4.0-Light:
+    aliases:
+      - skt/A.X-4.0-Light
+      - a.x-4.0-light
+      - a_x_4_0_light
+    metrics:
+      mmlu: 74.72
+      math_500: 73.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-3.1-Light:
+    aliases:
+      - skt/A.X-3.1-Light
+      - a.x-3.1-light
+      - a_x_3_1_light
+    metrics:
+      mmlu: 65.98
+      math_500: 72.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-8B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-8B
+      - areal-boba-2-8b
+      - areal_boba_2_8b
+    metrics:
+      mmlu: 85.98
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-8B:
+    aliases:
+      - nvidia/Nemotron-Cascade-8B
+      - nemotron-cascade-8b
+      - nemotron_cascade_8b
+    metrics:
+      mmlu: 85.09
+      math_500: 96.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-8B-Thinking:
+    aliases:
+      - nvidia/Nemotron-Cascade-8B-Thinking
+      - nemotron-cascade-8b-thinking
+      - nemotron_cascade_8b_thinking
+    metrics:
+      mmlu: 85.02
+      math_500: 96.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  DeepSeek-llama3.1-Bllossom-8B:
+    aliases:
+      - UNIVA-Bllossom/DeepSeek-llama3.1-Bllossom-8B
+      - deepseek-llama3.1-bllossom-8b
+      - deepseek_llama3_1_bllossom_8b
+    metrics:
+      mmlu: 69.9
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-8b-instruct-2505:
+    aliases:
+      - kakaocorp/kanana-1.5-8b-instruct-2505
+      - kanana-1.5-8b-instruct-2505
+      - kanana_1_5_8b_instruct_2505
+    metrics:
+      mmlu: 69.77
+      math_500: 69.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Llama-3.1-Tulu-3.1-8B:
+    aliases:
+      - allenai/Llama-3.1-Tulu-3.1-8B
+      - llama-3.1-tulu-3.1-8b
+      - llama_3_1_tulu_3_1_8b
+    metrics:
+      mmlu: 69.19
+      math_500: 53.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.3-8b-instruct:
+    aliases:
+      - ibm-granite/granite-3.3-8b-instruct
+      - granite-3.3-8b-instruct
+      - granite_3_3_8b_instruct
+    metrics:
+      mmlu: 68.39
+      math_500: 69.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  granite-3.2-8b-instruct-preview:
+    aliases:
+      - ibm-granite/granite-3.2-8b-instruct-preview
+      - granite-3.2-8b-instruct-preview
+      - granite_3_2_8b_instruct_preview
+    metrics:
+      mmlu: 67.63
+      math_500: 53.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  T-lite-it-2.1:
+    aliases:
+      - t-tech/T-lite-it-2.1
+      - t-lite-it-2.1
+      - t_lite_it_2_1
+    metrics:
+      mmlu: 82.46
+      math_500: 92.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ling-lite:
+    aliases:
+      - inclusionAI/Ling-lite
+      - ling-lite
+      - ling_lite
+    metrics:
+      mmlu: 74.05
+      math_500: 79.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ring-lite-distill-preview:
+    aliases:
+      - inclusionAI/Ring-lite-distill-preview
+      - ring-lite-distill-preview
+      - ring_lite_distill_preview
+    metrics:
+      mmlu: 67.79
+      math_500: 58.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-9B-NEG:
+    aliases:
+      - FINAL-Bench/Darwin-9B-NEG
+      - darwin-9b-neg
+      - darwin_9b_neg
+      - ansulev/Darwin-9B-NEG
+    metrics:
+      mmlu: 87.91
+      math_500: 83.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+    # 同名模型多 org 镜像: FINAL-Bench/Darwin-9B-NEG=87.91/83.6; ansulev/Darwin-9B-NEG=87.72/82.0，取首个 org 分数
+
+  Turkish-Gemma-9b-v0.1:
+    aliases:
+      - ytu-ce-cosmos/Turkish-Gemma-9b-v0.1
+      - turkish-gemma-9b-v0.1
+      - turkish_gemma_9b_v0_1
+    metrics:
+      mmlu: 75.19
+      math_500: 53.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Midm-2.0-Base-Instruct:
+    aliases:
+      - K-intelligence/Midm-2.0-Base-Instruct
+      - midm-2.0-base-instruct
+      - midm_2_0_base_instruct
+    metrics:
+      mmlu: 74.07
+      math_500: 64.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Arcee-Blitz:
+    aliases:
+      - arcee-ai/Arcee-Blitz
+      - arcee-blitz
+      - arcee_blitz
+    metrics:
+      mmlu: 89.97
+      math_500: 69.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-14B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-14B
+      - areal-boba-2-14b
+      - areal_boba_2_14b
+    metrics:
+      mmlu: 87.7
+      math_500: 95.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-14B-Open:
+    aliases:
+      - inclusionAI/AReaL-boba-2-14B-Open
+      - areal-boba-2-14b-open
+      - areal_boba_2_14b_open
+    metrics:
+      mmlu: 87.4
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-Cascade-14B-Thinking:
+    aliases:
+      - nvidia/Nemotron-Cascade-14B-Thinking
+      - nemotron-cascade-14b-thinking
+      - nemotron_cascade_14b_thinking
+    metrics:
+      mmlu: 86.62
+      math_500: 96.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-14B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-14B
+      - openreasoning-nemotron-14b
+      - openreasoning_nemotron_14b
+    metrics:
+      mmlu: 86.48
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AceReason-Nemotron-14B:
+    aliases:
+      - nvidia/AceReason-Nemotron-14B
+      - acereason-nemotron-14b
+      - acereason_nemotron_14b
+    metrics:
+      mmlu: 85.58
+      math_500: 95.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-14B-DS:
+    aliases:
+      - qihoo360/Light-R1-14B-DS
+      - light-r1-14b-ds
+      - light_r1_14b_ds
+    metrics:
+      mmlu: 85.17
+      math_500: 93.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenMath-Nemotron-14B-Kaggle:
+    aliases:
+      - nvidia/OpenMath-Nemotron-14B-Kaggle
+      - openmath-nemotron-14b-kaggle
+      - openmath_nemotron_14b_kaggle
+    metrics:
+      mmlu: 77.23
+      math_500: 94.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dhanishtha-2.0-preview:
+    aliases:
+      - HelpingAI/Dhanishtha-2.0-preview
+      - dhanishtha-2.0-preview
+      - dhanishtha_2_0_preview
+    metrics:
+      mmlu: 81.09
+      math_500: 68.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Lamarckvergence-14B:
+    aliases:
+      - suayptalha/Lamarckvergence-14B
+      - lamarckvergence-14b
+      - lamarckvergence_14b
+    metrics:
+      mmlu: 82.05
+      math_500: 79.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Rubicon-Preview:
+    aliases:
+      - inclusionAI/Rubicon-Preview
+      - rubicon-preview
+      - rubicon_preview
+    metrics:
+      mmlu: 87.58
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  kanana-1.5-15.7b-a3b-instruct:
+    aliases:
+      - kakaocorp/kanana-1.5-15.7b-a3b-instruct
+      - kanana-1.5-15.7b-a3b-instruct
+      - kanana_1_5_15_7b_a3b_instruct
+    metrics:
+      mmlu: 65.02
+      math_500: 66.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ling-lite-1.5:
+    aliases:
+      - inclusionAI/Ling-lite-1.5
+      - ling-lite-1.5
+      - ling_lite_1_5
+    metrics:
+      mmlu: 78.16
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Ring-lite:
+    aliases:
+      - inclusionAI/Ring-lite
+      - ring-lite
+      - ring_lite
+    metrics:
+      mmlu: 67.65
+      math_500: 74.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Marco-Mini-Instruct:
+    aliases:
+      - ATH-MaaS/Marco-Mini-Instruct
+      - marco-mini-instruct
+      - marco_mini_instruct
+    metrics:
+      mmlu: 82.48
+      math_500: 91.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Mistral-Small-24B-Instruct-2501-reasoning:
+    aliases:
+      - yentinglin/Mistral-Small-24B-Instruct-2501-reasoning
+      - mistral-small-24b-instruct-2501-reasoning
+      - mistral_small_24b_instruct_2501_reasoning
+    metrics:
+      mmlu: 86.73
+      math_500: 92.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwopus3.6-27B-Coder:
+    aliases:
+      - Jackrong/Qwopus3.6-27B-Coder
+      - qwopus3.6-27b-coder
+      - qwopus3_6_27b_coder
+    metrics:
+      mmlu: 90.0
+      math_500: 97.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3.5-27B-Derestricted:
+    aliases:
+      - ArliAI/Qwen3.5-27B-Derestricted
+      - qwen3.5-27b-derestricted
+      - qwen3_5_27b_derestricted
+    metrics:
+      mmlu: 89.98
+      math_500: 84.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-28B-Opus:
+    aliases:
+      - FINAL-Bench/Darwin-28B-Opus
+      - darwin-28b-opus
+      - darwin_28b_opus
+    metrics:
+      mmlu: 86.14
+      math_500: 91.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Darwin-28B-Coder:
+    aliases:
+      - FINAL-Bench/Darwin-28B-Coder
+      - darwin-28b-coder
+      - darwin_28b_coder
+    metrics:
+      mmlu: 85.25
+      math_500: 90.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  iFlow-ROME:
+    aliases:
+      - FutureLivingLab/iFlow-ROME
+      - iflow-rome
+      - iflow_rome
+    metrics:
+      mmlu: 81.95
+      math_500: 81.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  AReaL-boba-2-32B:
+    aliases:
+      - inclusionAI/AReaL-boba-2-32B
+      - areal-boba-2-32b
+      - areal_boba_2_32b
+    metrics:
+      mmlu: 88.95
+      math_500: 96.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenReasoning-Nemotron-32B:
+    aliases:
+      - nvidia/OpenReasoning-Nemotron-32B
+      - openreasoning-nemotron-32b
+      - openreasoning_nemotron_32b
+    metrics:
+      mmlu: 88.35
+      math_500: 96.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker2-32B:
+    aliases:
+      - open-thoughts/OpenThinker2-32B
+      - openthinker2-32b
+      - openthinker2_32b
+    metrics:
+      mmlu: 88.09
+      math_500: 95.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenThinker-32B:
+    aliases:
+      - open-thoughts/OpenThinker-32B
+      - openthinker-32b
+      - openthinker_32b
+    metrics:
+      mmlu: 87.9
+      math_500: 94.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OpenCodeReasoning-Nemotron-32B:
+    aliases:
+      - nvidia/OpenCodeReasoning-Nemotron-32B
+      - opencodereasoning-nemotron-32b
+      - opencodereasoning_nemotron_32b
+    metrics:
+      mmlu: 87.25
+      math_500: 90.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Bespoke-Stratos-32B:
+    aliases:
+      - bespokelabs/Bespoke-Stratos-32B
+      - bespoke-stratos-32b
+      - bespoke_stratos_32b
+    metrics:
+      mmlu: 86.96
+      math_500: 90.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Light-R1-32B:
+    aliases:
+      - qihoo360/Light-R1-32B
+      - light-r1-32b
+      - light_r1_32b
+    metrics:
+      mmlu: 86.17
+      math_500: 94.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Olmo-3.1-32B-Think:
+    aliases:
+      - allenai/Olmo-3.1-32B-Think
+      - olmo-3.1-32b-think
+      - olmo_3_1_32b_think
+    metrics:
+      mmlu: 85.72
+      math_500: 95.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Sky-T1-32B-Flash:
+    aliases:
+      - NovaSky-AI/Sky-T1-32B-Flash
+      - sky-t1-32b-flash
+      - sky_t1_32b_flash
+    metrics:
+      mmlu: 85.68
+      math_500: 87.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  FluentlyQwen2.5-32B:
+    aliases:
+      - fluently/FluentlyQwen2.5-32B
+      - fluentlyqwen2.5-32b
+      - fluentlyqwen2_5_32b
+    metrics:
+      mmlu: 85.49
+      math_500: 82.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Olmo-3.1-32B-Instruct:
+    aliases:
+      - allenai/Olmo-3.1-32B-Instruct
+      - olmo-3.1-32b-instruct
+      - olmo_3_1_32b_instruct
+    metrics:
+      mmlu: 83.33
+      math_500: 94.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OREAL-32B:
+    aliases:
+      - internlm/OREAL-32B
+      - oreal-32b
+      - oreal_32b
+    metrics:
+      mmlu: 83.21
+      math_500: 93.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  IndustrialCoder:
+    aliases:
+      - Multilingual-Multimodal-NLP/IndustrialCoder
+      - industrialcoder
+    metrics:
+      mmlu: 79.47
+      math_500: 76.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  OLMo-2-0325-32B-Instruct:
+    aliases:
+      - allenai/OLMo-2-0325-32B-Instruct
+      - olmo-2-0325-32b-instruct
+      - olmo_2_0325_32b_instruct
+    metrics:
+      mmlu: 77.02
+      math_500: 56.0
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  s1.1-32B:
+    aliases:
+      - simplescaling/s1.1-32B
+      - s1.1-32b
+      - s1_1_32b
+    metrics:
+      mmlu: 60.68
+      math_500: 93.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  T-pro-it-2.1:
+    aliases:
+      - t-tech/T-pro-it-2.1
+      - t-pro-it-2.1
+      - t_pro_it_2_1
+    metrics:
+      mmlu: 87.77
+      math_500: 93.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  A.X-3.1:
+    aliases:
+      - skt/A.X-3.1
+      - a.x-3.1
+      - a_x_3_1
+    metrics:
+      mmlu: 74.89
+      math_500: 83.4
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Qwen3.6-35B-A3B-Kimi-K2.6-Reasoning-Distilled:
+    aliases:
+      - lordx64/Qwen3.6-35B-A3B-Kimi-K2.6-Reasoning-Distilled
+      - qwen3.6-35b-a3b-kimi-k2.6-reasoning-distilled
+      - qwen3_6_35b_a3b_kimi_k2_6_reasoning_distilled
+    metrics:
+      mmlu: 91.0
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Apodex-1.0-mini:
+    aliases:
+      - apodex/Apodex-1.0-mini
+      - apodex-1.0-mini
+      - apodex_1_0_mini
+    metrics:
+      mmlu: 90.48
+      math_500: 97.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Nemotron-H-47B-Reasoning-128K:
+    aliases:
+      - nvidia/Nemotron-H-47B-Reasoning-128K
+      - nemotron-h-47b-reasoning-128k
+      - nemotron_h_47b_reasoning_128k
+    metrics:
+      mmlu: 86.37
+      math_500: 84.6
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  Dobby-Unhinged-Llama-3.3-70B:
+    aliases:
+      - SentientAGI/Dobby-Unhinged-Llama-3.3-70B
+      - dobby-unhinged-llama-3.3-70b
+      - dobby_unhinged_llama_3_3_70b
+    metrics:
+      mmlu: 84.68
+      math_500: 74.2
+    source: "NV 实测"
+    updated_at: "2026-08-12"
+
+  DeepSeek-llama3.3-Bllossom-70B:
+    aliases:
+      - UNIVA-Bllossom/DeepSeek-llama3.3-Bllossom-70B
+      - deepseek-llama3.3-bllossom-70b
+      - deepseek_llama3_3_bllossom_70b
+    metrics:
+      mmlu: 84.53
+      math_500: 92.8
+    source: "NV 实测"
+    updated_at: "2026-08-12"
