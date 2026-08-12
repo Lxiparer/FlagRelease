@@ -150,13 +150,15 @@ aggregate_model_report() {
         return 0
     fi
     mkdir -p "${BATCH_REPORTS_DIR}" 2>/dev/null || true
-    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）
+    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）。
+    # 厂商取规范英文名首字母大写（nvidia → Nvidia，huawei → Ascend），与报告展示一致
     local base
     base=$(python3 -c "
-import yaml, sys, re
+import yaml, sys, re, os
 from datetime import datetime
 ctx_path = sys.argv[1]
 model = sys.argv[2]
+shared_dir = sys.argv[3] if len(sys.argv) > 3 else ''
 vendor = 'unknown'; name = model.rsplit('/',1)[-1]; ts = ''
 try:
     with open(ctx_path) as f:
@@ -169,13 +171,20 @@ try:
         img = release.get(f'{vk}_harbor_image','') or vc.get('image_url','') or vc.get('harbor_image','') or vc.get('image','')
         m = re.search(r':(\d{12})', img or '')
         if m: ts = m.group(1); break
+    if shared_dir and vendor != 'unknown':
+        sys.path.insert(0, shared_dir)
+        try:
+            import chip_spec
+            vendor = chip_spec.vendor_en(vendor) or vendor
+        except Exception:
+            vendor = vendor.capitalize()
 except Exception:
     pass
 if not ts:
     ts = datetime.now().strftime('%Y%m%d%H%M')
 raw = f'{vendor}_{name}_{ts}'
 print(re.sub(r'[^\w.\-]', '_', raw))
-" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" 2>/dev/null)
+" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" "${PROJECT_ROOT}/shared" 2>/dev/null)
     [ -z "$base" ] && base=$(echo "${model}" | sed 's#/#_#g')
     local copied=0
     if [ -f "$src_md" ]; then
