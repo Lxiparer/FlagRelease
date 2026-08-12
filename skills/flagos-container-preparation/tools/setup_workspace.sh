@@ -239,7 +239,7 @@ SCRIPT_MAP=(
     "skills/flagos-performance-testing/tools/benchmark_runner.py:scripts/benchmark_runner.py"
     # 性能对比
     "skills/flagos-performance-testing/tools/performance_compare.py:scripts/performance_compare.py"
-    # 无 V1 场景性能基线合成（V2 初始 ×1.2）
+    # 无 V1 场景性能基线合成（V2 初始 ×1.05）
     "skills/flagos-performance-testing/tools/synthesize_perf_baseline.py:scripts/synthesize_perf_baseline.py"
     # 算子优化
     "skills/flagos-operator-replacement/tools/operator_optimizer.py:scripts/operator_optimizer.py"
@@ -274,6 +274,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/persist_tuning_checkpoint.py:scripts/persist_tuning_checkpoint.py"
     # 远端评测监控
     "skills/flagos-eval-comprehensive/tools/eval_monitor.py:scripts/eval_monitor.py"
+    # 长任务执行器（长任务执行协议：detached 启动 + 状态文件 + 超时管理 + 断点恢复）
+    "skills/flagos-eval-comprehensive/tools/task_runner.py:scripts/task_runner.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # Plugin 安装
@@ -364,7 +366,7 @@ fi
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     ${PY_BIN_DIR}:\$PATH python3 -c 'import yaml' 2>/dev/null || ${PY_BIN_DIR}:\$PATH pip install pyyaml -q 2>/dev/null || true
-    ${PY_BIN_DIR}:\$PATH python3 -c 'import evalscope' 2>/dev/null || ${PY_BIN_DIR}:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
+    ${PY_BIN_DIR}:\$PATH python3 -c 'import evalscope' 2>/dev/null || ${PY_BIN_DIR}:\$PATH pip install 'evalscope==1.5.1' pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
@@ -398,7 +400,7 @@ fi
 
 # 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
 echo "[4.6/6] 预装评测依赖..."
-docker exec "${CONTAINER}" bash -c "${PY_BIN_DIR}:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
+docker exec "${CONTAINER}" bash -c "${PY_BIN_DIR}:\$PATH pip install 'evalscope==1.5.1' pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
     echo "  ✓ 评测依赖预装完成" || \
     echo "  ⚠ 评测依赖安装失败（非致命，评测阶段会重试）"
 

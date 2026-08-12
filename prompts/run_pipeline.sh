@@ -2,10 +2,11 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
+# 数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
@@ -61,6 +62,7 @@ IMAGE_MODE=false
 MODEL_PATH=""
 FILTER_FLAGS=""
 PROXY_LIST=""
+DATASETS_CSV="gpqa_diamond"   # 精度评测数据集（逗号分隔，默认 gpqa_diamond）
 
 if [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
@@ -99,14 +101,15 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
+        echo "数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
         echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --proxy http://10.1.12.192:80"
-        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B --datasets mmlu,math_500"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
     fi
@@ -135,6 +138,14 @@ else
                 MODEL_PATH="$2"
                 shift 2
                 ;;
+            --datasets)
+                if [ -z "${2:-}" ]; then
+                    echo "错误: --datasets 需要指定数据集（逗号分隔，可选 gpqa_diamond/mmlu/math_500）"
+                    exit 1
+                fi
+                DATASETS_CSV="$2"
+                shift 2
+                ;;
             *)
                 echo "警告: 未知参数 '$1'，已忽略"
                 shift
@@ -160,6 +171,32 @@ if [ -z "$MODEL" ]; then
     echo "错误: 模型名为空，请检查输入参数（可能是分隔符使用了全角字符）"
     exit 1
 fi
+
+# ========== 数据集参数派生 ==========
+# DATASETS_CSV: 逗号分隔（如 "gpqa_diamond,mmlu"）→ DATASET_LIST 空格分隔 / PRIMARY_DATASET 首个
+DATASET_LIST=$(echo "$DATASETS_CSV" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+if [ -z "$DATASET_LIST" ]; then
+    echo "错误: --datasets 为空，请指定至少一个数据集（gpqa_diamond/mmlu/math_500）"
+    exit 1
+fi
+for _ds in $DATASET_LIST; do
+    case "$_ds" in
+        gpqa_diamond|mmlu|math_500) ;;
+        *)
+            echo "错误: 未知数据集 '$_ds'（可选: gpqa_diamond/mmlu/math_500）"
+            exit 1
+            ;;
+    esac
+done
+PRIMARY_DATASET=$(echo "$DATASET_LIST" | awk '{print $1}')
+DATASET_COUNT=$(echo "$DATASET_LIST" | wc -w)
+# 数据集 → 结果文件前缀：gpqa_diamond 沿用历史短名 gpqa（gpqa_native.json 等），
+# 兼容 generate_report.py / upload_to_platform.py 等硬编码下游（零改动前提）；
+# 反向映射用于从文件名派生 --dataset 参数
+ds_prefix() { case "$1" in gpqa_diamond) echo "gpqa";; *) echo "$1";; esac; }
+ds_from_prefix() { case "$1" in gpqa) echo "gpqa_diamond";; *) echo "$1";; esac; }
+PRIMARY_PREFIX=$(ds_prefix "${PRIMARY_DATASET}")
+echo "[pre-flight] 精度评测数据集: ${DATASETS_CSV}（主数据集: ${PRIMARY_DATASET}，文件前缀: ${PRIMARY_PREFIX}）"
 
 # ========== 镜像模式：自动搜索宿主机模型路径 ==========
 if $IMAGE_MODE && [ -z "$MODEL_PATH" ]; then
@@ -275,6 +312,8 @@ COMMON_TOKENS=$(cat <<TOKENS_EOF
   Claude 进程的环境变量，宿主机直接执行的 python3 命令【禁止添加 env VAR=...、
   ${PY_BIN_DIR}/python3、nohup 等前缀】，直接按标准形态执行即可：
     python3 skills/flagos-release/tools/main.py --from-context ...
+  长任务（发布等）按长任务执行协议 detached 启动：python3 ... task_runner.py ... &
+  （& 后台符后的 task_runner 继承本进程环境变量，凭证照常可用；禁止 nohup/disown）
   （仅容器内命令才需要 docker exec -e 传凭证，见下）
 
 **容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
@@ -396,14 +435,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 5760 秒 = 1.6 小时），必须使用 Bash(timeout=5820000) 前台执行（5820000 毫秒 = 97 分钟，覆盖脚本上限 + 60s 余量）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。5760 秒 = 5760000 毫秒。设置过小会导致命令被转为后台任务（部分模型服务启动需 1.5 小时以上，故上限设为 1.6h）
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -468,14 +513,20 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
-**步骤3 服务等待策略（硬性）**：
-- wait_for_service.sh 是阻塞脚本（最长运行 5760 秒 = 1.6 小时），必须使用 Bash(timeout=5820000) 前台执行（5820000 毫秒 = 97 分钟，覆盖脚本上限 + 60s 余量）
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志检查状态
-- 脚本内部已实现日志监控、进度输出、早期失败检测，无需外部干预
-- 正确用法（一条命令，前台阻塞等待）：
-  docker exec \${CONTAINER} bash -c \"/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default\"
-- 脚本退出码 0 = 服务就绪，非 0 = 失败（输出 JSON_RESULT 包含错误详情）
-- **注意**：Bash 工具的 timeout 参数单位是毫秒，不是秒。5760 秒 = 5760000 毫秒。设置过小会导致命令被转为后台任务（部分模型服务启动需 1.5 小时以上，故上限设为 1.6h）
+**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
+/flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 服务就绪（日志含 JSON_RESULT），继续后续步骤
+   - status=error/timeout → 读日志按崩溃诊断规则处理（脚本退出码 0=就绪，非 0=失败）
+启动前检查 /flagos-workspace/logs/tasks/startup_default.state：若存在且 status=running，说明上一会话已启动等待任务——直接接管轮询，**禁止重复启动任务**。
 
 **步骤3 FlagGems 启动崩溃算子诊断**：
 - FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
@@ -714,8 +765,14 @@ archive_eval_details_on_exit() {
     [ -z "${ctr}" ] && return 0
     docker inspect --type=container "${ctr}" &>/dev/null || return 0
 
-    # 评测 CWD 为 /flagos-workspace/scripts，evalscope 输出落在 scripts/outputs/gpqa_diamond/
-    local src="/flagos-workspace/scripts/outputs/gpqa_diamond"
+    # 评测 CWD 为 /flagos-workspace/scripts，evalscope 输出按数据集落在 scripts/outputs/{dataset}/
+    local src=""
+    for _ds in ${DATASET_LIST:-gpqa_diamond}; do
+        if docker exec "${ctr}" test -d "/flagos-workspace/scripts/outputs/${_ds}" 2>/dev/null; then
+            src="${src} /flagos-workspace/scripts/outputs/${_ds}"
+        fi
+    done
+    [ -z "${src}" ] && return 0
     docker exec "${ctr}" test -d "${src}" 2>/dev/null || return 0
 
     local dest="/data/flagos-workspace/_eval_details/${MODEL}"
@@ -724,7 +781,13 @@ archive_eval_details_on_exit() {
     echo ""
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [EXIT] 归档评测明细 (predictions/reviews) → ${dest}/"
     # 整目录汇聚：含各轮 (V1/V2/V3) 的 predictions/reviews/reports/configs，按 timestamp 天然分隔
-    if docker cp "${ctr}:${src}/." "${dest}/" 2>/dev/null; then
+    local _arch_ok=0
+    for _ds_dir in ${src}; do
+        if docker cp "${ctr}:${_ds_dir}/." "${dest}/" 2>/dev/null; then
+            _arch_ok=1
+        fi
+    done
+    if [ "${_arch_ok}" = "1" ]; then
         local n_pred n_rev
         n_pred=$(find "${dest}" -type d -name predictions 2>/dev/null | wc -l)
         n_rev=$(find "${dest}" -type d -name reviews 2>/dev/null | wc -l)
@@ -1270,6 +1333,90 @@ case "${PIPELINE_BRANCH}" in
         BRANCH_DIRECTIVE=""
         ;;
 esac
+
+# ===== 评测时间预算计算（2026-08-10）：解决 thinking 模型评测必超时问题 =====
+# 背景：thinking 模型（QwQ/DeepSeek-R1 等）正常评测 7-10h，原 max-timeout 写死
+# 7200s(2h) 必然超时 → 评测反复失败 → agent 自发跳过评测 → 数据缺失。
+# 公式：max_timeout = 题数 × 单题预算 × 1.25 缓冲
+#   thinking：单题 600s（慢速芯片思考链实测上界 12min），默认 30 题（时长分级；
+#             fast_gpqa 按序取前 N 题，V1/V2 同样本，精度判据不受影响；
+#             30 题样本下 noise_zone 容忍绝对差异 ≤2 题判达标）
+#   普通：     单题 60s，默认 50 题，固定 7200s（50×60×1.25=3750 < 7200，
+#             clamp 上界生效 → 与改动前的 2h 语义完全一致，零回归）
+# clamp：thinking [7200, 43200]，普通固定 7200
+# 安全网：max_timeout 调大不会让 runaway 无限拖——fast_gpqa max_tokens cap（防线1）
+# 锁死复读生成窗口；eval_wrapper 进度看门狗（防线3）收尾停滞照杀。生成中停滞只
+# 提示不杀（慢≠死），所以给足预算不会误杀正常长推理。
+# 函数化：启动时调用一次供 PROMPT 注入（snapshot 尚不存在，走模型名模式匹配）；
+# 段1结束后兜底函数再调用一次（snapshot 已同步，runtime.thinking_model 生效）。
+compute_eval_budget() {
+    THINKING_PATTERNS="qwen3|qwq|deepseek-r1|deepseek-r2|mimo|hunyuan"
+    IS_THINKING=$(python3 -c "
+import re, yaml
+mn = '${MODEL}'.lower()
+rt = False
+try:
+    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+        rt = bool(yaml.safe_load(f).get('runtime', {}).get('thinking_model', False))
+except Exception:
+    pass
+print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
+" 2>/dev/null || echo "false")
+    # 数据集→评测预算（2026-08-12 定稿，约束：国产慢 10 倍时每数据集单轮评测 ≤1h）：
+    #   gpqa_diamond: 单题 60s（thinking 600s），默认 50 题（thinking 30）
+    #                 → 7200s（thinking 22500s），仅单数据集时显式传 --limit
+    #   mmlu:         默认 100/子集 = 5700 题（不传 --limit），实测 16 并发 ~7min，
+    #                 慢 10 倍 46min → EVAL_MAX_TO 21600s（6h 上限缓冲，不误杀）
+    #   math_500:     默认 500 题全量（不传 --limit），实测 16 并发 ~3.2min，
+    #                 慢 10 倍 32min → EVAL_MAX_TO 7200s
+    # 多数据集：EVAL_MAX_TO 取各数据集最大值；--limit 全局语义（fast_gpqa 不支持
+    # per-dataset limit）→ 多数据集一律不传 --limit（各数据集用默认题数）
+    EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500 及多数据集用各数据集默认题数）
+    EVAL_MAX_TO=7200
+    for _ds in ${DATASET_LIST}; do
+        case "${_ds}" in
+            gpqa_diamond)
+                if [ "${IS_THINKING}" = "true" ]; then
+                    _ds_max=$(( 30 * 600 * 125 / 100 ))   # 22500s ≈ 6.3h
+                    [ "${_ds_max}" -lt 7200 ] && _ds_max=7200
+                    [ "${_ds_max}" -gt 43200 ] && _ds_max=43200
+                    [ "${DATASET_COUNT}" -eq 1 ] && EVAL_LIMIT=30
+                else
+                    _ds_max=7200
+                    [ "${DATASET_COUNT}" -eq 1 ] && EVAL_LIMIT=50
+                fi
+                ;;
+            mmlu)
+                _ds_max=21600   # 慢 10 倍 46min + 缓冲
+                ;;
+            math_500)
+                _ds_max=7200    # 慢 10 倍 32min + 缓冲
+                ;;
+        esac
+        [ "${_ds_max}" -gt "${EVAL_MAX_TO}" ] && EVAL_MAX_TO="${_ds_max}"
+    done
+    if [ -n "${EVAL_LIMIT}" ]; then
+        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：${EVAL_LIMIT} 题 × 单题 $([ "${IS_THINKING}" = "true" ] && echo 600s || echo 60s) × 1.25 缓冲 = ${EVAL_MAX_TO}s（约 $(( EVAL_MAX_TO / 3600 ))h）。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**；超时按评测等待策略重试规则处理，GPU 调度由编排层负责。**V1 与 V2 必须使用相同参数：均加 --limit ${EVAL_LIMIT}**（同样本可对比，不得一方 50 题一方 30 题）。"
+    else
+        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：max_timeout=${EVAL_MAX_TO}s。mmlu 默认 5700 题（每子集 100）、math_500 默认 500 题全量、gpqa_diamond 默认 50 题（thinking 30）——评测命令**不传 --limit**（fast_gpqa 按数据集默认题数）。实测基准（AceInstruct-1.5B @16 并发）：mmlu ~7min、math_500 ~3min；国产慢 10 倍时 46min/32min 均在 1h 内。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**。"
+    fi
+    # EVAL_BASH_MS 概念已废弃（2026-08 长任务执行协议）：Bash 工具 10 分钟硬上限使
+    # 超大 timeout 无效，长任务统一走 task_runner.py detached 启动 + 状态文件 + 短轮询
+}
+compute_eval_budget
+
+# 构建每数据集评测任务规格（供 PROMPT_SEG2 引用；--limit 仅 gpqa_diamond 单数据集时附加，
+# mmlu/math_500 及多数据集一律不传 --limit，fast_gpqa.py 按数据集默认题数评测）
+# 文件命名用前缀（gpqa_diamond → gpqa_native.json，与历史一致；mmlu/math_500 → mmlu_/math_500_）
+DATASET_EVAL_SPEC=""
+for _ds in ${DATASET_LIST}; do
+    _PREF=$(ds_prefix "${_ds}")
+    _LIMIT_ARGS=""
+    [ "${_ds}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+    DATASET_EVAL_SPEC="${DATASET_EVAL_SPEC}
+- **${_ds}**：V1 输出 /flagos-workspace/results/${_PREF}_native.json，V2 输出 /flagos-workspace/results/${_PREF}_flagos.json；任务文件 eval_v1_${_PREF}.cmd / eval_v2_${_PREF}.cmd（state/log 同命名）；评测命令：python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${_ds} ${_LIMIT_ARGS}--output <输出路径>；判定：accuracy_compare.py --v1 <V1结果> --v2 <V2结果> --metric ${_ds} --output /flagos-workspace/results/accuracy_compare_${_PREF}.json"
+done
+
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}，pipeline分支: ${PIPELINE_BRANCH:-未定}
 
 ${BRANCH_DIRECTIVE}
@@ -1293,7 +1440,7 @@ ${SEG2_CTX_SUMMARY}
   docker exec \${CONTAINER} bash -c \"PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --ledger-update 04_quick_accuracy --ledger-status success --ledger-notes '...'\"
 
 **步骤编号（严格遵守，输出 [步骤X] 时必须使用以下编号）**：
-- [步骤4] 精度评测（GPQA Diamond）
+- [步骤4] 精度评测（数据集: ${DATASETS_CSV}）
 - [步骤5] 精度算子调优（条件触发：accuracy_ok=false 时执行）
 - [步骤6] 性能评测（benchmark）
 - [步骤7] 性能算子调优（条件触发：performance_ok=false 时执行）
@@ -1337,21 +1484,36 @@ ${SEG2_CTX_SUMMARY}
     --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
     --max-rounds 2\"
 - operator_search.py 已封装 next→配置→重启→benchmark→update 全流程，含 GPU 显存释放验证和可用性前置检查
-- 步骤5精度算子调优：通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮用 cumulative_test_env.env_inline（SGLANG_FL_*）作启动命令内联前缀重启 + fast_gpqa.py 评测；轮次上限=分组数（绝对上限 8）
+- 步骤5精度算子调优：**按不达标数据集逐个进行**（每轮只针对一个数据集：该数据集 V1/V2 判定 rel_drop >5% 才调优，调优评测用 --dataset <该数据集> 与判定同参；多数据集时先列全部数据集判定结果，取不达标者按上述规则逐个调优，已达标数据集不重复评测）。通过 diagnose_ops.py accuracy-groups 获取分组和累积配置，每轮用 cumulative_test_env.env_inline（SGLANG_FL_*）作启动命令内联前缀重启 + fast_gpqa.py 评测（--dataset <该数据集> 与判定同参）；轮次上限=分组数（绝对上限 8）。**全部数据集达标才设 workflow.accuracy_ok=true**（update_context.py 会校验全部 accuracy_compare_{dataset}.json）
 
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
-**评测等待策略（硬性）**：
-- 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py）：
-  python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 7200
-- eval_wrapper.py 会阻塞直到评测完成或异常退出，无需轮询
-- 使用 Bash(timeout=7260000) 前台执行 eval_wrapper.py，不要用后台任务（Bash timeout 单位毫秒，7260000ms = 121 分钟，覆盖脚本 --max-timeout 7200s/2h + 60s 余量）
-- 退出码 0 = 成功（最后一行 [RESULT_JSON] 为结果），非 0 = 异常（[EVAL_ERROR] 为错误摘要）
-- 异常时根据 error type 决定处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
-- 禁止使用 TaskOutput 轮询，禁止每隔 N 秒检查评测状态
+${EVAL_BUDGET_NOTE}
+**评测等待策略（长任务执行协议 — 硬性）**：
+Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——**禁止**用 Bash(timeout=大数) 前台阻塞等待评测，**禁止** TaskOutput 轮询（转后台后轮询会全量重发上下文烧 token）。按三步执行：
+1. 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），**每个数据集独立任务**（本流程数据集: ${DATASETS_CSV}，共 ${DATASET_COUNT} 个），先写任务命令文件 eval_v1_{prefix}.cmd / eval_v2_{prefix}.cmd（prefix 见下方数据集任务规格表，gpqa_diamond 用历史短名 gpqa），以 ${PRIMARY_DATASET}（前缀 ${PRIMARY_PREFIX}）的 V2 为例：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
+CMD_EOF\"
+   （mmlu/math_500 及多数据集不传 --limit，fast_gpqa 按数据集默认题数；gpqa_diamond 单数据集时 eval-cmd 加 --limit ${EVAL_LIMIT}，V1/V2 必须相同——见下方数据集任务规格表）
+2. detached 启动（每条任务独立启动，一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd' --state /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state --log /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log --timeout ${EVAL_MAX_TO}\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 评测成功（日志最后一行 [RESULT_JSON] 为结果），读取结果文件继续
+   - status=error → 读日志按 error type 处理：service_crash/service_exited → 重启服务后重试；stall/timeout → 检查日志后重试；eval_failed → 检查错误信息
+   - status=timeout → 超过 --max-timeout 总闸，读日志诊断
+- 启动前检查 /flagos-workspace/logs/tasks/eval_v2_{dataset}.state：若存在且 status=running，说明上一会话已启动评测（会话被杀任务继续跑）——**直接接管轮询，禁止重复启动评测**；status=done/error 则按终态直接处理
+- **评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过、放弃或截断评测**；预算上限已按题数×单题时间×1.25 缓冲计算，预算内完成即为正常
 - **禁止**直接 import evalscope 或内联编写评测代码，必须通过 eval_wrapper.py 执行
 - eval_wrapper.py 自动从 context.yaml 获取端口和模型名，无需手动指定 --model-name 或 --api-base
-- V1 结果路径: /flagos-workspace/results/gpqa_native.json，V2 结果路径: /flagos-workspace/results/gpqa_flagos.json
+**数据集任务规格表（每个数据集独立评测、独立判定，全部达标才 accuracy_ok=true）**：
+${DATASET_EVAL_SPEC}
+- **V1/V2 参数必须完全相同**（同一 --dataset；mmlu/math_500 不传 --limit 用数据集默认题数：mmlu 100/子集=5700 题、math_500 全量 500 题）
+- **判定**：每数据集 accuracy_compare.py --v1 .../{dataset}_native.json --v2 .../{dataset}_flagos.json --metric {dataset} --output .../accuracy_compare_{dataset}.json（本地 V1 基线模式 --metric 不影响判据，仅报告标题）；rel_drop >5% 的数据集记录到 logs/issues_accuracy.log 并触发步骤5调优（按不达标数据集逐个进行，每轮只针对一个数据集）；update_context.py 写入 accuracy_ok=true 前会自动校验**全部** accuracy_compare_{dataset}.json 均 aligned，缺失或任一不达标则拒绝
+- nv_baseline.yaml 需已收录该模型对应数据集指标（用户补充，结构已支持多指标）；缺失时以本地 V1 为基线
 
 **Issue 强制规则**（达到条件必须生成 issue 文件）：
 GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
@@ -1393,7 +1555,7 @@ GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 - 推荐使用 safe_restart_service.sh 一条命令完成重启（自动 restart + start + wait）
 - 禁止在不 restart 容器的情况下启动新的 vLLM 服务（旧进程会占用端口导致启动失败）
 - wait_for_service.sh 检测到残留服务会 exit 2 并提示需要 docker restart
-- **wait_for_service.sh 等待策略**：使用 Bash(timeout=5820000) 前台执行，禁止 TaskOutput 轮询。Bash timeout 单位是毫秒，5820000ms = 97 分钟（覆盖脚本上限 5760s/1.6h + 60s 余量）"
+- **wait_for_service.sh 等待策略**：按上方「长任务执行协议」三步执行（写 startup_default.cmd → docker exec -d 启动 task_runner.py → sleep 480 短轮询 state），**禁止** Bash(timeout=大数) 前台阻塞或 TaskOutput 轮询"
 
 # native 场景追加硬性约束：只执行步骤4/6，跳过5/7
 if [ "${IS_NATIVE}" = "true" ]; then
@@ -1512,6 +1674,11 @@ fi
 run_eval_if_missing() {
     local OUTPUT_FILE="$1"
     local SEG2_START="$2"
+    # 从输出文件名派生数据集（{prefix}_native.json / {prefix}_flagos.json；
+    # 前缀 gpqa 反向映射回 dataset gpqa_diamond，其余前缀即 dataset 名）
+    local DS_NAME DS_PREF
+    DS_PREF=$(echo "${OUTPUT_FILE}" | sed 's/_native\.json$//;s/_flagos\.json$//')
+    DS_NAME=$(ds_from_prefix "${DS_PREF}")
 
     EVAL_STATUS=$(docker exec "${SEG_CTR}" bash -c "
         PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
@@ -1559,38 +1726,22 @@ with open('/flagos-workspace/shared/context.yaml') as f:
     fi
 
     # 直接执行 eval_wrapper.py
-    # Thinking model 需要更长超时（输出 token 多 5-10x）
-    local STALL_TO=300
-    local MAX_TO=7200
-    IS_THINKING_MODEL=$(python3 -c "
-import yaml
-try:
-    with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
-        ctx = yaml.safe_load(f)
-    rt = ctx.get('runtime', {})
-    mn = ctx.get('model', {}).get('name', '').lower()
-    thinking_patterns = ['qwen3', 'qwq', 'deepseek-r1', 'deepseek-r2', 'mimo', 'hunyuan']
-    if rt.get('thinking_model') or any(p in mn for p in thinking_patterns):
-        print('true')
-    else:
-        print('false')
-except:
-    print('false')
-" 2>/dev/null) || IS_THINKING_MODEL="false"
-    if [ "${IS_THINKING_MODEL}" = "true" ]; then
-        STALL_TO=600
-        MAX_TO=7200
-        echo "  [thinking model] 使用加长超时: stall=${STALL_TO}s, max=${MAX_TO}s"
-    fi
+    # 超时预算复用顶部 compute_eval_budget（此刻 snapshot 已同步，runtime.thinking_model 生效；
+    # thinking 模型 30 题 × 600s × 1.25 = 22500s，普通 50 题 × 60s × 1.25 = 7200s 封顶）
+    compute_eval_budget
+    echo "  [${IS_THINKING}] 评测预算: limit=${EVAL_LIMIT}, max_timeout=${EVAL_MAX_TO}s"
 
     echo "  ▶ docker exec ${SEG_CTR} ... eval_wrapper.py --output ${OUTPUT_FILE}"
+    # --limit 仅 gpqa_diamond 单数据集时附加（EVAL_LIMIT 非空即成立），mmlu/math_500 用数据集默认题数
+    local _LIMIT_ARGS=""
+    [ "${DS_NAME}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
     docker exec "${SEG_CTR}" bash -c "
         cd /flagos-workspace/scripts && \
         PATH=${PY_BIN_DIR}:\$PATH python3 eval_wrapper.py \
-            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --output /flagos-workspace/results/${OUTPUT_FILE}' \
+            --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${DS_NAME} ${_LIMIT_ARGS}--output /flagos-workspace/results/${OUTPUT_FILE}' \
             --context-yaml /flagos-workspace/shared/context.yaml \
             --service-log \$(ls -t /flagos-workspace/logs/startup_*.log 2>/dev/null | head -1) \
-            --stall-timeout ${STALL_TO} --max-timeout ${MAX_TO}
+            --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
     "
     return $?
 }
@@ -1616,8 +1767,10 @@ is_flaggems_service() {
 
 # 尝试直接执行精度评测（如果 Claude 未正确产出结果）
 if docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
-    # V1 (native) 精度兜底：当前服务能测即测
-    run_eval_if_missing "gpqa_native.json" "${SEG2_START_ISO}" || true
+    # V1 (native) 精度兜底：当前服务能测即测（每个数据集独立任务，文件名用前缀）
+    for _ds in ${DATASET_LIST}; do
+        run_eval_if_missing "$(ds_prefix "${_ds}")_native.json" "${SEG2_START_ISO}" || true
+    done
 
     # V2 (FlagGems) 精度兜底：仅当当前服务确为 FlagGems 模式且存活时直接测；
     # 否则不硬测（避免拿 native/错误配置服务测出污染的 V2 分数），交由后续段2 retry
@@ -1626,12 +1779,14 @@ if docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
     if [ "${SEG_ENV}" = "native" ]; then
         V2_EVAL_STATE="SKIP_NATIVE"
     else
-        V2_EVAL_STATE=$(docker exec "${SEG_CTR}" bash -c "
-        PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
+        for _ds in ${DATASET_LIST}; do
+            _PREF=$(ds_prefix "${_ds}")
+            V2_EVAL_STATE=$(docker exec "${SEG_CTR}" bash -c "
+            PATH=${PY_BIN_DIR}:\$PATH python3 -c \"
 import json
 from datetime import datetime
 try:
-    with open('/flagos-workspace/results/gpqa_flagos.json') as f:
+    with open('/flagos-workspace/results/${_PREF}_flagos.json') as f:
         d = json.load(f)
     if d.get('_producer') != 'fast_gpqa.py' or d.get('score') is None:
         print('INVALID')
@@ -1644,17 +1799,16 @@ except FileNotFoundError:
 except Exception:
     print('INVALID')
 \"" 2>/dev/null) || V2_EVAL_STATE="ERROR"
-    fi
 
-    if [ "${V2_EVAL_STATE}" = "SKIP_NATIVE" ]; then
-        :  # native 场景无 V2，静默跳过
-    elif [ "${V2_EVAL_STATE}" = "OK" ]; then
-        echo "  ✓ gpqa_flagos.json (V2) 评测结果有效"
-    elif [ "$(is_flaggems_service)" = "yes" ]; then
-        echo "  ⚠ gpqa_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，当前为 FlagGems 服务，直接兜底评测..."
-        run_eval_if_missing "gpqa_flagos.json" "${SEG2_START_ISO}" || true
-    else
-        echo "  ⚠ gpqa_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，但当前非 FlagGems 服务，不硬测（防污染），交由段2 retry 由 Claude 正确切换服务后重测"
+            if [ "${V2_EVAL_STATE}" = "OK" ]; then
+                echo "  ✓ ${_PREF}_flagos.json (V2) 评测结果有效"
+            elif [ "$(is_flaggems_service)" = "yes" ]; then
+                echo "  ⚠ ${_PREF}_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，当前为 FlagGems 服务，直接兜底评测..."
+                run_eval_if_missing "${_PREF}_flagos.json" "${SEG2_START_ISO}" || true
+            else
+                echo "  ⚠ ${_PREF}_flagos.json (V2) 结果无效 (${V2_EVAL_STATE})，但当前非 FlagGems 服务，不硬测（防污染），交由段2 retry 由 Claude 正确切换服务后重测"
+            fi
+        done
     fi
 fi
 
@@ -1681,19 +1835,19 @@ if [ "$SEG2_STATUS" != "complete" ] || [ "$SEG2_PERF_STATUS" != "complete" ]; th
 import json, sys
 from datetime import datetime
 seg2_start = datetime.fromisoformat('${SEG2_START_UTC}')
-# 检查 V1
+# 检查 V1（主数据集 ${PRIMARY_DATASET}，文件前缀 ${PRIMARY_PREFIX}）
 v1_score = None
 try:
-    with open('/flagos-workspace/results/gpqa_native.json') as f:
+    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_native.json') as f:
         d = json.load(f)
     ts = datetime.fromisoformat(d['timestamp'])
     if ts > seg2_start:
         v1_score = d['score']
 except: pass
-# 检查 V2
+# 检查 V2（主数据集）
 v2_score = None
 try:
-    with open('/flagos-workspace/results/gpqa_flagos.json') as f:
+    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_flagos.json') as f:
         d = json.load(f)
     ts = datetime.fromisoformat(d['timestamp'])
     if ts > seg2_start:
@@ -1710,15 +1864,15 @@ if v1_score is not None:
             V1_INJECT="
 
 **⚠ 已有 V1 结果（上一会话已完成，禁止重跑）**：
-- V1 (native) GPQA 得分: ${V1_SCORE}%（文件: /flagos-workspace/results/gpqa_native.json，时间戳已校验为本次产出）
+- V1 (native) ${PRIMARY_DATASET} 得分: ${V1_SCORE}%（文件: /flagos-workspace/results/${PRIMARY_PREFIX}_native.json，时间戳已校验为本次产出）
 - 直接从 V2 (FlagGems) 评测开始，跳过 V1 评测和 V1 服务启动"
             if echo "${V1_RESULT}" | grep -q "^V2="; then
                 V2_SCORE=$(echo "${V1_RESULT}" | grep "^V2=" | cut -d= -f2)
                 V1_INJECT="
 
 **⚠ V1 和 V2 结果均已存在（上一会话已完成，禁止重跑）**：
-- V1 (native) GPQA 得分: ${V1_SCORE}%
-- V2 (FlagGems) GPQA 得分: ${V2_SCORE}%
+- V1 (native) ${PRIMARY_DATASET} 得分: ${V1_SCORE}%
+- V2 (FlagGems) ${PRIMARY_DATASET} 得分: ${V2_SCORE}%
 - 跳过整个步骤4评测，直接进入精度对比（accuracy_compare.py）和后续步骤"
             fi
             echo "  ✓ 检测到本次已有结果: ${V1_RESULT}"
@@ -2030,7 +2184,14 @@ ${SEG3_CTX_SUMMARY}
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}
+**发布长任务协议（硬性 — main.py 可能运行数小时，镜像推送 54 分钟级）**：**禁止**用 Bash(timeout=大数) 前台阻塞等待发布（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、发布中断），按三步执行：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml ${SEG3_RELEASE_ARGS}${SEG3_V13_NOTE}' --state ${LOG_DIR}/tasks/release_v2.state --log ${LOG_DIR}/tasks/release_v2.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v2.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v2.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v2.state——status=running 说明上一会话已启动发布，直接接管轮询，**禁止重复发布**（重复发布会推同名 tag 覆盖，浪费数小时）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
@@ -2316,6 +2477,9 @@ print(f'''- container_name: {ctr.get('name','')}
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
     # ===== 段4: 9-13 (Plugin 验证 + 发布) =====
+    # V3(plugin) 精度评测用主数据集；--limit 仅 gpqa_diamond 单数据集时附加（mmlu/math_500 及多数据集用数据集默认题数）
+    V3_EVAL_LIMIT_ARGS=""
+    [ "${PRIMARY_DATASET}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && V3_EVAL_LIMIT_ARGS="--limit ${EVAL_LIMIT} "
     PROMPT_SEG4="容器名: ${SEG_CTR}，模型名: ${MODEL}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
@@ -2368,14 +2532,26 @@ ${SEG4_CTX_SUMMARY}
 
 **进度输出**：步骤开始/完成时输出 [步骤N] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
-**执行等待策略（硬性）**：
-本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部必须**前台阻塞执行**：
-- **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
-- **禁止**使用 TaskOutput 轮询，**禁止**每隔 N 秒手动 tail 日志或 ps/docker exec 检查进程状态。脚本内部已自带日志监控/进度/失败检测，无需外部干预；命令前台阻塞返回退出码后才继续。
-- **精度评测**：必须通过 eval_wrapper.py 前台执行（会阻塞直到评测完成或异常退出，无需轮询）。使用 Bash(timeout=7260000) 前台执行，不要用后台任务（Bash timeout 单位毫秒，7260000ms = 121 分钟，覆盖脚本 --max-timeout 7200s/2h + 60s 余量）。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。
-- **服务等待**：wait_for_service.sh 使用 Bash(timeout=5820000) 前台执行（5820000ms = 97 分钟，覆盖脚本上限 5760s/1.6h + 60s 余量），禁止 TaskOutput 轮询。
-- **性能/调优**：benchmark_runner.py 与 operator_search.py --plugin-mode 使用 Bash(timeout=7260000) 前台执行，脚本自带完整循环，禁止手动轮询其进度。
-- **注意**：Bash 工具的 timeout 参数单位是毫秒。设置过小会导致命令被转为后台任务，进而诱发 TaskOutput 轮询空转、反复全量重发上下文、烧掉大量 token。宁可 timeout 设大也不要设小。
+**执行等待策略（长任务执行协议 — 硬性）**：
+本段步骤 9-12 含多个长跑命令（plugin 安装、wait_for_service.sh 起服务、eval_wrapper.py 精度评测、benchmark_runner.py 性能测试、operator_search.py --plugin-mode 算子调优），全部**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。统一按三步执行（以精度评测为例，其余命令同样式替换 <TASK_ID>）：
+1. 写任务命令文件（一条 docker exec，内容自由写无转义问题）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/<TASK_ID>.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+<完整原命令>
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/<TASK_ID>.cmd' --state /flagos-workspace/logs/tasks/<TASK_ID>.state --log /flagos-workspace/logs/tasks/<TASK_ID>.log --timeout <上限秒>\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/<TASK_ID>.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/<TASK_ID>.log\"
+   - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
+   - status=done → 任务成功，按各步骤规则读取结果文件继续
+   - status=error → 读日志按原错误处理规则处理（如重启服务后重试等）
+   - status=timeout → 超过总闸，读日志诊断
+- **断点恢复（硬性）**：启动任务前先检查 /flagos-workspace/logs/tasks/<TASK_ID>.state——若存在且 status=running，说明上一会话已启动该任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**；status=done/error 则按终态直接处理
+${EVAL_BUDGET_NOTE}
+- **精度评测**（<TASK_ID>=plugin_eval）：必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），评测**主数据集 ${PRIMARY_DATASET}**（与 V2 评测同样本可对比；mmlu/math_500 及多数据集不传 --limit，用数据集默认题数）。cmd 文件内容：python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} ${V3_EVAL_LIMIT_ARGS}--output <V3评测输出路径>' --service-log <服务日志> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}；task_runner --timeout ${EVAL_MAX_TO}。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。**评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过评测**。
+- **服务等待**（<TASK_ID>=startup_plugin）：wait_for_service.sh 命令（--timeout 180 --max-timeout 5760 --mode flagos）写入 cmd 文件执行，task_runner --timeout 6000。
+- **性能/调优**（<TASK_ID>=benchmark_v3 / search_v3）：benchmark_runner.py 命令（--output-name flagos_optimized）与 operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json 命令写入 cmd 文件执行，task_runner --timeout 86400（调优可能数小时，脚本内部已有完整循环）。
 
 - Issue 模板：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=${PY_BIN_DIR}:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
@@ -2388,8 +2564,14 @@ ${SEG4_CTX_SUMMARY}
 **幂等检测（sglang 分支常态：V2=V3 同镜像，v3 已随段3 --also-tag v3 双 tag 发布）**：
   - 检查 v3 是否已发布：读 context versions.v3.harbor_image（非空即已发布），或宿主机 `docker image ls | grep -- '-v3$'` 存在 *-v3 镜像
   - **v3 已发布** → 跳过发布工具，直接回传 context 并更新 ledger（步骤12 完成，注明"v3 已随段3双tag发布，镜像复用，本步仅复测确认"）；若步骤10 复测精度异常（与 V2 不一致，同镜像理论上不应出现）如实记录
-  - **v3 未发布**（异常：段3 未双 tag 或镜像缺失） → 正常走发布工具：
-发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3
+  - **v3 未发布**（异常：段3 未双 tag 或镜像缺失） → 正常走发布工具（宿主机执行，main.py 可能运行数小时，按宿主机长任务协议三步执行）：
+1. detached 启动（一条命令立即返回，python3 开头 + & 后台符，不加 nohup）：
+   mkdir -p ${LOG_DIR}/tasks && python3 skills/flagos-eval-comprehensive/tools/task_runner.py --cmd 'python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3' --state ${LOG_DIR}/tasks/release_v3.state --log ${LOG_DIR}/tasks/release_v3.log --timeout 21600 &
+   echo \"发布任务已 detached 启动，PID: \$!\"
+2. 短轮询（每 8 分钟一次，单条命令 <10 分钟且每次都有输出）：
+   sleep 480 && cat ${LOG_DIR}/tasks/release_v3.state && echo '---' && tail -3 ${LOG_DIR}/tasks/release_v3.log
+   - status=running → 继续轮询；status=done → 校验镜像已推送（docker images 含对应 tag）后继续；status=error → 读日志按发布错误规则处理；status=timeout → 诊断
+3. 断点恢复：启动前检查 release_v3.state——status=running 说明上一会话已启动发布，直接接管轮询，禁止重复发布
 （3.1 特殊情况：若本段验证确认厂商 platform plugin 与 fl plugin 均不适配本模型——即 plugin 模式无论怎么调优都无法启动/达标且已按三级递进判定为框架问题——发布时追加 --incompatible-tag '<模型名>-flagos-<厂商>-incompatible' 打不适配标记）
 完成后通过 docker cp 回传最终 context：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
@@ -2524,13 +2706,14 @@ print('no')
 
 if [ "${QUALIFIED_CORE_V3}" = "True" ] && [ "${SEG4_V4DONE}" = "no" ] && [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
 
-# 提取精度基线：优先本次 V1(gpqa_native.json) 得分，缺失时回退 accuracy_compare.json 的 nv_score
+# 提取精度基线：优先本次 V1({PRIMARY_PREFIX}_native.json) 得分，缺失时回退
+# accuracy_compare_{PRIMARY_PREFIX}.json 的 nv_score（gpqa_diamond 场景 = 原 gpqa_native.json 零回归）
 V4_ACC_BASELINE=$(docker exec "${SEG_CTR}" bash -c "
 python3 -c \"
 import json
 baseline = 0.0
 try:
-    with open('/flagos-workspace/results/gpqa_native.json') as f:
+    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_native.json') as f:
         d = json.load(f)
     s = d.get('score')
     if s and float(s) > 0:
@@ -2538,7 +2721,7 @@ try:
 except: pass
 if baseline <= 0:
     try:
-        with open('/flagos-workspace/results/accuracy_compare.json') as f:
+        with open('/flagos-workspace/results/accuracy_compare_${PRIMARY_PREFIX}.json') as f:
             d = json.load(f)
         nv = (d.get('nv') or {}).get('score') or d.get('nv_score')
         if nv and float(nv) > 0:
@@ -2615,11 +2798,21 @@ operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性�
     --output-dir /flagos-workspace/results/ \\
     --state-path /flagos-workspace/results/operator_config_v4.json \\
     --json\"
-**执行方式（严格遵守，否则产出会残缺）**：
-- 必须用 Bash(timeout=86400000) **前台阻塞执行**，等待脚本真正退出后再继续。脚本可能运行数小时。
-- **禁止**将脚本转为后台运行（不得加 & 、nohup、disown，不得用 run_in_background）。
-- **禁止**在脚本\"看起来在运行/有输出\"时就认为完成并结束会话——必须等到命令返回退出码。
-- 命令返回后，**必须**回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志。
+**执行方式（长任务执行协议 — 严格遵守，否则产出会残缺）**：
+operator_reduction.py 可能运行数小时，**禁止**用 Bash(timeout=大数) 前台阻塞执行（Bash 工具 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败——前台阻塞 = 会话被杀、任务丢失），**禁止** TaskOutput 轮询。按三步执行：
+1. 写任务命令文件（一条 docker exec，上方完整参数命令写入 cmd 文件）：
+   docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/v4_reduction.cmd << 'CMD_EOF'
+cd /flagos-workspace/scripts
+PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
+CMD_EOF\"
+2. detached 启动（一条命令立即返回，不等待）：
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"
+3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出）：
+   sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/v4_reduction.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/v4_reduction.log\"
+   - status=running → 继续轮询。**禁止**在脚本"看起来在运行/有输出"时就认为完成并结束会话——必须等到 status=done/error/timeout；若 state 长时间停在 running 且日志停止增长，pgrep -f operator_reduction 确认任务进程：存活=任务仍在跑，继续等待；消失=任务已死，读日志诊断
+   - status=done → 任务真正结束，**必须**再回读容器内完成标记确认：docker exec \${CONTAINER} cat /flagos-workspace/results/v4_reduction.done —— 该文件存在且含 exit_code 才代表脚本真正跑完；不存在说明未完成，不得继续后续步骤或输出完成标志
+   - status=error/timeout → 读日志诊断，不得静默继续
+- 断点恢复：启动前检查 /flagos-workspace/logs/tasks/v4_reduction.state——status=running 说明上一会话已启动减算子任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**。
 脚本退出码 0 = V4 成立（有提升+精度达标 或 回退起点——回退版等价 V3，精度继承 V3 已验证结论，不重复终检）；1 = 不成立（仅\"采纳新随机组合但独立精度终检不达标\"时才会出现）。
 **重要**：回退到起点（fell_back_to_start=true）时脚本已跳过重复精度终检、直接继承 V3 精度结论（accuracy_ok=true），退出码必为 0 —— 回退版就是 V3 等价配置，绝不因 GPQA 评测抖动被二次否定。
 读取输出的 JSON 结果，更新 context.yaml 的 v4_reduction 字段（含 kept_ops/fell_back_to_start/beats_baseline/accuracy_ok/accuracy_verified）和 workflow_ledger（步骤 13_v4_reduction）。

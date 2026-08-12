@@ -38,7 +38,7 @@ metax:
   smi_cmd: mx-smi
   aliases: [metax, muxi]
   chips:
-    - { display: "MetaX C550", match: ["c550"] }
+    - { display: "Metax C550", match: ["c550"] }
 
 hygon:
   vendor_en: Hygon

@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -13,6 +13,8 @@
 #   --verbose         透传给 run_pipeline.sh，显示全量终端输出
 #   --stop-on-error   某个任务失败后终止整个批次（默认继续下一个）
 #   --force           强制重跑已完成的任务（默认跳过 workflow.all_done=true 的任务）
+#   --datasets        精度评测数据集（逗号分隔，gpqa_diamond/mmlu/math_500），全局透传给每个任务；
+#                     默认 gpqa_diamond（任务列表格式不变）
 #   --feishu-webhook  飞书自定义机器人 Webhook 地址；不传则不发送飞书通知
 #
 # 双 pipeline 说明:
@@ -33,7 +35,7 @@ set -uo pipefail
 
 # ========== 参数解析 ==========
 if [ $# -lt 6 ]; then
-    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--feishu-webhook URL]"
+    echo "用法: $0 <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--feishu-webhook URL]"
     echo ""
     echo "任务列表文件格式（每行 | 分隔）:"
     echo "  镜像地址或容器名 | 模型名"
@@ -47,12 +49,14 @@ STOP_ON_ERROR=false
 FORCE=false
 VERBOSE_FLAG=""
 PROXY_FLAG=""
+DATASET_FLAG=""
 MODEL_TIMEOUT=86400  # 单模型超时（秒），默认 24 小时
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
         --force) FORCE=true; shift ;;
         --verbose) VERBOSE_FLAG="--verbose"; shift ;;
+        --datasets) DATASET_FLAG="--datasets $2"; shift 2 ;;
         --proxy) PROXY_FLAG="--proxy $2"; shift 2 ;;
         --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
         # export 后 detached worker 与子进程 run_pipeline.sh 均自动继承此变量。
@@ -145,13 +149,15 @@ aggregate_model_report() {
         return 0
     fi
     mkdir -p "${BATCH_REPORTS_DIR}" 2>/dev/null || true
-    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）
+    # 目标文件名基名：厂商_模型名_时间戳（与 generate_report 的 build_report_basename 同口径）。
+    # 厂商取规范英文名首字母大写（nvidia → Nvidia，huawei → Ascend），与报告展示一致
     local base
     base=$(python3 -c "
-import yaml, sys, re
+import yaml, sys, re, os
 from datetime import datetime
 ctx_path = sys.argv[1]
 model = sys.argv[2]
+shared_dir = sys.argv[3] if len(sys.argv) > 3 else ''
 vendor = 'unknown'; name = model.rsplit('/',1)[-1]; ts = ''
 try:
     with open(ctx_path) as f:
@@ -164,13 +170,20 @@ try:
         img = release.get(f'{vk}_harbor_image','') or vc.get('image_url','') or vc.get('harbor_image','') or vc.get('image','')
         m = re.search(r':(\d{12})', img or '')
         if m: ts = m.group(1); break
+    if shared_dir and vendor != 'unknown':
+        sys.path.insert(0, shared_dir)
+        try:
+            import chip_spec
+            vendor = chip_spec.vendor_en(vendor) or vendor
+        except Exception:
+            vendor = vendor.capitalize()
 except Exception:
     pass
 if not ts:
     ts = datetime.now().strftime('%Y%m%d%H%M')
 raw = f'{vendor}_{name}_{ts}'
 print(re.sub(r'[^\w.\-]', '_', raw))
-" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" 2>/dev/null)
+" "/data/flagos-workspace/${model}/config/context_snapshot.yaml" "$model" "${PROJECT_ROOT}/shared" 2>/dev/null)
     [ -z "$base" ] && base=$(echo "${model}" | sed 's#/#_#g')
     local copied=0
     if [ -f "$src_md" ]; then
@@ -317,7 +330,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         --batch-elapsed-seconds "$(( TASK_START_TS - BATCH_START_TS ))" || :
     FLAGOS_BATCH_MODE=1 \
     timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
-        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $PROXY_FLAG < /dev/null
+        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $DATASET_FLAG $PROXY_FLAG < /dev/null
     EXIT_CODE=$?
     TASK_END_TS=$(date +%s)
     TASK_ELAPSED=$(( TASK_END_TS - TASK_START_TS ))

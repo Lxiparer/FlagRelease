@@ -170,11 +170,11 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 ```bash
 # 1. V2 使能 flaggems 后首次可正常启动状态（未被精度调优削减）quick 测一轮
 docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py --mode quick --output-name v2_initial_performance"
-# 2. ×1.2 合成基线（吞吐×1.2、延迟÷1.2），按 native_performance.json 标准格式落盘
+# 2. ×1.05 合成基线（吞吐×1.05、延迟÷1.05，用户 2026-07 定稿全芯片统一标准），按 native_performance.json 标准格式落盘
 docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/synthesize_perf_baseline.py --v2-initial /flagos-workspace/results/v2_initial_performance.json --output /flagos-workspace/results/native_performance.json"
 ```
 
-合成文件带 `_meta.synthetic=true` 标记：下游 `performance_compare.py` / `operator_optimizer.py init` / `operator_search.py` 照常当 V1 基线消费（零特殊处理），`generate_report.py` 识别标记并在报告注明"合成基线，非实测 V1"。脚本拒绝覆盖已存在的实测 V1 基线（防误用）。80% 判据下等价于要求调优后性能 ≥ V2 初始的 1.2 倍。
+合成文件带 `_meta.synthetic=true` + `target_ratio_override=1.0` 标记：下游 `performance_compare.py` / `operator_optimizer.py init` / `operator_search.py` 照常当 V1 基线消费（零特殊处理），`generate_report.py` 识别标记并在报告注明"合成基线，非实测 V1"。脚本拒绝覆盖已存在的实测 V1 基线（防误用）。达标线 = 基线×1.0 = **V2 初始的 1.05 倍**（`target_ratio_override` 覆盖默认 0.8，仅对合成基线生效）。
 
 ```bash
 # 关闭 FlagGems
@@ -443,6 +443,7 @@ ISSUE_EOF"
 - output-name 标准命名：V1=`native_performance`，V2=`flagos_performance`
 - `benchmark_runner.py` 仅接受以下参数：`--config`、`--strategy`、`--output-name`、`--output-dir`、`--mode`、`--test-case`、`--dry-run`。`--quick` 为 `--strategy quick` 的向后兼容别名，优先使用 `--strategy`。禁止传入 `--host`、`--port`、`--model-name`、`--json` 等未定义参数，host/port/model 由 config 文件和 context.yaml 自动提供
 - 禁止使用 `pgrep -f benchmark_runner` 轮询等待 benchmark 完成。benchmark_runner.py 是同步脚本，直接等待其返回即可。如必须后台轮询，使用 `pgrep -f '[b]enchmark_runner'` 避免自匹配
+- **长任务执行协议（2026-08 起硬性）**：benchmark 可能超过 Bash 工具 10 分钟前台硬上限（超过自动转后台 + 批次控制器 10 分钟无输出判会话失败）。**禁止**用 Bash(timeout=大数) 前台阻塞等待。按协议三步执行：写任务命令文件（`cat > /flagos-workspace/logs/tasks/benchmark_v2.cmd << 'CMD_EOF'` 含完整 benchmark 命令）→ `docker exec -d $CONTAINER bash -c "cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/benchmark_v2.cmd' --state /flagos-workspace/logs/tasks/benchmark_v2.state --log /flagos-workspace/logs/tasks/benchmark_v2.log --timeout 7200"` → 每 8 分钟短轮询 `sleep 480 && docker exec $CONTAINER bash -c "cat ...benchmark_v2.state; echo '---'; tail -3 ...benchmark_v2.log"`（running 继续 / done 收尾 / error、timeout 诊断）。失联判据：state 长时间停在 running 且日志停止增长时，pgrep -f 'benchmark_v2.cmd' 确认任务进程——存活=任务仍在跑（task_runner 可能失联），继续等待；消失=任务已死，读日志诊断）。断点恢复：启动前检查 state，`status=running` 直接接管禁止重复启动。
 
 执行顺序（固定）：
 1. 关闭 flaggems → 启动服务 → benchmark V1 → 停服务

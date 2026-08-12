@@ -24,3 +24,8 @@ dataset_dir: ""
 
 # 数据集来源: modelscope / huggingface
 dataset_hub: "modelscope"
+
+# 评测数据集: gpqa_diamond / mmlu / math_500，可多个（空格或逗号分隔，如 "mmlu, math_500"）
+# mmlu: 5-shot，--limit 为每子集题数（--limit 100 = 57 子集 × 100 = 5700 题）
+# math_500: 0-shot，--limit 亦为每子集题数（5 子集 × limit；--limit 0 = 全量 500 题）
+dataset: "gpqa_diamond"

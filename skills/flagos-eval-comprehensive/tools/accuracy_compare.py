@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-精度对比工具 — GPQA Diamond 精度达标判定
+精度对比工具 — GPQA Diamond / MMLU / MATH-500 精度达标判定
 
 支持两种基线模式：
   1. 本地 V1 基线（向后兼容）：--v1 <json> --v2 <json>
@@ -22,6 +22,10 @@ Usage:
     python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B --json
     python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B \
         --nv-baseline-file /flagos-workspace/shared/nv_baseline.yaml --output results/accuracy_compare.json
+
+    # 其他数据集：--metric 指定指标名（须与结果文件基准一致，如 mmlu / math_500）
+    python accuracy_compare.py --v2 results/mmlu_flagos.json --nv-baseline AceInstruct-1.5B --metric mmlu
+    python accuracy_compare.py --v2 results/math_500_flagos.json --nv-baseline AceInstruct-1.5B --metric math_500
 
 退出码: 0=达标（含小样本噪声容忍达标：绝对差异≤2题时虽 rel_drop 超阈值仍判达标）,
         1=不达标, 2=参数/文件错误, 3=缺 NV 基线（需编排层兜底）
@@ -82,7 +86,7 @@ def _noise_zone_check(current_score: Optional[float], baseline_score: Optional[f
 
 
 def load_result(path: str) -> Dict[str, Any]:
-    """加载 gpqa_result.json"""
+    """加载评测结果 JSON（gpqa_result.json / mmlu_result.json / math_500_result.json，结构一致）"""
     p = Path(path)
     if not p.exists():
         print(f"ERROR: 文件不存在: {path}", file=sys.stderr)
@@ -181,7 +185,8 @@ def lookup_nv_score(model_name: str, metric: str,
 
 # ==================== 对比逻辑 ====================
 
-def compare_v1(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
+def compare_v1(v1_path: str, v2_path: str, threshold: float,
+               metric: str = "gpqa_diamond") -> Dict[str, Any]:
     """本地 V1 基线对比（向后兼容）。
 
     判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
@@ -195,6 +200,7 @@ def compare_v1(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
 
     result = {
         "baseline_mode": "local_v1",
+        "metric": metric,
         "v1": {
             "path": v1_path,
             "model": v1_data.get("model", "unknown"),
@@ -347,9 +353,13 @@ def compare_nv(v2_path: str, model_name: str, metric: str,
 # ==================== 输出 ====================
 
 def print_human(result: Dict[str, Any]):
+    metric_name = result.get("metric", "gpqa_diamond")
+    metric_label = {"gpqa_diamond": "GPQA Diamond",
+                    "mmlu": "MMLU",
+                    "math_500": "MATH-500"}.get(metric_name, metric_name)
     print()
     print("=" * 60)
-    print("  GPQA Diamond 精度对比")
+    print(f"  {metric_label} 精度对比")
     print("=" * 60)
 
     if result.get("baseline_mode") == "nv_reference":
@@ -427,7 +437,7 @@ def main():
             print("ERROR: 未指定 --nv-baseline 时必须提供 --v1（本地 V1 基线模式）",
                   file=sys.stderr)
             sys.exit(2)
-        result = compare_v1(args.v1, args.v2, args.threshold)
+        result = compare_v1(args.v1, args.v2, args.threshold, args.metric)
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

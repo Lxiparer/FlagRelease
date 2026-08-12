@@ -388,7 +388,8 @@ def main():
             #     写结果阶段。判分是本地规则匹配，正常几分钟内完成，没有正当理由
             #     停滞超过 progress_timeout —— 此时停滞 = 收尾卡死（Qwen3-30B 事故
             #     形态），杀。
-            # 总闸仍有 max_timeout 兜底，任何阶段超 2h 一律终止。
+            # 总闸仍有 max_timeout 兜底，任何阶段超预算（thinking 模型 22500s / 普通 7200s，
+            # 由编排层按题数×单题×1.25 注入）一律终止。
             progress = extract_progress_from_log(eval_log)
             if progress is not None:
                 if not progress_watch_started:

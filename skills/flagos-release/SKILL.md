@@ -348,7 +348,7 @@ docker exec $CONTAINER bash -c "PATH=${PY_BIN_DIR}:\$PATH python3 /flagos-worksp
 ### 触发条件
 
 步骤 12（Plugin 性能评测）完成后，检查 `plugin_workflow`：
-- `plugin_workflow.accuracy_ok=true AND plugin_workflow.performance_ok=true` → 执行 plugin 发布
+- `plugin_workflow.accuracy_ok=true` → 执行 plugin 发布（性能不达标不阻断发布，仅影响 qualified 标签）
 - 否则 → 跳过 plugin 发布，设置 `plugin_workflow.qualified=false`
 
 ### 调用方式
@@ -363,16 +363,18 @@ else
 fi
 python3 skills/flagos-release/tools/main.py \
     --from-context /data/flagos-workspace/<model>/config/context_snapshot.yaml \
-    --plugin-mode
+    --version-tag v3
 ```
+
+> `--version-tag v3` 产出镜像 tag 后缀 `-v3`。`--plugin-mode` 是旧别名，仅向后兼容（未设 version_tag 时产出 `-plugin` 后缀），新流程统一使用 `--version-tag v3`。
 
 ### Plugin 模式行为
 
-`--plugin-mode` 标志使发布脚本执行以下差异化逻辑：
+`--version-tag v3`（plugin 发布）使发布脚本执行以下差异化逻辑：
 
 | 步骤 | 主流程（步骤8） | Plugin 模式（步骤12） |
 |------|---------------|---------------------|
-| 镜像 tag | `{date_tag}` | `{date_tag}-plugin` |
+| 镜像 tag | `{date_tag}` | `{date_tag}-v3` |
 | 仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 复用步骤8仓库（不创建新仓库） |
 | commit/tag/push | 正常执行 | 正常执行（plugin 版本是新镜像） |
 | README | 生成标准 README | 用 plugin 镜像+评测数据重新生成 README |

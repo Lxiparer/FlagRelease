@@ -52,23 +52,44 @@ except Exception:
 
 
 def _vendor_display(vendor: str) -> str:
-    """厂商展示名：规范表可用则 "中文名(英文名)"，否则原值。"""
+    """厂商展示名：纯英文规范名（Nvidia/Metax/Hygon/Iluvatar/Mthreads）。
+
+    规范表可用则归一（nvidia/NVIDIA/英伟达/英伟达(Nvidia) 等变体 → Nvidia），
+    否则原值。报告展示统一纯英文（2026-08 用户定稿口径）。
+    """
     if _chip_spec and vendor:
         try:
-            return _chip_spec.vendor_display(vendor)
+            return _chip_spec.vendor_en(vendor)
         except Exception:
             pass
     return vendor or "-"
 
 
 def _chip_display(vendor: str, gpu_model: str) -> str:
-    """芯片型号规范显示名：规范表可用则查表规范化，否则原值。"""
+    """芯片型号规范显示名：命中规范表返回规范值（H20-3e/Metax C550/...）。
+
+    未命中仅统一 NVIDIA 分隔符（保留原始型号信息；不再剥 -3e——H20-3e 是规范值）。
+    """
     if _chip_spec and gpu_model:
         try:
-            return _chip_spec.canonical_chip(vendor, gpu_model)
+            display, matched = _chip_spec.canonical_chip_with_flag(vendor, gpu_model)
+            if matched:
+                return display
         except Exception:
             pass
+    if gpu_model:
+        return re.sub(r"^(NVIDIA)[\s_-]+", r"\1 ", gpu_model)
     return gpu_model or ""
+
+
+def _clean_model_name(name: str) -> str:
+    """模型名展示清理：去首尾空白与尾部斜杠（"org/Model/ " → "org/Model"）。
+
+    仅做格式清理，不改变完整 ID 语义——表格展示保留 org 前缀完整 ID
+    （2026-08 用户定稿口径），文件名层去前缀由 build_report_basename 负责。
+    """
+    s = str(name).strip().strip("/") if name else ""
+    return s
 
 
 def read_json(path: str) -> Optional[dict]:
@@ -706,14 +727,15 @@ def build_report_basename(data, ext: str = ".md") -> str:
     """
     ctx = data.context or {}
     vendor = (ctx.get("gpu", {}) or {}).get("vendor", "") or "unknown"
-    # 文件名厂商归一到规范 key（huawei→ascend 等），与命名/报告展示保持一致
-    if _chip_spec and vendor and vendor != "unknown":
+    # 文件名厂商取规范英文名（nvidia → Nvidia，huawei → Ascend，天书(Tianshu) → Iluvatar），
+    # 报告文件名厂商首字母大写口径（2026-08 用户定稿）；未知厂商保持原值（unknown）
+    if _chip_spec and vendor:
         try:
-            vendor = _chip_spec.normalize_vendor(vendor) or vendor
+            vendor = _chip_spec.vendor_en(vendor) or vendor
         except Exception:
             pass
 
-    model_name = (ctx.get("model", {}) or {}).get("name", "") or "model"
+    model_name = _clean_model_name((ctx.get("model", {}) or {}).get("name", "")) or "model"
     if "/" in model_name:
         model_name = model_name.rsplit("/", 1)[-1]
 
@@ -933,13 +955,14 @@ def generate_text_report(data: ReportData) -> str:
         release_time = v2_upload_time  # 步骤8完成时间（上面已取）
     lines.append(f"| 发布时间 | {_fmt_dt(release_time) if release_time else '-'} |")
 
-    # 模型名只取 basename（去掉 org 前缀，如 CohereLabs/aya-23-8B → aya-23-8B）
-    _model_name = model.get("name", "-") or "-"
+    # 模型名只取 basename（去掉 org 前缀，如 CohereLabs/aya-23-8B → aya-23-8B）。
+    # 先做格式清理（去空白/尾部斜杠），再取 basename——"org/Model/" 不会因尾部斜杠取到空串
+    _model_name = _clean_model_name(model.get("name", "-")) or "-"
     if "/" in _model_name:
         _model_name = _model_name.rsplit("/", 1)[-1]
     lines.append(f"| 模型 | {_model_name} |")
     lines.append(f"| 模型领域 | {model.get('domain', '') or '语言'} |")
-    lines.append(f"| 权重来源 | {model.get('url', '') or model.get('name', '-')} |")
+    lines.append(f"| 权重来源 | {_clean_model_name(model.get('url', '') or model.get('name', '-')) or '-'} |")
     lines.append(f"| 权重数制 | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 推理框架后端 | {runtime.get('framework', 'sglang')} |")
@@ -968,11 +991,8 @@ def generate_text_report(data: ReportData) -> str:
     if not mem_gb:
         mem_gb = lookup_gpu_memory(gpu_type)
     # 真实显卡型号：走统一规范表映射到规范显示名（如 A100 / H20-3e / 910B）。
-    # 规范表未命中或不可用时，回退旧的字符串清洗逻辑（去 -3e 后缀、统一 NVIDIA 分隔符）。
+    # 未命中时 _chip_display 内仅整理 NVIDIA 分隔符，不再剥 -3e（H20-3e 是规范值）。
     gpu_type_display = _chip_display(_vendor_raw, gpu_type)
-    if gpu_type_display == gpu_type:
-        gpu_type_display = re.sub(r"-3e\b", "", gpu_type)
-        gpu_type_display = re.sub(r"^(NVIDIA)[\s_-]+", r"\1 ", gpu_type_display)
     lines.append(f"| GPU | {gpu_type_display} : {gpu_count} x {str(mem_gb) + 'GB' if mem_gb else '-GB'} |")
     lines.append(f"| 容器 | {container.get('name', '-')} |")
     lines.append(f"| release自动化工具版本 | v0.1.0 |")
@@ -1166,7 +1186,8 @@ def generate_text_report(data: ReportData) -> str:
                      f"（baseline_source: {_np_meta.get('baseline_source', 'v2_initial_x1.2')}）。"
                      f"本报告所有以 V1 为基准的性能比均基于该合成基线。")
 
-    model_name = model.get("name", "-")
+    # 性能表模型名保留完整 ID（含 org 前缀，2026-08 用户定稿口径），仅做格式清理
+    model_name = _clean_model_name(model.get("name", "-")) or "-"
     vendor = _vendor_display(gpu.get("vendor", "")) if gpu.get("vendor") else "-"
 
     for ver_key in ["v1", "v2", "v3", "v4"]:
@@ -1603,7 +1624,7 @@ def generate_json_report(data: ReportData) -> dict:
         "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "workflow_complete": data.workflow_complete,
         "model": {
-            "name": data.get("model", "name", default=""),
+            "name": _clean_model_name(data.get("model", "name", default="")),
             "container_path": data.get("model", "container_path", default=""),
         },
         "container": {
@@ -1611,8 +1632,12 @@ def generate_json_report(data: ReportData) -> dict:
         },
         "gpu": {
             "count": data.get("gpu", "count", default=0),
-            "type": data.get("gpu", "type", default=""),
-            "vendor": data.get("gpu", "vendor", default=""),
+            # type/vendor 走规范表归一（NVIDIA H20-3e → H20-3e；nvidia → Nvidia），
+            # 与 MD 展示同口径——报告 JSON 不再出现脏值（2026-08 兜底规范化）
+            "type": _chip_display(data.get("gpu", "vendor", default=""),
+                                  data.get("gpu", "type", default="")),
+            "vendor": _vendor_display(data.get("gpu", "vendor", default=""))
+            if data.get("gpu", "vendor", default="") else "",
         },
         "environment": {
             "env_type": data.get("environment", "env_type", default=""),
@@ -1680,9 +1705,11 @@ def generate_summary(data: ReportData) -> str:
     lines: List[str] = []
     lines.append("═══ FlagOS 迁移摘要 ═══")
 
-    model = data.get("model", "name", default="N/A")
+    model = _clean_model_name(data.get("model", "name", default="N/A")) or "N/A"
     gpu_count = data.get("gpu", "count", default="?")
-    gpu_type = data.get("gpu", "type", default="?")
+    # GPU 型号走规范表归一（NVIDIA H20-3e → H20-3e），与基本信息表同口径
+    gpu_type = _chip_display(data.get("gpu", "vendor", default=""),
+                             data.get("gpu", "type", default="?"))
     env_type = data.get("environment", "env_type", default="N/A")
     plugin_triggered = data.get("plugin_workflow", "triggered", default=False)
     if plugin_triggered and "plugin" in str(env_type):
