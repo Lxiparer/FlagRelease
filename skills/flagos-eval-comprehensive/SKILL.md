@@ -137,7 +137,7 @@ eval:
 ```bash
 # 一次跑多个数据集（mmlu 5700 题 + math_500 全量 500 题，各用默认题数）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 \
+    PATH=${PY_BIN_DIR}:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 \
     --dataset mmlu math_500 --output /flagos-workspace/results/multi"
 
 # 逗号分隔等价写法
@@ -274,11 +274,11 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 # 1. 写任务命令文件（一条 docker exec，内容自由写无转义问题）：
 docker exec $CONTAINER bash -c "mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2.cmd << 'CMD_EOF'
 cd /flagos-workspace/scripts
-PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 22500
+PATH=${PY_BIN_DIR}:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --limit 30 --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout 22500
 CMD_EOF"
 
 # 2. detached 启动（一条命令立即返回，不等待）：
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2.cmd' --state /flagos-workspace/logs/tasks/eval_v2.state --log /flagos-workspace/logs/tasks/eval_v2.log --timeout 22500"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace/scripts && PATH=${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2.cmd' --state /flagos-workspace/logs/tasks/eval_v2.state --log /flagos-workspace/logs/tasks/eval_v2.log --timeout 22500"
 
 # 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
 sleep 480 && docker exec $CONTAINER bash -c "cat /flagos-workspace/logs/tasks/eval_v2.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2.log"

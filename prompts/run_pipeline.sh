@@ -442,7 +442,7 @@ wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(t
 /flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
 CMD_EOF\"
 2. detached 启动（一条命令立即返回，不等待）：
-   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=\${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
    sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
    - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
@@ -520,7 +520,7 @@ wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(t
 /flagos-workspace/scripts/wait_for_service.sh --port \$PORT --model-name '\$MODEL_NAME' --timeout 180 --max-timeout 5760 --log-path /flagos-workspace/logs/startup_default.log --mode default
 CMD_EOF\"
 2. detached 启动（一条命令立即返回，不等待）：
-   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=\${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/startup_default.cmd' --state /flagos-workspace/logs/tasks/startup_default.state --log /flagos-workspace/logs/tasks/startup_default.log --timeout 6000\"
 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
    sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/startup_default.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/startup_default.log\"
    - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
@@ -1494,11 +1494,11 @@ Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次�
 1. 精度评测必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），**每个数据集独立任务**（本流程数据集: ${DATASETS_CSV}，共 ${DATASET_COUNT} 个），先写任务命令文件 eval_v1_{prefix}.cmd / eval_v2_{prefix}.cmd（prefix 见下方数据集任务规格表，gpqa_diamond 用历史短名 gpqa），以 ${PRIMARY_DATASET}（前缀 ${PRIMARY_PREFIX}）的 V2 为例：
    docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd << 'CMD_EOF'
 cd /flagos-workspace/scripts
-PATH=/opt/conda/bin:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
+PATH=\${PY_BIN_DIR}:\$PATH python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} --output <输出路径>' --service-log <服务日志路径> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}
 CMD_EOF\"
    （mmlu/math_500 及多数据集不传 --limit，fast_gpqa 按数据集默认题数；gpqa_diamond 单数据集时 eval-cmd 加 --limit ${EVAL_LIMIT}，V1/V2 必须相同——见下方数据集任务规格表）
 2. detached 启动（每条任务独立启动，一条命令立即返回，不等待）：
-   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd' --state /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state --log /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log --timeout ${EVAL_MAX_TO}\"
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=\${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.cmd' --state /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state --log /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log --timeout ${EVAL_MAX_TO}\"
 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
    sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/eval_v2_${PRIMARY_PREFIX}.log\"
    - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
@@ -2540,7 +2540,7 @@ cd /flagos-workspace/scripts
 <完整原命令>
 CMD_EOF\"
 2. detached 启动（一条命令立即返回，不等待）：
-   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/<TASK_ID>.cmd' --state /flagos-workspace/logs/tasks/<TASK_ID>.state --log /flagos-workspace/logs/tasks/<TASK_ID>.log --timeout <上限秒>\"
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=\${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/<TASK_ID>.cmd' --state /flagos-workspace/logs/tasks/<TASK_ID>.state --log /flagos-workspace/logs/tasks/<TASK_ID>.log --timeout <上限秒>\"
 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出，永不触发转后台/空闲判定）：
    sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/<TASK_ID>.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/<TASK_ID>.log\"
    - status=running → 继续等待（重复上一条轮询命令）。若 state 长时间停在 running 且日志停止增长（上次 tail 内容无变化），用 pgrep -f <任务命令特征> 确认任务进程：进程存活=任务仍在跑（task_runner 可能失联，日志 fd 由任务持有仍会增长），继续等待；进程消失=任务已死，读日志诊断
@@ -2803,10 +2803,10 @@ operator_reduction.py 可能运行数小时，**禁止**用 Bash(timeout=大数)
 1. 写任务命令文件（一条 docker exec，上方完整参数命令写入 cmd 文件）：
    docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/v4_reduction.cmd << 'CMD_EOF'
 cd /flagos-workspace/scripts
-PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
+PATH=\${PY_BIN_DIR}:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
 CMD_EOF\"
 2. detached 启动（一条命令立即返回，不等待）：
-   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"
+   docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=\${PY_BIN_DIR}:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"
 3. 短轮询（每 8 分钟一次，单条轮询命令 <10 分钟且每次都有输出）：
    sleep 480 && docker exec \${CONTAINER} bash -c \"cat /flagos-workspace/logs/tasks/v4_reduction.state 2>/dev/null; echo '---'; tail -3 /flagos-workspace/logs/tasks/v4_reduction.log\"
    - status=running → 继续轮询。**禁止**在脚本"看起来在运行/有输出"时就认为完成并结束会话——必须等到 status=done/error/timeout；若 state 长时间停在 running 且日志停止增长，pgrep -f operator_reduction 确认任务进程：存活=任务仍在跑，继续等待；消失=任务已死，读日志诊断
