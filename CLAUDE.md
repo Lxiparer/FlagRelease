@@ -147,10 +147,10 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
   - `v1.3` SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0 插件层加载但不开算子替换（可测插件层固定开销）
   - 均失败 → `none`（强依赖 flaggems，sglang_fl 与 sglang 深度耦合），精度基线回退 `nv_baseline.yaml`
 - V2：plugin 全量开启（USE_FLAGGEMS=1 + SGLANG_FL_PREFER=flagos），经步骤5/7 精度/性能调优达标
-- V3：plugin 流程精度复测调优（步骤9-12），V2 与 V3 同走 sglang_fl 调度路径；V1=none 时 V2=V3 同镜像 `--also-tag` 双 tag 发布
+- V3：plugin 流程精度复测调优（步骤9-12），V2 与 V3 同走 sglang_fl 调度路径、同准入镜像（sglang 无代码注入，V2=V3 是分支常态）；段3 发布 V2 时即 `--also-tag v3` 双 tag（任何 V1 variant），V1=none 时额外跳过段4（V3 无独立确认必要），v1.1/v1.3 时段4 照常走步骤9-12 复测确认、步骤12 幂等复用已发布 v3 镜像收尾（用户 2026-08-12 定稿）
 - V4：`operator_reduction.py`（步骤13-15）减算子优化性能
 
-- **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）
+- **发布仓库**：V1/V2/V4 发布到 `harbor.baai.ac.cn/flagrelease-public`；**V3 发布到 `harbor.baai.ac.cn/flagrelease-project`**（交付 SVT 验收，V3=Max 为最终交付版）。**例外（sglang 分支常态双 tag）**：V2=V3 同镜像时 v3 由 `--also-tag` 继承 v2 路径推 public（同镜像同仓库双 tag），不单独切 project——除非 v3 未随段3 双 tag 发布（异常兜底走 --version-tag v3 时才切 project）
 
 ### native 场景工作流简化
 

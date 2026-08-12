@@ -1258,10 +1258,10 @@ case "${PIPELINE_BRANCH}" in
         # sglang 分支 entry_image_type 收敛为 native|gems_tree_plugin，无 gems_tree（代码注入）态。
         # 若出现视为 inspect_env 分类异常，按分支 B 语义兜底执行并提示。
         echo "⚠ 警告: entry_image_type=gems_tree 在 sglang 分支不应出现（无代码注入态），按分支 B 语义执行"
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-8, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤9-12, plugin 流程精度复测调优) → V4(步骤13-15, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度、同准入镜像，段3 发布 V2 时 --also-tag v3 双 tag 为常态（任何 V1 variant）；V1=none 时额外跳过段4，v1.1/v1.3 时段4 照常走步骤9-12、步骤12 复用已发布 v3。"
         ;;
     B)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-5, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤6-7, plugin 流程精度复测调优;达标发 flagrelease-project 交付) → V4(步骤8-9, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度，同镜像双 tag 仅由 V1=none 触发。"
+        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin（sglang 分支唯一非 native 路径）。V1(步骤1-3, baseline_selector.py 三选确定 v1.1/v1.3/none+V1 精度观察+性能基线) → V2(步骤4-8, plugin 全量开启精度+性能调优;达标发 harbor+MS/HF) → V3(步骤9-12, plugin 流程精度复测调优) → V4(步骤13-15, operator_reduction 减算子;达标发 harbor+更新 README)。精度基线优先本地 V1，V1=none 时用 NV（nv_baseline.yaml）；性能基线 V1 实测或 V1=none 路径下 V2 首测×1.05 合成。sglang 场景无代码注入路径：V2/V3 均经 sglang_fl plugin 调度、同准入镜像，段3 发布 V2 时 --also-tag v3 双 tag 为常态（任何 V1 variant）；V1=none 时额外跳过段4，v1.1/v1.3 时段4 照常走步骤9-12、步骤12 复用已发布 v3。"
         ;;
     native)
         BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
@@ -1974,8 +1974,10 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 regenerate_report "${SEG_CTR}"
 
 # ===== 段3: 5 (V2 发布) =====
-# V1=none 场景（分支 B 2.2/3.2）：V2 经 plugin 方式使能，V2 镜像=V3 镜像，
-# 段3 一次 commit 双 tag 发布(--also-tag v3)，段4 整段跳过（不重复 plugin 验证）
+# sglang 分支无 vllm 式代码注入：V2/V3 均经 sglang_fl plugin 调度、同准入镜像，
+# 任何 V1 variant 下段3 一次 commit 双 tag 发布(--also-tag v3)（用户 2026-08-12 定稿：
+# V2=V3 按正常流程走双 tag）。V1=none 时额外跳过段4（V3 无独立确认必要）；
+# v1.1/v1.3 时段4 照常走步骤9-12 复测确认，步骤12 复用已发布 v3 镜像收尾。
 V1_VARIANT=$(python3 -c "
 import yaml
 try:
@@ -1991,8 +1993,11 @@ if [ "${V1_VARIANT}" = "none" ]; then
 **V1=${V1_VARIANT} 特殊场景（2.2/3.2 同镜像双 tag）**：本次 V1 三选结果为 ${V1_VARIANT}（v1.1=纯净基线不加载 sglang_fl；v1.3=插件层加载但不开替换；none=强依赖 flaggems，baseline_selector 已固化 USE_FLAGGEMS=1+SGLANG_FL_PREFER=flagos 使 V2 走 plugin 路径），V2 经 plugin 方式使能，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤12：ledger 仍只更新 08_release，步骤 9-12（V3 plugin 流程）的 ledger 由编排层置 skipped，禁止触碰。"
     echo "[段3] V1=${V1_VARIANT} 检测：启用 2.2/3.2 同镜像双 tag 发布 (--also-tag v3)，段4 将跳过"
 else
-    SEG3_RELEASE_ARGS="--version-tag v2"
-    SEG3_V13_NOTE=""
+    # v1.1/v1.3（sglang 分支常态）：V2=V3 同镜像同样成立 → 双 tag；但 V3 流程照常
+    SEG3_RELEASE_ARGS="--version-tag v2 --also-tag v3"
+    SEG3_V13_NOTE="
+**sglang 分支常态（V2=V3 同镜像双 tag）**：sglang 场景无代码注入路径，V2/V3 均经 sglang_fl plugin 调度、同准入镜像，V2 镜像与 V3 镜像本质相同。发布命令已含 --also-tag v3（一次 commit，-v2/-v3 双 tag 上传）。这**不算**进入步骤12：ledger 仍只更新 08_release；V3 流程（步骤9-12）由段4 照常执行（verify、精度/性能复测、ledger 正常更新），步骤12 发布时检测 v3 已随本段双 tag 发布 → 复用镜像收尾（不重复上传）。"
+    echo "[段3] V1=${V1_VARIANT} 检测：sglang 分支常态双 tag 发布 (--also-tag v3)，段4 照常走 V3 流程"
 fi
 
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
@@ -2377,9 +2382,13 @@ ${SEG4_CTX_SUMMARY}
     --type plugin-error --context-yaml /flagos-workspace/shared/context.yaml \\
     --repo flagos-ai/sglang-plugin-FL --output-dir /flagos-workspace/results/ --json\"
 
-**步骤 13 发布**：
+**步骤 12 发布**：
 发布前同步 context 到宿主机：
   docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+**幂等检测（sglang 分支常态：V2=V3 同镜像，v3 已随段3 --also-tag v3 双 tag 发布）**：
+  - 检查 v3 是否已发布：读 context versions.v3.harbor_image（非空即已发布），或宿主机 `docker image ls | grep -- '-v3$'` 存在 *-v3 镜像
+  - **v3 已发布** → 跳过发布工具，直接回传 context 并更新 ledger（步骤12 完成，注明"v3 已随段3双tag发布，镜像复用，本步仅复测确认"）；若步骤10 复测精度异常（与 V2 不一致，同镜像理论上不应出现）如实记录
+  - **v3 未发布**（异常：段3 未双 tag 或镜像缺失） → 正常走发布工具：
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml --version-tag v3
 （3.1 特殊情况：若本段验证确认厂商 platform plugin 与 fl plugin 均不适配本模型——即 plugin 模式无论怎么调优都无法启动/达标且已按三级递进判定为框架问题——发布时追加 --incompatible-tag '<模型名>-flagos-<厂商>-incompatible' 打不适配标记）
 完成后通过 docker cp 回传最终 context：
@@ -2390,7 +2399,7 @@ ${SEG4_CTX_SUMMARY}
 
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  段4  Plugin 验证 + 发布  (步骤 9→10→11→12→13)             ║"
+    echo "║  段4  Plugin 验证 + 发布  (步骤 9→10→11→12)               ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     SEG4_START_TS=$(date +%s)
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段4 开始 (qualified=true, 触发 Plugin 流程)"
@@ -2453,7 +2462,7 @@ SEG4V4_ELAPSED=0
 SEG4V4_MIN=0
 SEG4V4_SEC=0
 
-# ===== 段4: V4 减算子 + 发布 (步骤 8-9) =====
+# ===== 段4: V4 减算子 + 发布 (步骤 13-15) =====
 # 触发条件：qualified_core=true（service_ok AND accuracy_ok；性能不再门控）。
 # V4 在 V3 plugin 镜像基础上减算子提性能，
 # 精度终检以 V1（或 NV）基线为准，rel_drop≤5% 是 V4 成立前提。
