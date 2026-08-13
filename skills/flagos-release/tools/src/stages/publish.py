@@ -1300,6 +1300,14 @@ except Exception as e:
         vars["weights_local_path"] = canonical_path
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
+        # 强制 docker run 镜像与 docker pull 同源（image_harbor）：
+        # 历史 context 残留的基础镜像名曾导致 README 拉取/运行镜像不一致
+        if vars["container_run_cmd"] and image_harbor and image_harbor != "N/A":
+            import re
+            if '{{IMAGE}}' in vars["container_run_cmd"]:
+                vars["container_run_cmd"] = vars["container_run_cmd"].replace('{{IMAGE}}', image_harbor)
+            else:
+                vars["container_run_cmd"] = re.sub(r'harbor\S+', image_harbor, vars["container_run_cmd"], count=1)
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 

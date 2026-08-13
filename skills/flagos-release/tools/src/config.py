@@ -212,6 +212,10 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
         image_name = ctx.get('image', {}).get('name', '')
         if image_name:
             run_cmd = run_cmd.replace(image_name, '{{IMAGE}}')
+        # 兜底：image.name 与实际 run 命令中的镜像不一致时替换落空，
+        # 基础镜像名会原样流进 README（pull/run 不一致），按 harbor 镜像 token 定位兜底替换
+        if '{{IMAGE}}' not in run_cmd:
+            run_cmd = re.sub(r'harbor\S+', '{{IMAGE}}', run_cmd, count=1)
         # 移除 workspace 挂载（-v ...:/flagos-workspace）
         run_cmd = re.sub(r'\s*-v\s+\S+:/flagos-workspace', '', run_cmd)
         # 替换所有模型相关挂载为 -v /data:/data（canonical_model_path 在 /data/ 下，天然可达）
