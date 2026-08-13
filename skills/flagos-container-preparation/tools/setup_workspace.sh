@@ -30,11 +30,15 @@ POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --skip-archive) SKIP_ARCHIVE=true ;;
+        --context-template=*) CONTEXT_TEMPLATE="${arg#--context-template=}" ;;
         *) POSITIONAL+=("$arg") ;;
     esac
 done
-CONTAINER="${POSITIONAL[0]:?用法: $0 <container_name> [model_path] [--skip-archive]}"
+CONTAINER="${POSITIONAL[0]:?用法: $0 <container_name> [model_path] [--skip-archive] [--context-template=xxx]}"
 MODEL_NAME="${POSITIONAL[1]:-}"
+# context 模板选择：day0 流程传 --context-template=context_day0.template.yaml，
+# 默认 context.template.yaml（量产流程），行为不变。
+CONTEXT_TEMPLATE="${CONTEXT_TEMPLATE:-context.template.yaml}"
 
 # 项目根目录（此脚本所在位置的上三级）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -152,8 +156,8 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         # 停止可能残留的 vllm 服务进程
         pkill -f 'vllm.entrypoints' 2>/dev/null || true
     "
-    # 重置 context.yaml：从项目模板复制，确保与模板字段同步
-    docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    # 重置 context.yaml：从项目模板复制，确保与模板字段同步（模板经 --context-template 可选）
+    docker cp "${PROJECT_ROOT}/shared/${CONTEXT_TEMPLATE}" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
     echo "  ✓ context.yaml 已重置（从模板复制）"
     echo "  ✓ 残留算子列表已清理"
     echo "  ✓ 残留服务进程已清理"
@@ -233,6 +237,7 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
     # V1 三选状态机（分支 B，选定后固化 VLLM_PLUGINS + 写 context baseline.*）
     "skills/flagos-service-startup/tools/baseline_selector.py:scripts/baseline_selector.py"
+    "skills/flagos-service-startup/tools/smoke_test.py:scripts/smoke_test.py"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
     # 性能测试
@@ -292,6 +297,7 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
     # 报告生成工具
     "shared/generate_report.py:scripts/generate_report.py"
+    "shared/generate_day0_report.py:scripts/generate_day0_report.py"
     # 芯片厂商×型号统一规范表（generate_report/issue_reporter 依赖，需与消费脚本同目录）
     "shared/chip_spec.py:scripts/chip_spec.py"
     "shared/chip_spec.yaml:scripts/chip_spec.yaml"
@@ -332,16 +338,17 @@ fi
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"
 
 # 3.5. 从模板初始化容器内 context.yaml（每个容器独立，避免多任务冲突）
-# 每次都从模板重新初始化，确保干净的初始状态
-TEMPLATE_FILE="${PROJECT_ROOT}/shared/context.template.yaml"
+# 每次都从模板重新初始化，确保干净的初始状态。
+# 模板可通过 --context-template 指定（day0 流程传 context_day0.template.yaml）。
+TEMPLATE_FILE="${PROJECT_ROOT}/shared/${CONTEXT_TEMPLATE}"
 if [ -f "${TEMPLATE_FILE}" ]; then
     docker cp "${TEMPLATE_FILE}" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
-    echo "  ✓ shared/context.yaml (从 context.template.yaml 初始化)"
+    echo "  ✓ shared/context.yaml (从 ${CONTEXT_TEMPLATE} 初始化)"
 else
     # 兼容旧版：模板文件不存在时尝试旧路径
     if [ -f "${PROJECT_ROOT}/shared/context.yaml" ]; then
         docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
-        echo "  ⚠ shared/context.yaml (从旧 context.yaml 复制，请迁移到 context.template.yaml)"
+        echo "  ⚠ shared/context.yaml (从旧 context.yaml 复制，请迁移到 ${CONTEXT_TEMPLATE})"
     else
         docker exec "${CONTAINER}" bash -c "echo '# FlagOS context' > /flagos-workspace/shared/context.yaml"
         echo "  ⚠ shared/context.yaml (空文件，未找到模板)"

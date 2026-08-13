@@ -156,9 +156,9 @@ def main():
     )
     parser.add_argument(
         "--version-tag",
-        choices=["v1", "v2", "v3", "v4"],
+        choices=["v1", "v2", "v3", "v4", "day0"],
         default="v2",
-        help="发布版本标签：v1=基础版, v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin,交付flagrelease-project), v4=精简版(减算子)"
+        help="发布版本标签：v1=基础版, v2=Pro版(gems+tree), v3=Max版(gems+tree+plugin,交付flagrelease-project), v4=精简版(减算子), day0=快速适配验证版(全组件+私有发布)"
     )
     parser.add_argument(
         "--also-tag",

@@ -23,6 +23,9 @@ VLLM_PLUGINS_OVERRIDE=""
 # 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
 # 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
 LOG_FILE_OVERRIDE=""
+# --enforce-eager：透传 vLLM 启动参数（day0 场景：启动阶段关算子无效后辅助排查
+# CUDA graph capture 类失败。仅启动阶段可用，冒烟/评测阶段不适用——见 flagos-day0 SKILL.md）
+ENFORCE_EAGER=0
 
 # 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
 while [[ $# -gt 0 ]]; do
@@ -33,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
         --log-file=*) LOG_FILE_OVERRIDE="${1#--log-file=}"; shift ;;
         --log-file)   LOG_FILE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --enforce-eager) ENFORCE_EAGER=1; shift ;;
         *)        shift ;;
     esac
 done
@@ -240,6 +244,12 @@ CMD="vllm serve '${MODEL_PATH}' \
     --tensor-parallel-size ${TP_SIZE} \
     --max-model-len ${MAX_MODEL_LEN} \
     --trust-remote-code"
+
+# --enforce-eager 透传（day0 启动阶段排障；vLLM 的 CUDA graph 捕获失败时禁用图模式重试）
+if [ "$ENFORCE_EAGER" = "1" ]; then
+    CMD="$CMD --enforce-eager"
+    echo "[start_service.sh] --enforce-eager 已启用（禁用 CUDA graph，day0 启动排障模式）"
+fi
 
 # Thinking model 添加 reasoning parser
 if [ "$THINKING" = "true" ]; then

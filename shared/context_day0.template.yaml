@@ -1,0 +1,315 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ============================================================================
+# context_day0.template.yaml — day0 快速适配验证流程状态模板
+# ============================================================================
+# 与 context.template.yaml（量产迁移流程）完全独立，由 setup_workspace.sh
+# --context-template 选项复制为容器内 /flagos-workspace/shared/context.yaml。
+#
+# ⚠ 禁止直接读写此文件作为运行时状态！
+# 运行时 context 位于容器内 /flagos-workspace/shared/context.yaml，每个容器独立。
+#
+# day0 场景口径（用户 2026-08-13 定稿）：
+#   - 输入：镜像（必含 plugin+flaggems+flagtree 全组件）+ 本地权重路径
+#   - 流程：全组件启动 → 首都冒烟测例（硬闸门）→ 全量 gpqa_diamond 精度 →
+#           精度调优 → 性能采集 → 私有发布（Harbor+MS+HF 全私有）
+#   - 排障：关算子优先 → 组件探索（轻量可修就修，Claude 自主发挥）→ 不可修复
+#           出问题总结报告终止；修复不同步上游
+# ============================================================================
+
+# ============================================================================
+# 网络环境 (首次网络操作失败时由编排层写入)
+# ============================================================================
+network:
+  proxy: ""               # 用户提供的代理地址，如 http://proxy:port
+  pip_index: ""           # pip 镜像源
+  confirmed: false        # 是否已确认过网络环境
+
+# ============================================================================
+# 执行模式 (由编排层写入)
+# ============================================================================
+execution:
+  mode: ""                    # host | container (Claude Code 运行位置)
+  cmd_prefix: ""              # "" (容器内) 或 "docker exec <container>" (宿主机)
+
+# ============================================================================
+# 模型信息 (由容器准备写入)
+# ============================================================================
+model:
+  name: ""                # 模型名（取权重路径 basename）
+  local_path: ""          # 权重在宿主机上的路径（用户直接提供）
+  container_path: ""      # 权重在容器内的路径（挂载点）
+  tokenizer_path: ""      # tokenizer 路径 (通常与 model 路径相同)
+  dtype: ""               # 权重数制 (bfloat16/float16/float32)
+
+# ============================================================================
+# 容器信息 (由容器准备写入)
+# ============================================================================
+container:
+  name: ""                # 容器名称
+  status: ""              # 状态: running|stopped
+
+# ============================================================================
+# 镜像信息 (由容器准备写入)
+# ============================================================================
+image:
+  name: ""                # 用户给定镜像（day0 默认必含 plugin+flaggems+flagtree）
+  tag: ""
+  registry_url: ""        # 发布后回写
+
+# ============================================================================
+# 工作目录 (由容器准备写入)
+# ============================================================================
+workspace:
+  host_path: ""           # 宿主机路径: /mnt/data/flagos-workspace/<model_name>
+  container_path: "/flagos-workspace"
+
+# ============================================================================
+# GPU 信息 (由容器准备写入)
+# ============================================================================
+gpu:
+  vendor: ""              # 厂商（报告命名走 chip_spec.yaml）
+  type: ""                # GPU 型号
+  count: 0                # GPU 数量
+  visible_devices_env: "" # 指定卡的环境变量名
+
+# ============================================================================
+# 环境检查信息 (由环境检测写入，仅采集信息，不参与分支路由——day0 镜像必为全组件)
+# ============================================================================
+inspection:
+  core_packages:            # 核心组件版本
+    torch: ""
+    vllm: ""
+  flag_packages:            # flag 生态组件版本
+    flaggems: ""
+    flagscale: ""
+    flagcx: ""
+    vllm_plugin: ""
+  env_type: ""              # 环境场景（参考值: vllm_plugin_flaggems 等）
+  has_plugin: true          # day0 镜像必含 plugin
+  has_flagtree: true        # day0 镜像必含 flagtree
+  flaggems_capabilities: []
+  env_vars: {}              # flag 相关环境变量快照
+
+# ============================================================================
+# 运行时信息 (由环境检测/服务启动写入)
+# ============================================================================
+runtime:
+  framework: "vllm"       # 固定 vllm
+  flaggems_enabled: true  # day0 全组件启动，恒为 true
+  tp_size: 0              # tensor-parallel-size
+  tp_reason: ""           # TP 推算原因
+  gpu_count: 0            # 实际使用的 GPU 数量
+  total_gpus: 0           # 宿主机总 GPU 数量
+  cuda_visible_devices: ""
+  thinking_model: false   # 是否为 thinking model（影响评测预算）
+
+# ============================================================================
+# 服务信息 (由服务启动写入)
+# ============================================================================
+service:
+  host: ""                # 服务地址
+  port: 8000              # 服务端口（被占用自动递增，实际端口读 logs/service_port）
+  endpoint: "/v1/completions"
+  process_id: ""          # 服务进程 PID
+  healthy: false          # 服务是否健康
+  model_id: ""            # API 返回的模型 ID
+  log_path: ""            # 服务日志路径
+  enable_oplist_path: ""  # 运行时权威算子列表路径
+  enable_oplist_count: 0  # 算子数量
+  initial_operator_list: []
+  max_model_len: 0
+
+# ============================================================================
+# day0 专属状态 (day0 流程各步骤写入)
+# ============================================================================
+day0:
+  entry:
+    image: ""                 # 用户给定镜像
+    weight_path_host: ""      # 用户给定本地权重路径（宿主机）
+    weight_path_container: "" # 容器内挂载路径
+  smoke:
+    prompt: "中国首都在哪"     # 冒烟问题（需求措辞）
+    passed: false             # 冒烟硬闸门：通过才进精度评测
+    answer: ""                # 冒烟回答原文（截断 200 字符）
+    retries: 0                # 排障重试轮数
+  repair: []                  # 排障动作记录（按序）:
+                              # {round, action(disable_ops|enforce_eager|source_patch|other),
+                              #  ops|files, result, note}
+  enforce_eager_used: false   # 是否使用过 --enforce-eager（仅启动阶段合法）
+  unfixable: false            # 不可修复 → 问题总结报告兜底终止，不发布
+  unfixable_reason: ""        # 不可修复原因摘要
+  accuracy_ok: false          # 精度达标（相对 NV 退化 ≤5%）
+  eval_unreachable: false     # 精度报错/无效且无法解决 → 跳过性能
+  eval_unreachable_reason: ""
+  problem_summary:            # 问题总结报告数据源（修复过/不可修复/精度无效任一触发）
+    triggered: false
+    conclusion: ""            # 结论: fixed | unfixable | accuracy_invalid
+    phenomenon: ""            # 问题现象
+    actions_taken: ""         # 已尝试的排障动作摘要
+    root_cause: ""            # 根因分析
+    suggestion: ""            # 建议修复方案
+
+# ============================================================================
+# 评测信息 (由精度评测写入)
+# ============================================================================
+eval:
+  dataset: "gpqa_diamond"   # day0 固定全量 gpqa_diamond（不截断）
+  score: 0                  # 本模型得分 (%)
+  nv_score: 0               # NV 参考基线分数 (%)，来自 nv_baseline.yaml
+  nv_source: ""             # NV 基线数据来源
+  rel_drop_pct: 0           # 相对退化百分比 (NV基线-当前)/NV基线
+  accuracy_threshold: 5.0   # 精度对齐阈值 (%)
+  excluded_ops_accuracy: [] # 因精度问题关闭的算子
+
+# ============================================================================
+# 性能信息 (由性能评测写入，仅采集无对比无闸门)
+# ============================================================================
+perf:
+  strategy: "quick"         # 单轮采集
+  test_case: "4k_input_1k_output"
+  concurrency: 64
+  output_throughput: 0      # Output token throughput (tok/s)
+  total_throughput: 0       # Total token throughput (tok/s)
+  result_path: ""           # benchmark 结果 JSON 路径
+
+# ============================================================================
+# 算子控制 (由排障/调优写入，全流程累计)
+# ============================================================================
+operator_control:
+  disabled_ops: []          # 已禁用算子（plugin env blacklist 累计）
+  last_blacklist: ""        # 最近一次生效的 VLLM_FL_FLAGOS_BLACKLIST 值
+
+# ============================================================================
+# 发布信息 (由发布步骤写入)
+# ============================================================================
+release:
+  harbor_image: ""          # Harbor 镜像完整地址（tag 后缀 -day0）
+  modelscope_url: ""        # ModelScope 私有仓 URL
+  huggingface_url: ""       # HuggingFace 私有仓 URL
+
+# ============================================================================
+# 流程状态 (由编排层维护)
+# ============================================================================
+workflow:
+  smoke_ok: false           # 段1 冒烟硬闸门
+  accuracy_ok: false        # 段2 精度达标（相对 NV 退化 ≤5%）
+  eval_unreachable: false   # 精度无效（跳过性能）
+  unfixable: false          # 不可修复（报告兜底终止）
+  released: false           # 私有发布完成
+  all_done: false           # 全流程完成
+  last_error: ""            # 最近一次错误信息
+
+# ============================================================================
+# 工作流台账 (由编排层维护，每步开始/结束时更新)
+# ============================================================================
+workflow_ledger:
+  steps:
+    - step: "d1_container_preparation"
+      name: "容器准备"
+      status: "pending"       # pending | in_progress | success | failed | skipped
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d2_environment_inspection"
+      name: "环境检测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d3_service_startup"
+      name: "全组件服务启动"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d4_smoke_test"
+      name: "首都冒烟测例"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d5_accuracy_eval"
+      name: "精度评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d6_accuracy_tuning"
+      name: "精度调优"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d7_performance"
+      name: "性能评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d8_release"
+      name: "私有发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "d9_report"
+      name: "报告收尾"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# ============================================================================
+# 流程计时 (由编排层维护)
+# ============================================================================
+timing:
+  workflow_start: ""          # 流程开始时间 (ISO 8601)
+  workflow_end: ""            # 流程结束时间 (ISO 8601)
+  total_duration_seconds: 0   # 全流程总耗时 (秒)
+
+# ============================================================================
+# 元数据
+# ============================================================================
+metadata:
+  created_by: "context_day0.template.yaml"
+  updated_at: ""
