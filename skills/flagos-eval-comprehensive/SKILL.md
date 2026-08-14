@@ -359,7 +359,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     --stall-timeout 300 --max-timeout 22500"
 ```
 
-**强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。
+**强制规则**：V1 和 V2 必须使用相同的 GPU **卡数**（`TP_SIZE` 一致，卡数锁定见 service-startup SKILL 步骤 2.4）。`CUDA_VISIBLE_DEVICES` 允许换物理卡（优先复用 context 中上次的值），但 `runtime.gpu_count` 与 `TP_SIZE` 复用首次启动锁定的值，不得变更。
 
 **V2 评测完成后，自动进入模块 C（精度对比）。**
 

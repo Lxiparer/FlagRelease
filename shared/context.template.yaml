@@ -214,7 +214,8 @@ runtime:
   flaggems_enabled: false # 是否启用 FlagGems
   tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
   tp_reason: ""           # TP 推算原因
-  gpu_count: 0            # 实际使用的 GPU 数量
+  gpu_count: 0            # 实际使用的 GPU 数量（首次启动检测后锁定不变）
+  gpu_count_locked: false # 卡数锁定标记: true 后 V2/V3/V4 不得改 gpu_count/TP（可换物理卡、数量不变）
   total_gpus: 0           # 宿主机总 GPU 数量
   cuda_visible_devices: "" # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
   gpu_selection_reason: "" # GPU 选择原因

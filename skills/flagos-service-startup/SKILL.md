@@ -205,9 +205,16 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 **算子列表获取**（启动后）：
 - 检查 `/tmp/flaggems_enable_oplist.txt`（plugin 架构下的权威算子列表）
 
-## 步骤 2.4 — GPU 空闲检测（强制）
+## 步骤 2.4 — GPU 空闲检测（强制，卡数锁定语义）
 
 服务启动前检测各 GPU 的显存占用情况，**只使用空闲 GPU，不清理其他进程。**
+
+**卡数锁定规则（2026-08-14 定稿，约束14 本意 = 同卡数而非同物理卡）**：
+- **首次启动（`runtime.gpu_count_locked != true`）**：正常检测 → 选定 N 张 → **锁定卡数 N**（写 `gpu_count_locked=true`），此后 V1/V2/V3/V4 全程卡数不变、TP 不变
+- **后续启动（已锁定）**：重新检测，但**必须凑够同样的 N 张**：
+  - 空闲卡 ≥ N → **优先复用上次的卡**（`runtime.cuda_visible_devices` 中仍空闲的部分），不足的从其他空闲卡补齐
+  - 空闲卡 < N → 复用上次的完整卡列表（哪怕部分已忙）+ 打警告——**卡数优先，宁可共享也不变 N**（V1 期间那些卡本来就是空的，切换窗口很短，真被挤了 vllm 会明确报错）
+- 换卡不换数：物理卡允许变（机器共享、别人的任务会走会来），`runtime.gpu_count` 与 TP 全程一致，V1/V2 对比口径成立
 
 使用统一检测脚本（自动适配 NVIDIA / 华为昇腾 / 沐曦等厂商）：
 
@@ -217,12 +224,12 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 输出 JSON 格式：`{vendor, free_gpus: [idx...], busy_gpus: [idx...], total, details: [{index, used_mib, total_mib, free_mib, usage_pct}...], visible_devices_env}`
 
-**处理逻辑**：
+**首次检测处理逻辑**：
 
 | 情况 | 操作 |
 |------|------|
 | 全部 GPU 空闲 | 正常使用全部 GPU，不设 VISIBLE_DEVICES |
-| 部分 GPU 空闲 | 设置对应厂商的 VISIBLE_DEVICES 环境变量（从输出的 `visible_devices_env` 字段获取），TP 按空闲 GPU 数重新推算 |
+| 部分 GPU 空闲 | 设置对应厂商的 VISIBLE_DEVICES 环境变量（从输出的 `visible_devices_env` 字段获取），TP 按空闲 GPU 数推算 |
 | 无空闲 GPU | 记录警告，仍尝试启动（小模型可能共享显存），OOM 后报错 |
 
 **部分 GPU 空闲时**：
@@ -230,19 +237,28 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 2. 更新 `runtime.gpu_count` 为空闲 GPU 数量
 3. 步骤 2.5 的 TP 推算基于空闲 GPU 数量
 4. `start_service.sh` 会自动从 `gpu.visible_devices_env` 读取正确的环境变量名并设置
-5. 输出提示并记录到 trace
+5. **无论哪种结果（全空闲/部分空闲/无空闲强启），启动前一律写 `runtime.gpu_count_locked=true`**——本次模型流程的卡数从此固定
+6. 输出提示并记录到 trace
 
 ```
 ⚠ GPU 资源检测: 8 张 GPU 中 6 张空闲
   占用中: GPU 0,1（显存占用 45.2%, 38.7%）
   本次使用: GPU 2,3,4,5,6,7（CUDA_VISIBLE_DEVICES=2,3,4,5,6,7）
+  ✓ 卡数已锁定: N=6（后续 V2/V3/V4 复用此卡数，物理卡可换、数量不变）
 ```
+
+**已锁定后的启动（V2/V3/V4 及断点续跑）**：
+1. 照常检测空闲卡（保持自适应，避开新被占的卡）
+2. 空闲 ≥ N：上次卡中仍空闲的**保留**，不足部分从空闲卡补齐 → 更新 `cuda_visible_devices`（`gpu_count` 不变）
+3. 空闲 < N：`cuda_visible_devices` 保持上次值不动 + 打警告「空闲卡不足 N，复用上次卡列表（卡数优先）」→ 照常启动
+4. `gpu_count` 与 TP **永不重推**（卡数锁定）
 
 **写入 context.yaml**：
 ```yaml
 runtime:
-  gpu_count: 6                          # 实际使用的 GPU 数量
-  cuda_visible_devices: "2,3,4,5,6,7"   # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
+  gpu_count: 6                          # 实际使用的 GPU 数量（首次检测后锁定不变）
+  gpu_count_locked: true                # 卡数锁定标记：true 后后续启动不得改 gpu_count/TP
+  cuda_visible_devices: "2,3,4,5,6,7"   # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定；已锁定后允许换卡、数量不变）
   total_gpus: 8                          # 机器总 GPU 数
   gpu_selection_reason: "GPU 0,1 被其他进程占用，使用剩余 6 张空闲 GPU"
 ```

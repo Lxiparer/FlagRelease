@@ -186,7 +186,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
 | pip 国内镜像 | `-i https://mirrors.aliyun.com/pypi/simple/` | pip 失败时自动加镜像重试 |
 | 服务端口 | 默认 8000，被占用则自动递增（+1 到 +10） | 不询问端口号 |
-| GPU 设备 | 启动前检测空闲 GPU（显存占用 <5%），仅使用空闲 GPU | 不询问使用哪些卡 |
+| GPU 设备 | 启动前检测空闲 GPU（显存占用 <5%），仅使用空闲 GPU；首次启动锁定卡数（gpu_count_locked），后续版本可换物理卡但卡数/TP 不变 | 不询问使用哪些卡 |
 | Harbor 仓库地址 | `harbor.baai.ac.cn/flagrelease-public` | 无需用户提供 |
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
 | 仓库可见性 | 全部私有发布 | 报告中注明是否达标 |
@@ -383,7 +383,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ### GPU 资源管理
 
-14. **V1 和 V2 必须使用相同的 GPU 配置**，禁止重新检测 GPU
+14. **V1 和 V2 必须使用相同的 GPU 卡数（TP 一致）**。首次启动检测空闲卡后锁定卡数（`runtime.gpu_count_locked=true`），后续 V2/V3/V4 可重新检测空闲卡换物理卡（优先复用上次的卡），但卡数与 TP 不变——空闲卡不足 N 时复用上次卡列表硬上（卡数优先，详见 flagos-service-startup SKILL 步骤 2.4）
 15. **V1/V2 模式切换前必须先停止当前服务释放 GPU**。必须先 `docker restart $CONTAINER && sleep 5`
 16. **每个 segment 结束时必须停止推理服务释放 GPU 显存**
 17. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 自动处理，连续清理仍无可用 GPU 则中止
