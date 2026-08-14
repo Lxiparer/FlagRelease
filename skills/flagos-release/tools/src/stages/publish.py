@@ -414,7 +414,7 @@ for k, v in result.items():
     print(f'{{k}}={{v}}')
 """
         script_b64 = base64.b64encode(reader.encode()).decode()
-        cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         success, stdout, _ = self.run_command(
             cmd=cmd, step_name="收集固化环境变量", timeout=60, in_container=True, check=False
         )
@@ -491,7 +491,7 @@ except Exception as e:
 """
         import base64
         script_b64 = base64.b64encode(check_script.encode()).decode()
-        cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
 
         success, stdout, stderr = self.run_command(
             cmd=cmd,
@@ -529,7 +529,7 @@ except Exception as e:
         if need_persist:
             print("  执行 persist_op_config.py --auto ...")
             success, stdout, stderr = self.run_command(
-                cmd="${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto",
+                cmd="PATH=${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto",
                 step_name="强制固化算子配置",
                 timeout=180,
                 in_container=True,
@@ -1713,7 +1713,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
 """
         token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 ModelScope",
             timeout=UPLOAD_TIMEOUT, in_container=True
@@ -1730,7 +1730,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         container = self.config.container_name
         if not container:
             return False
-        check_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c 'import {package}'"
+        check_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c 'import {package}'"
         result, _, _ = self.run_command(
             cmd=check_cmd, step_name=f"检查容器内 {package}",
             timeout=30, in_container=True
@@ -1738,7 +1738,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         if result:
             return True
         print(f"  容器内未安装 {package}，自动安装中...")
-        install_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH pip install {package} -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
+        install_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH pip install {package} -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
         result, _, _ = self.run_command(
             cmd=install_cmd, step_name=f"容器内安装 {package}",
             timeout=300, in_container=True
@@ -1782,7 +1782,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
         """
         token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
         # 1) CLI 建私有仓
-        create_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
+        create_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
         print(f"  创建私有仓库: {model_id} ({visibility})")
         result, _, _ = self.run_command(
             cmd=create_cmd, step_name="创建 ModelScope 私有仓库",
@@ -1829,7 +1829,7 @@ except Exception:
 sys.exit(0 if ok else 1)
 """
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         sdk_ok, _, _ = self.run_command(
             cmd=cmd, step_name="确保 ModelScope 私有仓库（SDK 兜底）",
             timeout=120, in_container=True
@@ -1876,7 +1876,7 @@ sys.exit(0 if ok else 1)
             print(f"  x 无法确保 ModelScope 私有仓库存在，中止上传（拒绝 upload 自动建公开仓）")
             return False
 
-        upload_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
+        upload_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -2003,7 +2003,7 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
 """
         token_env = f"HF_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} ${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 HuggingFace",
             timeout=UPLOAD_TIMEOUT, in_container=True
@@ -2056,7 +2056,7 @@ sys.exit(0 if _private_ok else 1)
 """
         token_env = f"HF_TOKEN={token} " if token else ""
         script_b64 = base64.b64encode(sdk_script.encode()).decode()
-        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} ${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
         ok, _, _ = self.run_command(
             cmd=cmd, step_name="确保 HuggingFace 私有仓库",
             timeout=120, in_container=True
@@ -2093,7 +2093,7 @@ sys.exit(0 if _private_ok else 1)
         print(f"  容器内上传目录: {container_upload_dir}")
 
         if token:
-            login_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
+            login_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH {token_env}{endpoint_env}hf auth login --token {token}"
             success, _, _ = self.run_command(
                 cmd=login_cmd, step_name="HuggingFace 登录",
                 timeout=60, in_container=True
@@ -2109,7 +2109,7 @@ sys.exit(0 if _private_ok else 1)
             return False
 
         private_flag = "--private "
-        upload_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
+        upload_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH {token_env}{endpoint_env}hf upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -2172,7 +2172,7 @@ sys.exit(0 if _private_ok else 1)
             if not self._ensure_container_package("modelscope"):
                 print(f"  x 容器内安装 modelscope 失败")
                 return False
-            shell_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
+            shell_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
             docker_cmd = ["docker", "exec",
                           "-e", f"MODELSCOPE_API_TOKEN={token}",
                           container, "bash", "-c", shell_cmd]
@@ -2184,7 +2184,7 @@ sys.exit(0 if _private_ok else 1)
             if not self._ensure_container_package("huggingface_hub"):
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
-            shell_cmd = f"${PY_BIN_DIR:-/usr/local/python3.11.14/bin}:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
+            shell_cmd = f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
             # HuggingFace endpoint fallback：用户指定则只用该 endpoint，否则依次尝试
             # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
             user_endpoint = os.environ.get("HF_ENDPOINT", "")

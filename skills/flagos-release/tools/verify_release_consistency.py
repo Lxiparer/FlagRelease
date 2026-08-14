@@ -155,7 +155,7 @@ def check_online_readme(host_base: str, container: str, issues: List[str]):
         result = subprocess.run(
             ["docker", "exec", container, "bash", "-c",
              f"cd /flagos-workspace/scripts 2>/dev/null && "
-             f"{PY_BIN_DIR}/python3 -c "
+             f"PATH=${{PY_BIN_DIR:-/usr/local/python3.11.14/bin}}:$PATH python3 -c "
              f"\"from modelscope.hub.api import HubApi; "
              f"api=HubApi(); "
              f"print(api.get_model('{ms_url.split('/models/')[-1]}').model_id or '') \" 2>/dev/null || echo ''"],
