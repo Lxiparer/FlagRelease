@@ -94,7 +94,7 @@ DATASET_CONFIG = {
     'mmlu': {
         'full_count': 14042,
         'few_shot_num': 5,
-        'default_limit': 40,        # 2026-08-14 定稿：40/子集 = 2280 题（降采样实测 gap ±1.5pt，见记忆 eval-sampling-gap-measured）
+        'default_limit': 20,        # 2026-08-14 定稿：20/子集 = 1140 题（降采样实测 gap -0.4pt、95% ±2.05pt，见记忆 eval-sampling-gap-measured）
         'per_subset_limit': True,   # limit 应用在每个子集（57 子集 × limit 题）
         'preload': {
             'modelscope': ('AI-ModelScope/mmlu', None, 'test'),
