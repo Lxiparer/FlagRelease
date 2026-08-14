@@ -1356,14 +1356,15 @@ except Exception:
     pass
 print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
 " 2>/dev/null || echo "false")
-    # 数据集→评测预算（2026-08-14 题数降采样定稿：mmlu 40/子集、math_500 200 题，
-    # gap 实测 ±1.5pt / ±5.4pt，见记忆 eval-sampling-gap-measured。约束：国产慢 10 倍时每数据集单轮评测 ≤20min）：
+    # 数据集→评测预算（2026-08-14 题数降采样定稿：mmlu 20/子集、math_500 200 题，
+    # gap 实测 -0.4pt/±5.4pt，见记忆 eval-sampling-gap-measured）：
     #   gpqa_diamond: 单题 60s（thinking 600s），默认 50 题（thinking 30）
     #                 → 7200s（thinking 22500s），仅单数据集时显式传 --limit
     #   mmlu:         默认 20/子集 = 1140 题（不传 --limit），实测 64 并发 ~56s，
-    #                 慢 10 倍 9min → EVAL_MAX_TO 3600s
+    #                 上限 21600s——timeout 是防挂死的上限而非性能预期，
+    #                 国产慢卡（10×~30×）也绝不误杀
     #   math_500:     默认 200 题（40/等级 × 5，不传 --limit），实测 64 并发 ~40s，
-    #                 慢 10 倍 7min → EVAL_MAX_TO 3600s
+    #                 上限 7200s——同上宽松原则
     # 多数据集：EVAL_MAX_TO 取各数据集最大值；--limit 全局语义（fast_gpqa 不支持
     # per-dataset limit）→ 多数据集一律不传 --limit（各数据集用默认题数）
     EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500 及多数据集用各数据集默认题数）
@@ -1382,10 +1383,10 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
                 fi
                 ;;
             mmlu)
-                _ds_max=3600    # 1140 题慢 10 倍 9min + 6.5× 缓冲
+                _ds_max=21600   # 1140 题慢 10 倍 9min；上限宽松防国产慢卡误杀
                 ;;
             math_500)
-                _ds_max=3600    # 200 题慢 10 倍 7min + 8× 缓冲
+                _ds_max=7200    # 200 题慢 10 倍 7min；上限宽松防国产慢卡误杀
                 ;;
         esac
         [ "${_ds_max}" -gt "${EVAL_MAX_TO}" ] && EVAL_MAX_TO="${_ds_max}"
