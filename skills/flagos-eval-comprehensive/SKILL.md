@@ -129,13 +129,15 @@ eval:
 | 数据集 | --dataset 值 | 默认 few-shot | 默认题数 | 说明 |
 |--------|-------------|--------------|---------|------|
 | GPQA Diamond | `gpqa_diamond` | 0-shot | 50（--limit 0 全量 198） | 主流程 V1/V2 精度判据 |
-| MMLU | `mmlu` | 5-shot | 100/子集 | **per-subset 语义**：57 子集各取 limit 题（--limit 100 = 5700 题，全量 14042 的 40%） |
-| MATH-500 | `math_500` | 0-shot | 500（全量） | 500 题 test，`\boxed{}` 答案；**同为 per-subset 语义**（实测 1.5.1：5 子集 Level 1-5 各取 limit 题，--limit 10 = 50 题，--limit 0 = 全量 500） |
+| MMLU | `mmlu` | 5-shot | 40/子集 | **per-subset 语义**：57 子集各取 limit 题（默认 40/子集 = 2280 题；--limit 100 = 5700 题，--limit 0 = 全量 14042） |
+| MATH-500 | `math_500` | 0-shot | 200（40/等级） | 500 题 test，`\boxed{}` 答案；**同为 per-subset 语义**（实测 1.5.1：5 子集 Level 1-5 各取 limit 题，默认 40/等级 = 200 题，--limit 0 = 全量 500） |
+
+> 默认题数降采样为 2026-08-14 定稿（迁移成本优化）：mmlu 40/子集 gap 实测 ±1.5pt、math 200 题 ±5.4pt（用户已确认接受），详见 `eval-sampling-gap-measured` 记忆。
 
 **多数据集**：`--dataset` 支持一次指定多个（空格或逗号分隔），依次评测、每数据集独立结果文件；多数据集时 `--output` 视为目录（写 `{dir}/{dataset}_result.json`），单数据集时仍为文件路径：
 
 ```bash
-# 一次跑多个数据集（mmlu 5700 题 + math_500 全量 500 题，各用默认题数）
+# 一次跑多个数据集（mmlu 2280 题 + math_500 200 题，各用默认题数）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 \
     --dataset mmlu math_500 --output /flagos-workspace/results/multi"
@@ -209,7 +211,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
 
-# 方式三：指定数据集（MMLU 57 子集各 100 题 / MATH-500 全量 500 题）
+# 方式三：指定数据集（MMLU 57 子集各 40 题 / MATH-500 200 题，均用默认题数；--limit 100 / --limit 0 可取更大样本）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu --limit 100"
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
@@ -263,7 +265,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 | 普通 | 50 | 60s | 7200（维持原 2h 语义） |
 
 - **V1 与 V2 必须使用相同参数**：thinking 模型两侧均 `--limit 30`，普通模型两侧均默认 50 题（同样本可对比，禁止一方 30 一方 50）
-- **非 gpqa 数据集预算**：mmlu `--limit 100` = 5700 题（57 子集 × 100），math_500 全量 = 500 题。task_runner `--timeout` 按「题数 × 单题耗时（实测 1.5B 模型约 0.2-3s/题）× 1.25 缓冲」估算，如 mmlu 5700 题建议 ≥21600s，math_500 500 题 ≥7200s（慢速芯片需翻倍）
+- **非 gpqa 数据集预算**：mmlu 默认 40/子集 = 2280 题（57 子集 × 40），math_500 默认 40/等级 = 200 题。task_runner `--timeout` 按「题数 × 单题耗时（实测 1.5B 模型约 0.2-3s/题）× 1.25 缓冲」估算，如 mmlu 2280 题建议 ≥7200s，math_500 200 题 ≥3600s（慢速芯片需翻倍；--limit 100/--limit 0 取更大样本时相应上调）
 - **禁止因耗时长跳过评测**：评测耗时长（尤其 thinking 模型 6h+）是预算内预期，严禁因等待时间长主动跳过、放弃或截断评测；预算内完成即为正常，超时按等待策略重试
 - **执行方式（2026-08 长任务执行协议）**：Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败。**禁止**用 Bash(timeout=大数) 前台阻塞等待评测（旧 Bash timeout(ms) 列已废弃），**禁止** TaskOutput 轮询。评测命令写入任务文件后经 task_runner.py detached 启动（`--timeout <max_timeout>`），Claude 每 8 分钟短轮询状态文件，见下方「长任务执行协议」三步模板
 - 安全网保障：预算调大不会让 runaway 无限拖 —— fast_gpqa max_tokens cap（防线1）锁死复读生成窗口；eval_wrapper 收尾停滞看门狗照杀（防线3），生成中停滞仅提示不杀（慢≠死），给足预算不会误杀正常长推理
@@ -303,7 +305,7 @@ sleep 480 && docker exec $CONTAINER bash -c "cat /flagos-workspace/logs/tasks/ev
 
 **步骤4 — V1 (Native) 精度**（始终执行）：
 
-> **多数据集**：以下模板为默认场景 gpqa_diamond 单数据集。`--datasets` 指定多数据集（或 mmlu/math_500）时，**每个数据集独立评测**：eval-cmd 加 `--dataset {ds}`（如 `--dataset mmlu`）、输出 `{ds}_native.json`、任务文件 `eval_v1_{ds}.cmd`；`--limit` 仅 gpqa_diamond 单数据集时传（30/50），mmlu/math_500 及多数据集不传（fast_gpqa 按数据集默认题数：mmlu 100/子集=5700、math_500 全量 500）。判定见模块 C 与下方编排层指令（per-dataset、`--metric {ds}`、输出 `accuracy_compare_{ds}.json`）。
+> **多数据集**：以下模板为默认场景 gpqa_diamond 单数据集。`--datasets` 指定多数据集（或 mmlu/math_500）时，**每个数据集独立评测**：eval-cmd 加 `--dataset {ds}`（如 `--dataset mmlu`）、输出 `{ds}_native.json`、任务文件 `eval_v1_{ds}.cmd`；`--limit` 仅 gpqa_diamond 单数据集时传（30/50），mmlu/math_500 及多数据集不传（fast_gpqa 按数据集默认题数：mmlu 40/子集=2280、math_500 40/等级=200）。判定见模块 C 与下方编排层指令（per-dataset、`--metric {ds}`、输出 `accuracy_compare_{ds}.json`）。
 
 1. 停止现有服务，释放 GPU 显存：
 ```bash

@@ -1356,13 +1356,14 @@ except Exception:
     pass
 print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
 " 2>/dev/null || echo "false")
-    # 数据集→评测预算（2026-08-12 定稿，约束：国产慢 10 倍时每数据集单轮评测 ≤1h）：
+    # 数据集→评测预算（2026-08-14 题数降采样定稿：mmlu 40/子集、math_500 200 题，
+    # gap 实测 ±1.5pt / ±5.4pt，见记忆 eval-sampling-gap-measured。约束：国产慢 10 倍时每数据集单轮评测 ≤20min）：
     #   gpqa_diamond: 单题 60s（thinking 600s），默认 50 题（thinking 30）
     #                 → 7200s（thinking 22500s），仅单数据集时显式传 --limit
-    #   mmlu:         默认 100/子集 = 5700 题（不传 --limit），实测 16 并发 ~7min，
-    #                 慢 10 倍 46min → EVAL_MAX_TO 21600s（6h 上限缓冲，不误杀）
-    #   math_500:     默认 500 题全量（不传 --limit），实测 16 并发 ~3.2min，
-    #                 慢 10 倍 32min → EVAL_MAX_TO 7200s
+    #   mmlu:         默认 40/子集 = 2280 题（不传 --limit），实测 64 并发 ~1m52s，
+    #                 慢 10 倍 18min → EVAL_MAX_TO 7200s
+    #   math_500:     默认 200 题（40/等级 × 5，不传 --limit），实测 64 并发 ~40s，
+    #                 慢 10 倍 7min → EVAL_MAX_TO 3600s
     # 多数据集：EVAL_MAX_TO 取各数据集最大值；--limit 全局语义（fast_gpqa 不支持
     # per-dataset limit）→ 多数据集一律不传 --limit（各数据集用默认题数）
     EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500 及多数据集用各数据集默认题数）
@@ -1381,10 +1382,10 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
                 fi
                 ;;
             mmlu)
-                _ds_max=21600   # 慢 10 倍 46min + 缓冲
+                _ds_max=7200    # 2280 题慢 10 倍 18min + 6.5× 缓冲
                 ;;
             math_500)
-                _ds_max=7200    # 慢 10 倍 32min + 缓冲
+                _ds_max=3600    # 200 题慢 10 倍 7min + 8× 缓冲
                 ;;
         esac
         [ "${_ds_max}" -gt "${EVAL_MAX_TO}" ] && EVAL_MAX_TO="${_ds_max}"
@@ -1392,7 +1393,7 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
     if [ -n "${EVAL_LIMIT}" ]; then
         EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：${EVAL_LIMIT} 题 × 单题 $([ "${IS_THINKING}" = "true" ] && echo 600s || echo 60s) × 1.25 缓冲 = ${EVAL_MAX_TO}s（约 $(( EVAL_MAX_TO / 3600 ))h）。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**；超时按评测等待策略重试规则处理，GPU 调度由编排层负责。**V1 与 V2 必须使用相同参数：均加 --limit ${EVAL_LIMIT}**（同样本可对比，不得一方 50 题一方 30 题）。"
     else
-        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：max_timeout=${EVAL_MAX_TO}s。mmlu 默认 5700 题（每子集 100）、math_500 默认 500 题全量、gpqa_diamond 默认 50 题（thinking 30）——评测命令**不传 --limit**（fast_gpqa 按数据集默认题数）。实测基准（AceInstruct-1.5B @16 并发）：mmlu ~7min、math_500 ~3min；国产慢 10 倍时 46min/32min 均在 1h 内。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**。"
+        EVAL_BUDGET_NOTE="**评测时间预算（数据集: ${DATASETS_CSV}）**：max_timeout=${EVAL_MAX_TO}s。mmlu 默认 2280 题（每子集 40）、math_500 默认 200 题（每等级 40）、gpqa_diamond 默认 50 题（thinking 30）——评测命令**不传 --limit**（fast_gpqa 按数据集默认题数）。实测基准（H20 @64 并发）：mmlu ~1m52s、math_500 ~40s；国产慢 10 倍时 18min/7min。评测耗时长是预算内预期，**禁止因耗时长主动跳过或放弃评测**。"
     fi
     # EVAL_BASH_MS 概念已废弃（2026-08 长任务执行协议）：Bash 工具 10 分钟硬上限使
     # 超大 timeout 无效，长任务统一走 task_runner.py detached 启动 + 状态文件 + 短轮询
@@ -1505,7 +1506,7 @@ CMD_EOF\"
 - eval_wrapper.py 自动从 context.yaml 获取端口和模型名，无需手动指定 --model-name 或 --api-base
 **数据集任务规格表（每个数据集独立评测、独立判定，全部达标才 accuracy_ok=true）**：
 ${DATASET_EVAL_SPEC}
-- **V1/V2 参数必须完全相同**（同一 --dataset；mmlu/math_500 不传 --limit 用数据集默认题数：mmlu 100/子集=5700 题、math_500 全量 500 题）
+- **V1/V2 参数必须完全相同**（同一 --dataset；mmlu/math_500 不传 --limit 用数据集默认题数：mmlu 40/子集=2280 题、math_500 40/等级=200 题）
 - **判定**：每数据集 accuracy_compare.py --v1 .../{dataset}_native.json --v2 .../{dataset}_flagos.json --metric {dataset} --output .../accuracy_compare_{dataset}.json（本地 V1 基线模式 --metric 不影响判据，仅报告标题）；rel_drop >5% 的数据集记录到 logs/issues_accuracy.log 并触发步骤5调优（按不达标数据集逐个进行，每轮只针对一个数据集）；update_context.py 写入 accuracy_ok=true 前会自动校验**全部** accuracy_compare_{dataset}.json 均 aligned，缺失或任一不达标则拒绝
 - nv_baseline.yaml 需已收录该模型对应数据集指标（用户补充，结构已支持多指标）；缺失时以本地 V1 为基线
 

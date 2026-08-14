@@ -94,7 +94,7 @@ DATASET_CONFIG = {
     'mmlu': {
         'full_count': 14042,
         'few_shot_num': 5,
-        'default_limit': 100,
+        'default_limit': 40,        # 2026-08-14 定稿：40/子集 = 2280 题（降采样实测 gap ±1.5pt，见记忆 eval-sampling-gap-measured）
         'per_subset_limit': True,   # limit 应用在每个子集（57 子集 × limit 题）
         'preload': {
             'modelscope': ('AI-ModelScope/mmlu', None, 'test'),
@@ -105,7 +105,7 @@ DATASET_CONFIG = {
     'math_500': {
         'full_count': 500,
         'few_shot_num': 0,
-        'default_limit': 500,       # 全量（--limit 0 时同全量）
+        'default_limit': 40,        # 2026-08-14 定稿：40/等级 × 5 = 200 题（--limit 0 仍为全量 500）
         'per_subset_limit': True,   # limit 应用在每个子集（5 子集 Level 1-5 × limit 题，实测 1.5.1 行为）
         'preload': {
             'modelscope': ('AI-ModelScope/MATH-500', None, 'test'),
