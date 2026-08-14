@@ -198,6 +198,12 @@ fi
 # 根据 mode 强制覆盖 USE_FLAGGEMS（确保 native/flagos 模式正确）
 export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
 
+# flagos 模式强制调度偏好 = flagos（V2 直接走 plugin 调度路径的确定性保证；
+# 防止 /etc/environment 残留的 reference 钉死参考实现——2026-08-14 隐患修复）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+    export SGLANG_FL_PREFER="flagos"
+fi
+
 # native 模式下关闭插件两层替换（Layer1 总开关 + Layer2 fused kernels）并清残留配置
 if [ "$MODE" = "native" ]; then
     export SGLANG_FL_OOT_ENABLED=0

@@ -151,22 +151,25 @@ def _persist_state(result: Dict[str, Any]) -> Dict[str, Any]:
             # v1.3 插件层加载不开替换：持久化 SGLANG_PLUGINS=sglang_fl + 关闭 flaggems
             # （V2 会显式 USE_FLAGGEMS=1 强制覆盖 → 插件层已注册 hooks，flag_gems
             #   enable 后即 flagos 调度路径，天然衔接 V2）
+            # 注意：不持久化 PREFER=reference——/etc/environment 加载器会用它覆盖
+            # V2 内联的 PREFER=flagos，钉死 reference 调度（2026-08-14 隐患修复）
             persist_env("SGLANG_PLUGINS", "sglang_fl")
             persist_env("USE_FLAGGEMS", "0")
-            persist_env("SGLANG_FL_PREFER", "reference")
+            clear_env("SGLANG_FL_PREFER")
             persisted["env_persisted"] = True
-            print("  ✓ 持久化 SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0 + SGLANG_FL_PREFER=reference（V2 起强制 flagos 覆盖）")
+            print("  ✓ 持久化 SGLANG_PLUGINS=sglang_fl + USE_FLAGGEMS=0（V2 起强制 flagos 覆盖）")
         else:
             # v1.1 纯净基线：清除 SGLANG_PLUGINS（V2 flagos 模式经 start_service.sh
             # 优先级3 自动发现 sglang_fl）+ 关闭 flaggems
-            # 注意：不能持久化 SGLANG_PLUGINS=''——空串会被 start_service.sh 优先级2
-            # 当作"继承值"钉死，V2 起不加载插件 → flag_gems 无法经 sglang_fl 调度
-            # （2026-08-14 tree 镜像固化后实测发现的隐患）
+            # 注意：不能持久化 SGLANG_PLUGINS=''（空串会被 start_service.sh 优先级2
+            # 当作"继承值"钉死，V2 起不加载插件）也不能持久化 PREFER=reference
+            # （加载器会覆盖 V2 内联的 PREFER=flagos，钉死 reference 调度）
+            # ——2026-08-14 tree 镜像固化后实测发现的隐患
             clear_env("SGLANG_PLUGINS")
+            clear_env("SGLANG_FL_PREFER")
             persist_env("USE_FLAGGEMS", "0")
-            persist_env("SGLANG_FL_PREFER", "reference")
             persisted["env_persisted"] = True
-            print("  ✓ 持久化 USE_FLAGGEMS=0 + SGLANG_FL_PREFER=reference，SGLANG_PLUGINS 清除（V2 起自动发现插件）")
+            print("  ✓ 持久化 USE_FLAGGEMS=0，SGLANG_PLUGINS/SGLANG_FL_PREFER 清除（V2 起自动发现插件 + flagos 调度）")
     except Exception as e:
         print(f"  WARN: 基线状态持久化失败: {e}")
 
