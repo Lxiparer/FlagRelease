@@ -61,27 +61,9 @@ class StageResult:
 class BaseStage(ABC):
     """阶段基类"""
 
-    # 容器内 timeout(coreutils) 可用性缓存：避免每条 in_container 命令重复 docker exec 探测
-    _container_timeout_cache: dict = {}
-
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.steps: List[StepResult] = []
-
-    def _container_has_timeout(self, container: str) -> bool:
-        """容器内是否有 timeout 命令（决定 in_container 命令能否用容器内超时包裹）"""
-        if container in self._container_timeout_cache:
-            return self._container_timeout_cache[container]
-        ok = False
-        try:
-            r = subprocess.run(
-                ["docker", "exec", container, "bash", "-c", "command -v timeout"],
-                capture_output=True, text=True, timeout=15)
-            ok = r.returncode == 0 and bool((r.stdout or "").strip())
-        except Exception:
-            ok = False
-        self._container_timeout_cache[container] = ok
-        return ok
 
     @property
     @abstractmethod
@@ -112,15 +94,6 @@ class BaseStage(ABC):
         run_args: Any = cmd
         if in_container:
             container = container_name or self.config.container_name
-            # 容器内 shell 级 timeout 包裹：subprocess.run 超时只能杀掉 docker exec
-            # 客户端，容器内进程（如 modelscope/hf upload）会继续跑成孤儿，与重试的
-            # 新上传并发争抢同一目录/网络，表现为发布阶段卡死。容器内 timeout 超时
-            # 时直接杀容器内进程树，外层 timeout 放大 60s 兜底。
-            if isinstance(cmd, str) and timeout and timeout > 0 \
-                    and self._container_has_timeout(container):
-                import shlex
-                cmd = f"timeout -s TERM -k 15 {timeout} bash -c {shlex.quote(cmd)}"
-                timeout = timeout + 60
             docker_cmd = ["docker", "exec"]
             for env_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
                 val = os.environ.get(env_var)

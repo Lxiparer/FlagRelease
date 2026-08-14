@@ -20,8 +20,6 @@ import json
 import os
 import time
 import base64
-import select
-import shlex
 import subprocess
 from typing import Optional, List, Tuple
 from pathlib import Path
@@ -34,10 +32,6 @@ UPLOAD_MAX_RETRIES = 5
 UPLOAD_RETRY_DELAY = 10
 UPLOAD_MAX_DELAY = 300
 UPLOAD_TIMEOUT = 3600
-# docker push 停滞检测：持续无输出超过该秒数判定网络停滞（卡死），不再干等整体超时
-PUSH_STALL_TIMEOUT = 600
-# 超时类失败的重试上限：网络停滞时连续重试只会重复超时，最多再试 1 次
-TIMEOUT_MAX_RETRIES = 2
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -63,70 +57,6 @@ def get_files_in_directory(directory: str, extensions: List[str] = None) -> List
             else:
                 files.append(file_path)
     return files
-
-
-def _stream_with_stall_detect(cmd: str, timeout: int, stall_timeout: int,
-                              print_prefix: str = "") -> Tuple[bool, List[str], str]:
-    """执行命令并逐行流式打印，带整体超时 + 无输出停滞检测。
-
-    返回 (成功, 输出行列表, 错误信息)。
-
-    背景：docker push 等长命令在网络停滞时可能长时间不产生任何输出，且不退出。
-    此前实现用 `for line in process.stdout` 阻塞读——循环不结束就永远到不了
-    process.wait(timeout)，超时形同虚设，发布阶段表现为无限卡死。
-    本实现用 select 在 fd 上带超时等待：整体 deadline 内持续无输出超过
-    stall_timeout 秒即判定停滞并 kill 进程。
-    """
-    process = subprocess.Popen(
-        cmd, shell=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=0,
-    )
-    fd = process.stdout.fileno()
-    deadline = time.time() + timeout
-    last_output = time.time()
-    raw_buf = b""
-    output_lines: List[str] = []
-
-    try:
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                process.kill()
-                process.wait()
-                return False, output_lines, f"命令执行超时 ({timeout}秒)"
-            # select 等待：有输出立即返回；空返回 = 等待期无输出。
-            # 空返回有两种原因，需区分：真停滞（无输出达 stall_timeout）
-            # vs 整体 deadline 先到（select 的等待上限取了 remaining）
-            readable, _, _ = select.select([fd], [], [], min(stall_timeout, remaining))
-            if not readable:
-                if time.time() - last_output >= stall_timeout:
-                    # 真停滞（网络停滞，如镜像层上传挂起）
-                    process.kill()
-                    process.wait()
-                    return False, output_lines, f"命令停滞（{stall_timeout} 秒无输出）"
-                # 整体 deadline 即将到期 → 回循环顶部走 remaining<=0 超时分支
-                continue
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break  # EOF
-            last_output = time.time()
-            raw_buf += chunk
-            while b"\n" in raw_buf:
-                line, raw_buf = raw_buf.split(b"\n", 1)
-                text_line = line.decode("utf-8", "replace").rstrip("\r")
-                print(f"{print_prefix}{text_line}")
-                output_lines.append(text_line)
-    except Exception as e:
-        process.kill()
-        process.wait()
-        return False, output_lines, f"流式读取异常: {e}"
-
-    process.wait()
-    if process.returncode == 0:
-        return True, output_lines, ""
-    err = '\n'.join(output_lines[-50:]) or f"命令返回非零状态码: {process.returncode}"
-    return False, output_lines, err
 
 
 class PublishStage(BaseStage):
@@ -882,30 +812,71 @@ except Exception as e:
         print(f"  命令: {cmd}")
 
         start_time = time.time()
-        ok, output_lines, error_msg = _stream_with_stall_detect(
-            cmd, timeout=timeout, stall_timeout=PUSH_STALL_TIMEOUT,
-            print_prefix="  ")
-        duration = time.time() - start_time
+        try:
+            process = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
 
-        if ok:
-            print(f"  + 成功 (耗时 {duration:.2f}s)")
+            output_lines = []
+            for line in process.stdout:
+                line = line.rstrip('\n')
+                print(f"  {line}")
+                output_lines.append(line)
+
+            process.wait(timeout=timeout)
+            duration = time.time() - start_time
+            output = '\n'.join(output_lines)
+
+            if process.returncode == 0:
+                print(f"  + 成功 (耗时 {duration:.2f}s)")
+                self.steps.append(StepResult(
+                    step_name=step_name,
+                    status=StepStatus.SUCCESS,
+                    output=output,
+                    duration=duration,
+                ))
+                return True
+            else:
+                error_msg = output or f"命令返回非零状态码: {process.returncode}"
+                print(f"  x 失败: {error_msg[:200]}")
+                self.steps.append(StepResult(
+                    step_name=step_name,
+                    status=StepStatus.FAILED,
+                    output=output,
+                    error=error_msg,
+                    duration=duration,
+                ))
+                return False
+
+        except subprocess.TimeoutExpired:
+            process.kill()
+            duration = time.time() - start_time
+            error_msg = f"命令执行超时 ({timeout}秒)"
+            print(f"  x 超时: {error_msg}")
             self.steps.append(StepResult(
                 step_name=step_name,
-                status=StepStatus.SUCCESS,
-                output='\n'.join(output_lines[-2000:]),
+                status=StepStatus.FAILED,
+                error=error_msg,
                 duration=duration,
             ))
-            return True
+            return False
 
-        print(f"  x 失败: {error_msg[:200]}")
-        self.steps.append(StepResult(
-            step_name=step_name,
-            status=StepStatus.FAILED,
-            output='\n'.join(output_lines[-2000:]),
-            error=error_msg,
-            duration=duration,
-        ))
-        return False
+        except Exception as e:
+            duration = time.time() - start_time
+            error_msg = str(e)
+            print(f"  x 异常: {error_msg}")
+            self.steps.append(StepResult(
+                step_name=step_name,
+                status=StepStatus.FAILED,
+                error=error_msg,
+                duration=duration,
+            ))
+            return False
 
     def _tag_and_push_also(self, also_version: str) -> bool:
         """V2=V3 同镜像双 tag 场景：把已推送的镜像另打一个版本 tag 并推送。
@@ -1928,11 +1899,6 @@ sys.exit(0 if ok else 1)
                 print(f"  + 已发布到 ModelScope: {model_id}")
                 break
             else:
-                # 超时类失败（网络停滞）：连续超时最多重试 1 次，避免 5×1h 无进展停滞
-                is_timeout = bool(stderr) and stderr.startswith("命令执行超时")
-                if is_timeout and attempt >= TIMEOUT_MAX_RETRIES - 1:
-                    print(f"  x 连续超时，停止重试（疑似网络停滞，避免无进展空转）")
-                    break
                 if attempt < UPLOAD_MAX_RETRIES - 1:
                     print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
                     print(f"    等待 {current_delay} 秒后重试...")
@@ -2166,11 +2132,6 @@ sys.exit(0 if _private_ok else 1)
                 print(f"  + 已发布到 HuggingFace: {repo_id}")
                 break
             else:
-                # 超时类失败（网络停滞）：连续超时最多重试 1 次，避免 5×1h 无进展停滞
-                is_timeout = bool(stderr) and stderr.startswith("命令执行超时")
-                if is_timeout and attempt >= TIMEOUT_MAX_RETRIES - 1:
-                    print(f"  x 连续超时，停止重试（疑似网络停滞，避免无进展空转）")
-                    break
                 if attempt < UPLOAD_MAX_RETRIES - 1:
                     print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
                     print(f"    等待 {current_delay} 秒后重试...")
@@ -2220,8 +2181,6 @@ sys.exit(0 if _private_ok else 1)
                 print(f"  x 容器内安装 modelscope 失败")
                 return False
             shell_cmd = f"PATH=/opt/conda/bin:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
-            if self._container_has_timeout(container):
-                shell_cmd = f"timeout -s TERM -k 15 300 bash -c {shlex.quote(shell_cmd)}"
             docker_cmd = ["docker", "exec",
                           "-e", f"MODELSCOPE_API_TOKEN={token}",
                           container, "bash", "-c", shell_cmd]
@@ -2234,8 +2193,6 @@ sys.exit(0 if _private_ok else 1)
                 print(f"  x 容器内安装 huggingface_hub 失败")
                 return False
             shell_cmd = f"PATH=/opt/conda/bin:$PATH hf upload {repo_id} {container_tmp}/README.md README.md"
-            if self._container_has_timeout(container):
-                shell_cmd = f"timeout -s TERM -k 15 300 bash -c {shlex.quote(shell_cmd)}"
             # HuggingFace endpoint fallback：用户指定则只用该 endpoint，否则依次尝试
             # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
             user_endpoint = os.environ.get("HF_ENDPOINT", "")
@@ -2284,10 +2241,6 @@ sys.exit(0 if _private_ok else 1)
             except subprocess.TimeoutExpired:
                 print(f"  x 更新 {platform} README 超时")
                 stderr = "命令执行超时"
-                # 超时类失败最多重试 1 次，避免无进展空转
-                if attempt >= TIMEOUT_MAX_RETRIES - 1:
-                    print(f"  x 连续超时，停止重试（疑似网络停滞）")
-                    break
 
             if attempt < UPLOAD_MAX_RETRIES - 1:
                 print(f"    等待 {current_delay} 秒后重试...")
