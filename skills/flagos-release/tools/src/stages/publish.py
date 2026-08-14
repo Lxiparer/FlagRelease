@@ -1913,8 +1913,54 @@ sys.exit(0 if ok else 1)
 
     _HF_ENDPOINTS = ["https://huggingface.co", "https://hf-mirror.com"]
 
+    def _probe_hf_endpoints(self, endpoints: List[str]) -> List[str]:
+        """容器内探测 HF 端点联通性，返回可达端点（按延迟升序）。
+
+        上传前先判断 huggingface.co / hf-mirror.com 哪个能联通，只对可达
+        端点发起上传，全部不可达直接快速失败——避免对不可达端点发起
+        3600s×5 重试链（发布阶段卡死根因：CN 环境直连不可达时，整轮
+        空耗直到 task_runner 6h 杀任务）。探测与上传同一网络环境
+        （同一容器、同一代理环境变量），保证选路与实际上传一致。
+        """
+        if not endpoints:
+            return []
+        probe_script = f"""
+import sys, time, json, urllib.request
+results = []
+for ep in {json.dumps(endpoints)}:
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(ep, method='HEAD')
+        r = urllib.request.urlopen(req, timeout=30)
+        code = getattr(r, 'status', None) or getattr(r, 'getcode', lambda: 0)()
+        print(f'  \\u2713 {{ep}} 可达 ({{time.time()-t0:.2f}}s, HTTP {{code}})')
+        results.append([time.time()-t0, ep])
+    except Exception as e:
+        print(f'  x {{ep}} 不可达 ({{type(e).__name__}})')
+print('PROBE_RESULT:' + json.dumps(results))
+"""
+        script_b64 = base64.b64encode(probe_script.encode()).decode()
+        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c \"import base64;exec(base64.b64decode('{script_b64}').decode())\""
+        ok, stdout, stderr = self.run_command(
+            cmd=cmd, step_name="探测 HuggingFace 端点联通性",
+            timeout=30 * len(endpoints) + 30, in_container=True
+        )
+        reachable: List[str] = []
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if line.startswith("PROBE_RESULT:"):
+                try:
+                    reachable = [ep for _lat, ep in sorted(
+                        json.loads(line[len("PROBE_RESULT:"):]))]
+                except Exception:
+                    pass
+            elif line:
+                # run_command 成功时不回显 stdout，探测明细（✓/x）手动打到发布日志
+                print(line)
+        return reachable
+
     def _publish_to_huggingface(self, readme_path: Optional[str]) -> bool:
-        """发布到 HuggingFace（官网优先，镜像站降级；CLI 优先，SDK 降级）"""
+        """发布到 HuggingFace（联通预检选路；CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -1928,6 +1974,16 @@ sys.exit(0 if ok else 1)
         # 如果用户已指定 endpoint，只用该 endpoint
         user_endpoint = os.environ.get("HF_ENDPOINT", "")
         endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
+
+        # 联通预检：只对可达端点发起上传（实测 CN 环境直连不可达、镜像可达），
+        # 全不可达快速失败，不空耗重试链
+        reachable = self._probe_hf_endpoints(endpoints)
+        if not reachable:
+            print(f"  x 所有 HuggingFace 端点均不可达: {', '.join(endpoints)}")
+            print(f"    快速失败（不再发起上传重试链，避免发布阶段空耗卡死）")
+            return False
+        endpoints = reachable
+        print(f"  ✓ 联通端点: {', '.join(endpoints)}")
 
         for i, endpoint in enumerate(endpoints):
             os.environ["HF_ENDPOINT"] = endpoint
@@ -2197,6 +2253,12 @@ sys.exit(0 if _private_ok else 1)
             # 直连 huggingface.co 与国内镜像 hf-mirror.com（后者在受限网络中可达且支持上传）
             user_endpoint = os.environ.get("HF_ENDPOINT", "")
             hf_endpoints = [user_endpoint] if user_endpoint else self._HF_ENDPOINTS
+            # 联通预检：只对可达端点发起 README 更新（与主上传同因：不可达端点
+            # 整轮重试是发布阶段空耗卡死的来源）
+            hf_endpoints = self._probe_hf_endpoints(hf_endpoints)
+            if not hf_endpoints:
+                print(f"  x 所有 HuggingFace 端点均不可达，README 更新快速失败")
+                return False
             # HuggingFace 需外网访问；从主进程环境注入代理到容器（ModelScope 走 .cn 无需代理）
             proxy_flags: List[str] = []
             for env_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
