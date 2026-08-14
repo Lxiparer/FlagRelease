@@ -233,7 +233,10 @@ if [ "$SGLANG_PLUGINS_OVERRIDE_SET" = "1" ]; then
     else
         echo "[start_service.sh] 显式覆盖：SGLANG_PLUGINS=${SGLANG_PLUGINS_OVERRIDE}"
     fi
-elif [ -n "${SGLANG_PLUGINS+x}" ]; then
+elif [ -n "${SGLANG_PLUGINS+x}" ] && [ -n "$SGLANG_PLUGINS" ]; then
+    # 仅继承非空持久化值。空串按"未设置"处理 → 落入优先级3 自动决策，
+    # 避免历史持久化的空 SGLANG_PLUGINS 钉死 V2 不加载插件（flag_gems 需经
+    # sglang_fl 调度；2026-08-14 baseline_selector v1.1 分支旧逻辑会持久化空串）
     export SGLANG_PLUGINS
     echo "[start_service.sh] 继承持久化 plugin 配置：SGLANG_PLUGINS='${SGLANG_PLUGINS}'"
 elif [ "$MODE" = "native" ]; then
