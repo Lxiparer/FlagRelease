@@ -1,0 +1,32 @@
+--- a/torch_npu/_inductor/codegen/ir.py
++++ b/torch_npu/_inductor/codegen/ir.py
+@@ -48,4 +48,8 @@
+-            if (var in kernel.range_tree_nodes):
++            if var in kernel.range_tree_nodes:
+                 numel = kernel.range_tree_nodes[var].length
+-            else:
++            elif var in kernel.range_tree_nodes_removed:
+                 numel = kernel.range_tree_nodes_removed[var].length
++            else:
++                # flagos-patch-8: var 不在任何 range tree（间接索引/常量折叠符号）
++                # → 跳过该轴展平，保留原始索引（等价于优化不生效）
++                return
+@@ -71,4 +71,7 @@
+         if var in kernel.range_tree_nodes:
+             parent_axis = kernel.range_tree_nodes[var]
+-        else:
++        elif var in kernel.range_tree_nodes_removed:
+             parent_axis = kernel.range_tree_nodes_removed[var]
++        else:
++            # flagos-patch-8: 同上，var 无 range tree 归属 → 跳过
++            continue
+@@ -134,4 +134,7 @@
+-            if (var in kernel.range_tree_nodes):
++            if var in kernel.range_tree_nodes:
+                 old_node = kernel.range_tree_nodes[var]
+-            else:
++            elif var in kernel.range_tree_nodes_removed:
+                 old_node = kernel.range_tree_nodes_removed[var]
++            else:
++                # flagos-patch-8: 同上，跳过
++                continue

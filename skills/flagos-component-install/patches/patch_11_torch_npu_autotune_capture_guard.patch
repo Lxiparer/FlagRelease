@@ -1,0 +1,11 @@
+--- a/torch_npu/_inductor/npu_triton_heuristics.py
++++ b/torch_npu/_inductor/npu_triton_heuristics.py
+@@ -910,3 +910,8 @@
+             if len(self.launchers) > 1:
+-                self.autotune_to_one_config(*args, **kwargs)
++                if torch_npu.npu.is_current_stream_capturing():
++                    # flagos-patch-11: 图捕获中 autotune 会跑 do_bench（内含设备同步），
++                    # NPU 禁止捕获流同步(107027) → 跳过 autotune，直接取首个配置
++                    self.launchers = [self.launchers[0]]
++                else:
++                    self.autotune_to_one_config(*args, **kwargs)

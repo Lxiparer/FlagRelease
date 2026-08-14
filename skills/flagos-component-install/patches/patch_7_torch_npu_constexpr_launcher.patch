@@ -1,0 +1,22 @@
+--- a/torch_npu/_inductor/npu_triton_heuristics.py
++++ b/torch_npu/_inductor/npu_triton_heuristics.py
+@@ -238,9 +238,19 @@
+                 repl = {
+                     k: str(compile_meta["constants"].get(k))
+                     for k in ("num_warps", "num_stages")
+                 }
+                 call_args = [repl.get(arg, arg) for arg in call_args]
++            # flagos-patch-7: flagtree fork 的 JITFunction.arg_names 包含 X0BLOCK 等
++            # constexpr 参数（triton-ascend 的 attrs-dict 模式会剔除它们）。此处将
++            # constexpr 参数从 launcher 签名与 runner 调用一并剔除：fork 在编译期已
++            # 把常量内联进内核，C launcher 不接受 constexpr 实参（实测多传即报
++            # TypeError: function takes exactly N arguments）。
++            constexpr_names = OrderedSet(
++                arg for i, arg in enumerate(fn.arg_names) if i in fn.constexprs
++            )
++            def_args = [arg for arg in def_args if arg not in constexpr_names]
++            call_args = [arg for arg in call_args if arg not in constexpr_names]
+         else:
+             call_args = [
+                 arg
+                 for i, arg in enumerate(fn.arg_names)

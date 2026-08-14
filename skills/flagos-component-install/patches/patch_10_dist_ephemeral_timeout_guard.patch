@@ -1,0 +1,16 @@
+--- a/torch/distributed/distributed_c10d.py
++++ b/torch/distributed/distributed_c10d.py
+@@ -1490,6 +1490,12 @@
+     for pg in _world.pg_map.keys():
+         devices = pg._device_types
+         if torch.device("cuda") in devices:
+-            backend = pg._get_backend(torch.device("cuda"))
++            # flagos-patch-10: torch_npu 的 transfer 包装会改写 device 参数，
++            # pg 后端查不到时抛 "No backend type associated with device type npu"；
++            # 该 pg 无法解析后端 → 跳过（ephemeral timeout 仅对 NCCL 编译场景有意义）
++            try:
++                backend = pg._get_backend(torch.device("cuda"))
++            except RuntimeError:
++                continue
+             if is_nccl_available() and isinstance(backend, ProcessGroupNCCL):
+                 backend._add_ephemeral_timeout(timeout)

@@ -1,0 +1,11 @@
+--- a/triton/spec/ascend/compiler/compiler.py
++++ b/triton/spec/ascend/compiler/compiler.py
+@@ -437,3 +437,8 @@
+ class CompiledKernel:
++    # flagos-patch-6: torch_npu 2.8 npu_triton_heuristics 通过 binary.__class__ 读取 hook；
++    # flagtree fork 将 hook 移到 knobs.runtime → 提供类属性镜像（默认 None）。
++    launch_enter_hook = None
++    launch_exit_hook = None
++
+
+     def __init__(self, src, metadata_group, hash):

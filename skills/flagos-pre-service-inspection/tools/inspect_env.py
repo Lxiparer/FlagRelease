@@ -505,12 +505,19 @@ def _write_control_env_vars(env_type):
 
 
 def check_flagtree():
-    """检测 FlagTree 安装状态"""
+    """检测 FlagTree 安装状态。
+
+    flagtree 0.6.x 的 wheel 直接安装在 triton/ 包内（top_level=triton，
+    无 flagtree 模块），`import flagtree` 必然失败——必须用 triton 包内
+    FLAGTREE_BACKEND 标记文件 + dist 元数据判定；旧版若有独立 flagtree
+    模块，保留 import 路径。
+    """
     result = {
         "installed": False,
         "version": "",
         "triton_version": "",
         "backend": "",
+        "inductor_triton_ok": None,  # torch 是否认可 triton（has_triton_package）
     }
     try:
         import triton
@@ -518,13 +525,43 @@ def check_flagtree():
     except ImportError:
         return result
 
+    # 路径1：独立 flagtree 模块（旧版形态）
     try:
         import flagtree
         result["installed"] = True
         result["version"] = getattr(flagtree, "__version__", "unknown")
         result["backend"] = getattr(flagtree, "backend", "")
     except ImportError:
-        # triton 存在但非 FlagTree
+        # 路径2：flagtree 0.6.x 安装在 triton/ 内 → FLAGTREE_BACKEND 标记文件
+        marker = os.path.join(os.path.dirname(triton.__file__), "FLAGTREE_BACKEND")
+        if os.path.isfile(marker):
+            result["installed"] = True
+            try:
+                with open(marker, "r", encoding="utf-8") as f:
+                    backend = f.read().strip()
+                if backend:
+                    result["backend"] = backend
+            except OSError:
+                pass
+
+    # 版本统一从 dist 元数据取（flagtree 的 METADATA 带 +ascend.git<sha> 后缀，
+    # 比 __version__ 更完整；import 路径拿不到版本时兜底）
+    if result["installed"] and not result["version"]:
+        try:
+            from importlib.metadata import version as _dist_version
+            result["version"] = _dist_version("flagtree")
+        except Exception:
+            pass
+
+    # torch 侧认可度：torch 2.8 的 has_triton_package() 要求
+    # triton.compiler.compiler.triton_key；flagtree 的 triton fork 缺失该属性
+    # → torch_npu 2.8 inductor 引用未导入的 Config → 任何 @torch.compile /
+    # CUDA graph capture 都 NameError（2026-08-13 gemma 批量任务实测）。
+    # 步骤3 前提前暴露，避免 192 分钟现场诊断。
+    try:
+        from torch.utils import _triton as _torch_triton
+        result["inductor_triton_ok"] = bool(_torch_triton.has_triton_package())
+    except Exception:
         pass
 
     return result
@@ -711,9 +748,13 @@ def output_report(data):
     else:
         triton_ver = ft.get("triton_version", "")
         if triton_ver:
-            report.append(f"  状态:        未安装（triton {triton_ver} 为原版）")
+            report.append(f"  状态:        未安装（triton {triton_ver} 非 FlagTree）")
         else:
             report.append(f"  状态:        未安装（triton 也未安装）")
+    inductor_ok = ft.get("inductor_triton_ok")
+    if inductor_ok is False:
+        report.append(f"  ⚠ torch 不认可 triton（has_triton_package=False，缺 triton.compiler.compiler.triton_key）")
+        report.append(f"     torch.compile / CUDA graph capture 预期 NameError 崩溃，需 TORCHDYNAMO_DISABLE=1 绕行（性能损失显著）")
 
     if insp["probe_error"]:
         report.append(f"\n## 探测错误: {insp['probe_error']}")

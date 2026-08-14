@@ -1,0 +1,10 @@
+--- a/torch_npu/_inductor/npu_triton_heuristics.py
++++ b/torch_npu/_inductor/npu_triton_heuristics.py
+@@ -570,4 +570,7 @@
+         with DeviceGuard(device_interface, self.triton_meta["device"]):
+             # need to initialize context
+-            device_interface.synchronize(device_interface.current_device())
++            # flagos-patch-9: CUDA graph capture 期间同步调用会触发 NPU
++            # "stream is captured" 错误(107027)——捕获中跳过该初始化同步
++            if not torch_npu.npu.is_current_stream_capturing():
++                device_interface.synchronize(device_interface.current_device())

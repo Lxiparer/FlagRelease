@@ -183,7 +183,7 @@ if [ -f /etc/environment ]; then
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            USE_FLAGGEMS|FLAGGEMS_*|SGLANG_FLAGGEMS_*|SGLANG_FL_*|SGLANG_PLUGINS)
+            USE_FLAGGEMS|FLAGGEMS_*|SGLANG_FLAGGEMS_*|SGLANG_FL_*|SGLANG_PLUGINS|TORCHDYNAMO_DISABLE)
                 val="${val%\"}" ; val="${val#\"}"
                 val="${val%\'}" ; val="${val#\'}"
                 export "$key=$val"
@@ -283,6 +283,15 @@ CMD="sglang serve --model-path '${MODEL_PATH}' \
 # 如 --disable-radix-cache --page-size 16 --mem-fraction-static 0.7）
 if [ -n "$ENGINE_FLAGS" ]; then
     CMD="$CMD ${ENGINE_FLAGS}"
+fi
+
+# flagtree 栈强制 --page-size 512（2026-08-14 tree 栈实测）：
+# 多页注意力慢路径——decode 跨入第 2 个 KV page 瞬间从 ~127 tok/s 跌至 0.5 tok/s；
+# vendor 融合注意力（aclnnFusedInferAttentionScoreV3）捕获 pad 上限 <2048。
+# 512 为实测最优（512 token 内单页全速、捕获稳定）。上下文已显式指定则尊重其值。
+SITE_PKG_DIR="$(PATH=${PY_BIN_DIR}:${PATH} python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)"
+if [ -n "$SITE_PKG_DIR" ] && [ -f "$SITE_PKG_DIR/triton/FLAGTREE_BACKEND" ] && ! echo "$CMD" | grep -q '\-\-page-size'; then
+    CMD="$CMD --page-size 512"
 fi
 
 # Thinking model 添加 reasoning parser（sglang 用连字符命名）
