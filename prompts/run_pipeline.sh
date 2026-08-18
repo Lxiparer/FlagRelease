@@ -453,8 +453,9 @@ CMD_EOF\"
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
     --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
 - crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- crashed_ops 为空但 candidate_ops 非空 → **不算"无算子"**：candidate_ops 是正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用这些候选后重启验证；仍属算子排查、不得直接走 Issue 规则
 - 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
-- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+- 重试全部失败或 crashed_ops 与 candidate_ops 均为空 → 走下方 Issue 强制规则
 
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
@@ -469,7 +470,7 @@ CMD_EOF\"
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
-- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 算子诊断重试全部失败，且 crashed_ops 与 candidate_ops 均为空（candidate_ops 已逐个试过仍无效）→ 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
@@ -531,8 +532,9 @@ CMD_EOF\"
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
     --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
 - crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- crashed_ops 为空但 candidate_ops 非空 → **不算"无算子"**：candidate_ops 是正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用这些候选后重启验证；仍属算子排查、不得直接走 Issue 规则
 - 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
-- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+- 重试全部失败或 crashed_ops 与 candidate_ops 均为空 → 走下方 Issue 强制规则
 
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
@@ -547,7 +549,7 @@ CMD_EOF\"
 - FlagGems 模式启动成功（推理验证通过）→ **必须设置 workflow.service_ok=true**（通过 update_context.py --set workflow.service_ok=true）
 - **记录实际 vllm serve 命令到 context**：服务启动成功后，将实际执行的 vllm serve 命令（不含 docker exec 包装、不含 PATH= 前缀、不含环境变量）写入 context.yaml：
   docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set 'commands.serve_start=<实际执行的 vllm serve 完整命令>'\"
-- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 算子诊断重试全部失败，且 crashed_ops 与 candidate_ops 均为空（candidate_ops 已逐个试过仍无效）→ 提交 issue 后设置 workflow.service_ok=false
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）

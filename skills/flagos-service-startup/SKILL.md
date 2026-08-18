@@ -616,7 +616,8 @@ environment:
      3. 查看 `q.xxx_()` 或 `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
      4. 如果崩溃发生在 graph capture 阶段，查看 capture 前最后注册/编译的算子
      5. 如果以上均无法定位，逐步禁用最近一轮新启用的算子组（二分法排查）
-   - **停止条件**：连续 2 轮重试后服务仍崩溃，且上述 5 种定位手段均无法识别新的问题算子，判定为不可恢复
+     6. `diagnose_ops.py` 的 `candidate_ops`（正则命中但白名单外的低置信候选）非空时，逐个/二分禁用这些候选——它们不在 `known_ops` 不代表不是问题算子
+   - **停止条件**：连续 2 轮重试后服务仍崩溃，且上述 6 种定位手段均无法识别新的问题算子（含 `candidate_ops` 已全部试过），才判定为不可恢复
    - 注意：推理阶段崩溃也属于"重试失败"，需要同样走 diagnose → 禁用 → 重启流程，不单独计数
 4. 连续 2 轮确认无新可禁用算子（5 种定位手段均无结果）→ 最后尝试添加 `--enforce-eager` 重启一次 → 仍失败 → 切回 Native 验证
 5. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
@@ -696,13 +697,14 @@ ISSUE_EOF"
 4. `crashed_ops` 非空 → 累积禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（每轮重试前均需清理缓存）
 5. 重试成功（含推理验证通过）→ 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
 6. 重试后再次崩溃（启动或推理阶段）→ 备份日志 → 清缓存 → 再次 diagnose → 累积禁用新算子 → 继续重试。**不限轮次，只要每轮能定位到新问题算子就继续**
-7. **`diagnose_ops.py` 返回空时的算子定位**（返回空 ≠ 无问题算子，严禁跳过）：
+7. **`diagnose_ops.py` 的 `crashed_ops` 为空时的算子定位**（为空 ≠ 无问题算子，严禁跳过）：
+   - **先看 `candidate_ops`**：正则命中但白名单外的低置信候选（版本新增/命名变体），逐个/二分禁用验证——这是工具已从日志里抓到、只因不在 `known_ops` 才没进 `crashed_ops` 的名字，不试就判不可恢复属误判
    - 查看 traceback 中 `flag_gems/` 路径，文件名即算子名
    - 查看崩溃前最后编译的 Triton kernel 名（`Compiling ...` 日志行）
    - 查看 `q.xxx_()` / `torch.xxx()` 调用栈中紧邻 flag_gems 的函数名
    - 查看 graph capture 前最后注册/编译的算子
    - 以上均无法定位 → 逐步禁用最近一轮新启用的算子组（二分法排查）
-8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子 → 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
+8. **停止条件**：连续 2 轮重试后服务仍崩溃，且上述所有定位手段均无法识别新的问题算子（含 `candidate_ops` 已全部试过）→ 最后尝试 `--enforce-eager` 一次 → 仍失败 → 判定不可恢复 → 调用 `issue_reporter.py full --type operator-crash`
 8b. **恢复成功也必须提 issue**：禁用算子后服务恢复成功时，同样必须调用 `issue_reporter.py full --type operator-crash --recovered` 记录哪些算子在该硬件/模型组合下会导致崩溃。这是通知 FlagGems 团队修复算子 bug 的唯一途径，不可省略。
 9. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
 10. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）

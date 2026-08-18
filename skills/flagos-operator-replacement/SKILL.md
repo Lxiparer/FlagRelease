@@ -351,14 +351,16 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
 ```json
 {
   "crashed_ops": ["softmax"],
+  "candidate_ops": ["fancy_new_op"],
   "evidence": [{"op": "softmax", "line_start": 142, "error_type": "sm_unsupported", "error_message": "CUDA error: no kernel image..."}],
-  "suggestion": "建议禁用以下算子后重启: softmax"
+  "suggestion": "建议禁用以下算子后重启: softmax；另有白名单外低置信候选可一并验证: fancy_new_op"
 }
 ```
 
 **决策逻辑**：
 - `crashed_ops` 非空 → 直接禁用这些算子 → 重启服务 → 不进搜索
-- `crashed_ops` 为空但有 evidence → 人工查看日志
+- `crashed_ops` 为空但 `candidate_ops` 非空 → **不是"无算子"**：`candidate_ops` 是正则确实命中、但不在 `known_ops` 白名单的低置信候选（版本新增/命名变体）。**逐个或二分禁用这些候选**验证，禁用后能起服务/精度改善即确认。这一步是防止白名单不全导致"匹配到却当作无算子"的误判——判定"连续 2 轮无新算子/不可恢复"前，`candidate_ops` 必须已全部试过。
+- `crashed_ops` 与 `candidate_ops` 均为空但有 evidence → 人工查看日志（见 evidence 的错误行/AICore 前编译 kernel）
 - 无 evidence → 非算子问题，检查环境配置
 
 ## 场景 2：精度不达标 → 逐组禁用测试（达标即停）

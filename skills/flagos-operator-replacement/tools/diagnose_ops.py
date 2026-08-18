@@ -162,8 +162,8 @@ OP_EXTRACT_PATTERNS_TRUSTED = [
 ]
 
 OP_EXTRACT_PATTERNS_HEURISTIC = [
-    # triton kernel: xxx_kernel / xxx_jit
-    re.compile(r"triton.*?(\w+?)(?:_kernel|_jit)"),
+    # triton kernel: xxx_kernel / xxx_jit（真实 vLLM 日志中 "Triton" 常大写 → IGNORECASE）
+    re.compile(r"triton.*?(\w+?)(?:_kernel|_jit)", re.IGNORECASE),
     # "Error in operator: xxx" / "failed op: xxx"
     re.compile(r"(?:operator|op|算子)[:\s]+['\"]?(\w+)['\"]?", re.IGNORECASE),
     # Triton 内联代码中的 FlagGems 函数调用: xxx_func_tensor_scalar / xxx_func
@@ -178,9 +178,20 @@ _FLAGGEMS_NON_OPS = {"__init__", "__pycache__", "utils", "runtime", "backend",
                      "device_info", "config", "testing", "conftest", "setup"}
 
 
-def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
-    """从一段文本中提取所有可能的算子名"""
+def extract_ops_from_text(text: str, known_ops: set,
+                          return_candidates: bool = False):
+    """从一段文本中提取所有可能的算子名。
+
+    return_candidates=False（默认，向后兼容）：只返回高置信度算子名 List[str]。
+    return_candidates=True：返回 (found, candidates)——
+      - found: 高置信度算子（flag_gems 路径命中 / 启发式命中且在 known_ops 白名单内）
+      - candidates: 低置信度候选——启发式模式**确实匹配到了文本**、但算子名不在
+        known_ops 白名单内（版本新增/命名变体/白名单未覆盖）。这些名字过去被直接
+        丢弃，导致"匹配到却报无算子"的信息黑洞、进而提前触发"定位不到新算子"误判。
+        现在保留为候选，供执行层逐个/二分禁用验证，而非当作不存在。
+    """
     found = set()
+    candidates = set()
     # 高置信度模式：flag_gems 路径中的文件名直接信任为算子名
     for pattern in OP_EXTRACT_PATTERNS_TRUSTED:
         for match in pattern.finditer(text):
@@ -194,19 +205,31 @@ def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
             elif len(op_name) > 2:
                 found.add(op_raw.lower().rstrip("_") if op_raw.endswith("_") else op_name)
 
-    # 启发式模式：需要在 known_ops 中才信任
+    # 启发式模式：命中 known_ops 白名单 → 高置信度 found；命中但白名单外 → 低置信度候选
     for pattern in OP_EXTRACT_PATTERNS_HEURISTIC:
         for match in pattern.finditer(text):
             op_name = match.group(1).lower().strip("_")
-            if op_name in known_ops:
-                found.add(op_name)
             op_raw = match.group(1)
-            if op_raw in known_ops:
-                found.add(op_raw)
+            is_func_variant = False
             if "_func" in match.re.pattern and op_name and len(op_name) > 2:
                 full_match = match.group(0)
-                if any(s in full_match for s in ("_tensor_scalar", "_scalar_tensor", "_tensor_tensor")):
-                    found.add(op_name)
+                is_func_variant = any(
+                    s in full_match for s in ("_tensor_scalar", "_scalar_tensor", "_tensor_tensor")
+                )
+            if op_name in known_ops:
+                found.add(op_name)
+            elif op_raw in known_ops:
+                found.add(op_raw)
+            elif is_func_variant:
+                # xxx_func_tensor_scalar 这类命名强指向 FlagGems 算子，即使白名单外也高置信
+                found.add(op_name)
+            elif op_name and len(op_name) > 2 and _VALID_OP_NAME.match(op_name) \
+                    and op_name not in _FLAGGEMS_NON_OPS:
+                # 正则确实命中、名字形如合法算子，但白名单未覆盖 → 低置信候选（不丢弃）
+                candidates.add(op_name)
+
+    if return_candidates:
+        return sorted(found), sorted(candidates - found)
     return sorted(found)
 
 
@@ -315,6 +338,7 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
     # 分析每个 traceback 块
     evidence = []
     crashed_ops = set()
+    candidate_ops = set()   # 低置信度候选：正则命中但白名单外，供逐个/二分禁用
 
     for tb in traceback_blocks:
         tb_text = "\n".join(line for _, line in tb)
@@ -329,13 +353,15 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
                 matched_desc = cp["description"]
                 break
 
-        # 提取算子名
-        ops_found = extract_ops_from_text(tb_text, known_ops)
+        # 提取算子名（高置信 + 低置信候选）
+        ops_found, ops_cand = extract_ops_from_text(tb_text, known_ops, return_candidates=True)
         crashed_ops.update(ops_found)
+        candidate_ops.update(ops_cand)
 
-        if ops_found or matched_type != "unknown":
+        if ops_found or ops_cand or matched_type != "unknown":
             evidence.append({
                 "ops": ops_found,
+                "candidate_ops": ops_cand,
                 "line_start": tb[0][0],
                 "line_end": tb[-1][0],
                 "error_type": matched_type,
@@ -348,15 +374,18 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
         stripped = VLLM_PREFIX_RE.sub('', line)
         for cp in CRASH_PATTERNS:
             if cp["pattern"].search(stripped):
-                ops_found = extract_ops_from_text(stripped, known_ops)
-                if ops_found:
+                ops_found, ops_cand = extract_ops_from_text(
+                    stripped, known_ops, return_candidates=True)
+                if ops_found or ops_cand:
                     crashed_ops.update(ops_found)
+                    candidate_ops.update(ops_cand)
                     already_covered = any(
                         e["line_start"] <= i + 1 <= e["line_end"] for e in evidence
                     )
                     if not already_covered:
                         evidence.append({
                             "ops": ops_found,
+                            "candidate_ops": ops_cand,
                             "line_start": i + 1,
                             "line_end": i + 1,
                             "error_type": cp["type"],
@@ -378,11 +407,14 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
             # 向前扫描最近 200 行，查找 FlagGems 算子编译/加载痕迹
             scan_start = max(0, hw_error_line - 200)
             scan_region = "\n".join(log_lines[scan_start:hw_error_line])
-            nearby_ops = extract_ops_from_text(scan_region, known_ops)
-            if nearby_ops:
+            nearby_ops, nearby_cand = extract_ops_from_text(
+                scan_region, known_ops, return_candidates=True)
+            if nearby_ops or nearby_cand:
                 crashed_ops.update(nearby_ops)
+                candidate_ops.update(nearby_cand)
                 evidence.append({
                     "ops": nearby_ops,
+                    "candidate_ops": nearby_cand,
                     "line_start": scan_start + 1,
                     "line_end": hw_error_line,
                     "error_type": "inferred_from_context",
@@ -390,34 +422,55 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
                     "error_message": f"硬件异常前 {hw_error_line - scan_start} 行内发现的 FlagGems 算子",
                 })
 
+    # 候选集去掉已确认的高置信算子（避免重复）
+    candidate_ops -= crashed_ops
+
     return {
         "log_path": log_path,
         "log_lines": len(log_lines),
         "traceback_count": len(traceback_blocks),
         "crashed_ops": sorted(crashed_ops),
+        "candidate_ops": sorted(candidate_ops),
         "evidence": evidence,
-        "suggestion": _crash_suggestion(crashed_ops, evidence),
+        "suggestion": _crash_suggestion(crashed_ops, evidence, candidate_ops),
     }
 
 
-def _crash_suggestion(crashed_ops: set, evidence: list) -> str:
-    """根据崩溃分析结果给出建议"""
+def _crash_suggestion(crashed_ops: set, evidence: list,
+                      candidate_ops: Optional[set] = None) -> str:
+    """根据崩溃分析结果给出建议。
+
+    关键：crashed_ops 为空但存在 candidate_ops（正则命中、白名单外的低置信候选）时，
+    必须给出"逐个/二分禁用这些候选"的可操作路径，而不是报"无算子"——否则白名单不全
+    会让候选被当作不存在，进而提前触发"连续 2 轮定位不到新算子"的不可恢复误判。
+    """
+    candidate_ops = candidate_ops or set()
+    cand_str = ", ".join(sorted(candidate_ops))
     if not crashed_ops and not evidence:
-        return "未从日志中识别出明确的算子问题，但禁用算子仍是最高优先解——必须人工从日志 traceback 中定位问题算子并禁用"
+        base = "未从日志中识别出明确的算子问题，但禁用算子仍是最高优先解——必须人工从日志 traceback 中定位问题算子并禁用"
+        if candidate_ops:
+            return (f"{base}。工具已从日志中匹配到白名单外的低置信候选算子: {cand_str}"
+                    f"（版本新增/命名变体，未收入 known_ops）——请**逐个或二分禁用这些候选**验证，"
+                    f"不得因它们不在白名单而当作'无算子'")
+        return base
     if not crashed_ops and evidence:
         has_hw = any(e["error_type"] in ("aicore_error", "graph_capture_error") for e in evidence)
+        cand_hint = (f" 另外工具匹配到白名单外低置信候选: {cand_str}，应一并逐个/二分禁用验证。"
+                     if candidate_ops else "")
         if has_hw:
-            return ("检测到 AICore/graph capture 异常但工具无法自动定位算子。"
+            return ("检测到 AICore/graph capture 异常但工具无法自动定位高置信算子。"
                     "必须人工从日志中定位：1) 查看崩溃前最后编译的 Triton kernel 名；"
                     "2) 查看 graph capture 前最后注册的算子；"
                     "3) 逐步禁用最近一轮新启用的算子组排查。"
-                    "只有穷尽算子定位手段后仍无法定位，才可尝试 --enforce-eager 作为最后手段")
-        return "检测到错误但无法自动定位算子，必须人工从 evidence 中的错误行定位问题算子并禁用"
+                    f"{cand_hint}"
+                    "只有穷尽算子定位手段（含上述候选）后仍无法定位，才可尝试 --enforce-eager 作为最后手段")
+        return f"检测到错误但无法自动定位高置信算子，必须人工从 evidence 中的错误行定位问题算子并禁用。{cand_hint}"
     has_inferred = any(e["error_type"] == "inferred_from_context" for e in evidence)
     ops_str = ", ".join(sorted(crashed_ops))
+    cand_tail = f"；另有白名单外低置信候选可一并验证: {cand_str}" if candidate_ops else ""
     if has_inferred:
-        return f"从崩溃上下文推断的可能问题算子（非确定性）: {ops_str}，建议逐个禁用验证"
-    return f"建议禁用以下算子后重启: {ops_str}"
+        return f"从崩溃上下文推断的可能问题算子（非确定性）: {ops_str}，建议逐个禁用验证{cand_tail}"
+    return f"建议禁用以下算子后重启: {ops_str}{cand_tail}"
 
 
 # =============================================================================
@@ -964,10 +1017,14 @@ def _print_crash_report(result: Dict):
     print()
 
     ops = result.get("crashed_ops", [])
+    cand = result.get("candidate_ops", [])
     if ops:
-        print(f"问题算子 ({len(ops)} 个): {', '.join(ops)}")
+        print(f"问题算子 ({len(ops)} 个, 高置信): {', '.join(ops)}")
     else:
-        print("未识别出问题算子")
+        print("未识别出高置信问题算子")
+    if cand:
+        print(f"低置信候选 ({len(cand)} 个, 白名单外、正则命中): {', '.join(cand)}")
+        print("  → 这些名字过去因不在 known_ops 白名单被丢弃；请逐个/二分禁用验证，不得当作'无算子'")
 
     print()
     for i, ev in enumerate(result.get("evidence", []), 1):
@@ -975,6 +1032,8 @@ def _print_crash_report(result: Dict):
               f"{ev['error_type']} — {ev['error_description']}")
         if ev.get("ops"):
             print(f"      算子: {', '.join(ev['ops'])}")
+        if ev.get("candidate_ops"):
+            print(f"      候选(白名单外): {', '.join(ev['candidate_ops'])}")
         print(f"      {ev.get('error_message', '')[:100]}")
         print()
 
