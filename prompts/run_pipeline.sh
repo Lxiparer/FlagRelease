@@ -2470,9 +2470,20 @@ print(f'''- container_name: {ctr.get('name','')}
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
     # ===== 段4: 9-13 (Plugin 验证 + 发布) =====
-    # V3(plugin) 精度评测用主数据集；--limit 仅 gpqa_diamond 单数据集时附加（mmlu/math_500 及多数据集用数据集默认题数）
+    # V3(plugin) 精度评测口径与 V2(步骤4)完全一致：跑全部 ${DATASETS_CSV}，每个数据集
+    # 独立评测、独立判定，全部达标才 plugin_workflow.accuracy_ok=true。
+    # --limit 仅 gpqa_diamond 单数据集时附加（mmlu/math_500 及多数据集用数据集默认题数）。
     V3_EVAL_LIMIT_ARGS=""
-    [ "${PRIMARY_DATASET}" = "gpqa_diamond" ] && [ -n "${EVAL_LIMIT}" ] && V3_EVAL_LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+    [ "${PRIMARY_DATASET}" = "gpqa_diamond" ] && [ "${DATASET_COUNT}" -eq 1 ] && [ -n "${EVAL_LIMIT}" ] && V3_EVAL_LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+    # 逐数据集任务规格（供步骤11 独立评测/判定使用）
+    V3_DATASET_SPEC=""
+    for _ds in ${DATASET_LIST}; do
+        _PREF=$(ds_prefix "${_ds}")
+        _LIMIT_ARGS=""
+        [ "${_ds}" = "gpqa_diamond" ] && [ "${DATASET_COUNT}" -eq 1 ] && [ -n "${EVAL_LIMIT}" ] && _LIMIT_ARGS="--limit ${EVAL_LIMIT} "
+        V3_DATASET_SPEC="${V3_DATASET_SPEC}
+- **${_ds}**：任务文件 plugin_eval_${_PREF}.cmd（state/log 同名）；评测命令 python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${_ds} ${_LIMIT_ARGS}--output /flagos-workspace/results/${_PREF}_flagos_optimized.json；与 V2 判定同参对比 V1 基线 /flagos-workspace/results/${_PREF}_native.json（缺失回退 NV），判定 accuracy_compare.py --v1 <V1或NV> --v2 /flagos-workspace/results/${_PREF}_flagos_optimized.json --metric ${_ds} --output /flagos-workspace/results/accuracy_compare_${_PREF}_v3.json"
+    done
     PROMPT_SEG4="容器名: ${SEG_CTR}，模型名: ${MODEL}
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
@@ -2512,10 +2523,11 @@ ${SEG4_CTX_SUMMARY}
 - 步骤 9 安装失败 → issue_reporter.py --type plugin-error --repo flagos-ai/vllm-plugin-FL → 停止任务
 - 步骤 10 服务崩溃 → issue_reporter.py --type plugin-error --repo flagos-ai/vllm-plugin-FL → 停止任务
 - **流程哲学（用户 2026-07 定稿）：性能不看重、不阻断**。步骤12（plugin 性能评测）无论达标与否都不阻断步骤13发布，性能仅影响发布标签 qualified。**精度是唯一硬闸门**（rel_drop≤5%）。
-- 步骤 11 精度不达标 → **三级递进**（精度专用，不直接放弃）：
-  ① 先写 issue 到 flagos-ai/vllm-plugin-FL 记录问题；
-  ② plugin 模式关算子调优：operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json（走 env_inline VLLM_FL_FLAGOS_BLACKLIST，在已达标算子集基础上继续关拖累精度算子直到精度达标）；精度达标即置 accuracy_ok=true 继续；
-  ③ 全关 flaggems 算子仍精度不达标 → 判定为框架问题，提交 plugin-error issue（标注全关仍不达标），保持 accuracy_ok=false（精度硬闸门未过 → V3 不产出）。
+- **步骤 11 精度评测口径（与 V2 步骤4 完全一致）**：对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）**逐个独立评测、独立判定**（每数据集见下方 V3 数据集任务规格；rel_drop≤5% 为达标），**全部数据集达标才置 plugin_workflow.accuracy_ok=true**；任一数据集不达标即 accuracy_ok=false，进入下方三级递进。
+- 步骤 11 精度不达标 → **三级递进**（精度专用，不直接放弃；多数据集时**按不达标数据集逐个处理**）：
+  ① 先写 issue 到 flagos-ai/vllm-plugin-FL 记录问题（注明哪个/哪些数据集不达标）；
+  ② plugin 模式关算子调优：**按不达标数据集逐个调优**（每轮只针对一个不达标数据集，operator_search.py 加 --dataset <该数据集> 与判定同参）：operator_search.py run --plugin-mode --dataset <数据集> --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json（走 env_inline VLLM_FL_FLAGOS_BLACKLIST，在已达标算子集基础上继续关拖累精度算子直到该数据集精度达标）；已达标数据集不重复评测，**全部数据集达标才置 accuracy_ok=true 继续**；
+  ③ 全关 flaggems 算子仍有数据集精度不达标 → 判定为框架问题，提交 plugin-error issue（标注全关仍不达标的数据集），保持 accuracy_ok=false（精度硬闸门未过 → V3 不产出）。
 - 步骤 12 性能不达标 → 仅写 performance-degraded issue 记录 + 标 performance_ok=false，**照常继续步骤13**（可选：跑一次 plugin 模式性能调优尽力提升，达上限即停，不强求达标）。
 - 步骤 13 触发条件：plugin_workflow.accuracy_ok=true（**仅精度硬闸门**；performance_ok 不再门控，仅决定发布 tag 的 qualified 标签）
 - **⚠ 步骤13硬约束（不可跳过）**：只要步骤11精度达标（accuracy_ok=true），**必须**立即执行步骤13发布 V3，**禁止**因 performance_ok=false / qualified=false 而跳过步骤13；**禁止**在步骤13完成前进入 V4 或结束会话。若精度达标却未发 V3，即为流程违规（历史事故：DeepSeek-R1-0528 精度62%达标、性能77.9%<80%，agent误把performance_ok=false当门控、跳过步骤13直接跑V4致V3漏发）。步骤11→步骤13之间除步骤12性能记录外不得插入任何其他阶段。
@@ -2543,7 +2555,8 @@ CMD_EOF\"
    - status=timeout → 超过总闸，读日志诊断
 - **断点恢复（硬性）**：启动任务前先检查 /flagos-workspace/logs/tasks/<TASK_ID>.state——若存在且 status=running，说明上一会话已启动该任务（会话被杀任务继续跑），**直接接管轮询，禁止重复启动**；status=done/error 则按终态直接处理
 ${EVAL_BUDGET_NOTE}
-- **精度评测**（<TASK_ID>=plugin_eval）：必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），评测**主数据集 ${PRIMARY_DATASET}**（与 V2 评测同样本可对比；mmlu/math_500 及多数据集不传 --limit，用数据集默认题数）。cmd 文件内容：python3 eval_wrapper.py --eval-cmd 'python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${PRIMARY_DATASET} ${V3_EVAL_LIMIT_ARGS}--output <V3评测输出路径>' --service-log <服务日志> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}；task_runner --timeout ${EVAL_MAX_TO}。退出码 0 = 成功（末行 [RESULT_JSON]），非 0 = 异常（[EVAL_ERROR]）。**评测耗时长（尤其 thinking 模型）是预算内预期，禁止因等待时间长主动跳过评测**。
+- **精度评测**（<TASK_ID>=plugin_eval_{prefix}，**每个数据集一个独立任务**）：必须通过 eval_wrapper.py 执行（不要直接调用 fast_gpqa.py），对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）**逐个独立评测、独立判定，全部达标才 accuracy_ok=true**（与 V2 步骤4 口径一致；与 V2 评测同样本可对比；mmlu/math_500 及多数据集不传 --limit，用数据集默认题数）。各数据集任务规格如下（cmd 文件用 eval_wrapper.py --eval-cmd 包裹对应 fast_gpqa 命令，--service-log <服务日志> --stall-timeout 300 --max-timeout ${EVAL_MAX_TO}；task_runner --timeout ${EVAL_MAX_TO}；退出码 0=成功末行 [RESULT_JSON]，非 0=异常 [EVAL_ERROR]）：${V3_DATASET_SPEC}
+  **评测耗时长（尤其 thinking 模型 × 多数据集）是预算内预期，禁止因等待时间长主动跳过任一数据集评测**。
 - **服务等待**（<TASK_ID>=startup_plugin）：wait_for_service.sh 命令（--timeout 180 --max-timeout 5760 --mode flagos）写入 cmd 文件执行，task_runner --timeout 6000。
 - **性能/调优**（<TASK_ID>=benchmark_v3 / search_v3）：benchmark_runner.py 命令（--output-name flagos_optimized）与 operator_search.py run --plugin-mode --final-output-name v3_performance --state-path /flagos-workspace/results/operator_config_v3.json 命令写入 cmd 文件执行，task_runner --timeout 86400（调优可能数小时，脚本内部已有完整循环）。
 
@@ -2697,29 +2710,44 @@ print('no')
 
 if [ "${QUALIFIED_CORE_V3}" = "True" ] && [ "${SEG4_V4DONE}" = "no" ] && [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
 
-# 提取精度基线：优先本次 V1({PRIMARY_PREFIX}_native.json) 得分，缺失时回退
-# accuracy_compare_{PRIMARY_PREFIX}.json 的 nv_score（gpqa_diamond 场景 = 原 gpqa_native.json 零回归）
-V4_ACC_BASELINE=$(docker exec "${SEG_CTR}" bash -c "
+# 提取精度基线：优先本次 V1({prefix}_native.json) 得分，缺失时回退
+# accuracy_compare_{prefix}.json 的 nv_score（gpqa_diamond 场景 = 原 gpqa_native.json 零回归）
+# V4_ACC_BASELINE：主数据集单标量（向后兼容 operator_reduction.py 的 --accuracy-baseline）
+# V4_ACC_DATASETS：全部数据集的 "dataset:baseline" 逗号分隔映射（供 --accuracy-datasets，
+#                  与 V2/V3 口径一致：V4 终检逐个数据集判定、全部达标才成立）
+V4_DS_PREFIX_MAP=""
+for _ds in ${DATASET_LIST}; do
+    V4_DS_PREFIX_MAP="${V4_DS_PREFIX_MAP}${_ds}:$(ds_prefix "${_ds}") "
+done
+V4_ACC_DATASETS=$(docker exec "${SEG_CTR}" bash -c "
 python3 -c \"
 import json
-baseline = 0.0
-try:
-    with open('/flagos-workspace/results/${PRIMARY_PREFIX}_native.json') as f:
-        d = json.load(f)
-    s = d.get('score')
-    if s and float(s) > 0:
-        baseline = float(s)
-except: pass
-if baseline <= 0:
+pairs = '${V4_DS_PREFIX_MAP}'.split()
+out = []
+for pair in pairs:
+    ds, pref = pair.split(':', 1)
+    baseline = 0.0
     try:
-        with open('/flagos-workspace/results/accuracy_compare_${PRIMARY_PREFIX}.json') as f:
+        with open('/flagos-workspace/results/%s_native.json' % pref) as f:
             d = json.load(f)
-        nv = (d.get('nv') or {}).get('score') or d.get('nv_score')
-        if nv and float(nv) > 0:
-            baseline = float(nv)
-    except: pass
-print(baseline)
-\"" 2>/dev/null) || V4_ACC_BASELINE="0.0"
+        s = d.get('score')
+        if s and float(s) > 0:
+            baseline = float(s)
+    except Exception: pass
+    if baseline <= 0:
+        try:
+            with open('/flagos-workspace/results/accuracy_compare_%s.json' % pref) as f:
+                d = json.load(f)
+            nv = (d.get('nv') or {}).get('score') or d.get('nv_score')
+            if nv and float(nv) > 0:
+                baseline = float(nv)
+        except Exception: pass
+    out.append('%s:%s' % (ds, baseline))
+print(','.join(out))
+\"" 2>/dev/null) || V4_ACC_DATASETS=""
+# 主数据集单标量（从映射中取第一个，向后兼容）
+V4_ACC_BASELINE=$(echo "${V4_ACC_DATASETS}" | tr ',' '\n' | awk -F: 'NR==1{print $2}')
+[ -z "${V4_ACC_BASELINE}" ] && V4_ACC_BASELINE="0.0"
 
 # V4 路径参数：读取 V1 三选结果确定 V2 路径（2.1 或 2.2），供 operator_reduction.py 使用
 V4_V2_PATH=$(python3 -c "
@@ -2771,6 +2799,7 @@ ${COMMON_TOKENS}
 
 **前段状态**：容器 ${SEG_CTR} 已就绪，步骤1-7 已全部完成，V3(Max) 已发布且精度达标。
 V4 从 V3 的算子列表里随机选 1~3 个算子只开（极简组合），若性能超优化基线且精度达标则采纳，循环≤2轮，保底≥1算子。2轮内无达标组合 → 回退到起点（精度已合格版）。
+**精度终检口径（与 V2/V3 一致）**：V4 精度校验对全部 ${DATASET_COUNT} 个数据集（${DATASETS_CSV}）逐个独立判定，全部达标（每数据集 rel_drop≤5%）才 V4 成立。脚本已通过 --accuracy-datasets '${V4_ACC_DATASETS}' 接收各数据集基线（单数据集时等价于 --accuracy-baseline）；回退到起点的版本等价 V3，继承 V3 已验证精度结论、不重复终检。
 
 **步骤8 V4 减算子（通过脚本自动执行）**：
 operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性能>优化基线+精度达标即采纳，≤2轮，2轮无果回退起点。
@@ -2784,6 +2813,7 @@ operator_reduction.py 新算法：从 V3 算子池随机选 1~3 个只开，性�
     --v2-final-ops '${V4_V2_FINAL_OPS}' \\
     --v2-first-perf /flagos-workspace/results/v2_initial_performance.json \\
     --accuracy-baseline ${V4_ACC_BASELINE} \\
+    --accuracy-datasets '${V4_ACC_DATASETS}' \\
     --accuracy-guard 5.0 \\
     --max-rounds 2 \\
     --output-dir /flagos-workspace/results/ \\
@@ -2794,7 +2824,7 @@ operator_reduction.py 可能运行数小时，**禁止**用 Bash(timeout=大数)
 1. 写任务命令文件（一条 docker exec，上方完整参数命令写入 cmd 文件）：
    docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/v4_reduction.cmd << 'CMD_EOF'
 cd /flagos-workspace/scripts
-PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
+PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_reduction.py --context-yaml /flagos-workspace/shared/context.yaml --v1-perf /flagos-workspace/results/native_performance.json --v3-perf /flagos-workspace/results/flagos_optimized.json --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh --mode flagos' --v2-path ${V4_V2_PATH} --v2-final-ops '${V4_V2_FINAL_OPS}' --v2-first-perf /flagos-workspace/results/v2_initial_performance.json --accuracy-baseline ${V4_ACC_BASELINE} --accuracy-datasets '${V4_ACC_DATASETS}' --accuracy-guard 5.0 --max-rounds 2 --output-dir /flagos-workspace/results/ --state-path /flagos-workspace/results/operator_config_v4.json --json
 CMD_EOF\"
 2. detached 启动（一条命令立即返回，不等待）：
    docker exec -d \${CONTAINER} bash -c \"cd /flagos-workspace/scripts && PATH=/opt/conda/bin:\$PATH python3 task_runner.py --cmd 'bash /flagos-workspace/logs/tasks/v4_reduction.cmd' --state /flagos-workspace/logs/tasks/v4_reduction.state --log /flagos-workspace/logs/tasks/v4_reduction.log --timeout 88200\"

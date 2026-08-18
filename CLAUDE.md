@@ -115,7 +115,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - **V2 Pro**：经过算子调优（步骤5/7）后达标的版本。精度相对退化≤5%，性能≥80% of V1
 - **V3 Max**：在 V2 基础上安装 Plugin 并调优达标的版本。允许 Plugin 模式下继续关闭算子
 - **V4 精简 (Flag-express)**：在 V3 基础上通过 `operator_reduction.py` 减算子提性能，**两阶段**：阶段1 性能搜索（从 V3 基线起逐个试禁用，仅当禁用后吞吐 > 当前基线才提交、基线动态推进，全程不测精度）；阶段2 精度回溯（按性能从高到低取组合测精度，达标即产出，不达标回退次优，最坏回退 V3 等价）。**追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较，V1 仅报告参考）**，硬约束至少保留 1 个算子（plugin 也不例外）。**精度相对退化≤5% 是 V4 成立前提**，收尾做最终精度终检，不达标则 V4 不成立（success=False）。V4 成立需同时满足：超越 V3 + 保留≥1算子 + 精度达标
-- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`。**多数据集（`--datasets`）**：每个数据集独立判定（`accuracy_compare_{dataset}.json`），全部达标才 `accuracy_ok=true`；V3/V4 精度终检与 V4 基线取**主数据集**（第一个）
+- **精度判据口径**：所有版本的精度达标均以「相对退化」计算——`rel_drop = (基线 - 当前) / 基线 ≤ 5%`，基线为本地 V1 或 NV 参考（`nv_baseline.yaml`）。见 `accuracy_compare.py`。**多数据集（`--datasets`）**：每个数据集独立判定（`accuracy_compare_{dataset}.json`），全部达标才 `accuracy_ok=true`。**V2/V3/V4 精度口径完全一致**——三个版本都对全部 `--datasets` 逐个独立评测、独立判定，全部达标才成立（V3 见步骤11、V4 终检见 `operator_reduction.py --accuracy-datasets`，V4 基线逐数据集取各自 `{prefix}_native.json`/NV）；V4 回退到起点的版本等价 V3，继承 V3 已验证精度结论、不重复终检
 
 ### 双 pipeline 分支（准入镜像分类驱动）
 

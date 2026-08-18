@@ -294,6 +294,8 @@ sleep 480 && docker exec $CONTAINER bash -c "cat /flagos-workspace/logs/tasks/ev
 
 （普通模型把 `--limit 30 --max-timeout 22500` 换为 `50/7200`；V1 评测用 `eval_v1.cmd/eval_v1.state`，V2 用 `eval_v2.*`，Plugin 步骤11 用 `plugin_eval.*`。）
 
+**Plugin 步骤11（V3 精度）与 V2 步骤4 口径完全一致**：对全部 `--datasets` 数据集**逐个独立评测、独立判定，全部达标才 `plugin_workflow.accuracy_ok=true`**。多数据集时每个数据集一个独立任务 `plugin_eval_{prefix}.*`（`--dataset {ds}`、输出 `{prefix}_flagos_optimized.json`、判定 `accuracy_compare.py --metric {ds} --output accuracy_compare_{prefix}_v3.json`）；不达标时**按不达标数据集逐个**在 plugin 模式关算子调优（`operator_search.py --plugin-mode --dataset {ds}`），已达标数据集不重复评测。V4 减算子（`operator_reduction.py`）同样以 `--accuracy-datasets` 对全部数据集做精度终检，全部达标才 V4 成立。
+
 ## 迁移流程中的用法
 
 步骤4（快速精度评测）使用模块 A + C + D，模块 B（远端 flageval 正式评测）为独立工作，不参与主流程。

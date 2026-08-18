@@ -252,6 +252,64 @@ def run_accuracy_guard(gpqa_script: str, gpqa_config: str, output_path: str,
         return False, 0.0
 
 
+def run_accuracy_guard_multi(gpqa_script: str, gpqa_config: str, output_base: str,
+                             dataset_baselines: Dict[str, float], guard: float,
+                             ) -> Tuple[bool, float, Dict[str, Any]]:
+    """多数据集精度护栏（与 V2/V3 口径一致）：对每个数据集加 --dataset 跑 fast_gpqa，
+    逐个算 rel_drop，**全部 ≤guard 才 passed**。
+
+    参数
+      dataset_baselines: {dataset: baseline_score}，baseline<=0 的数据集视为"无法校验"→
+        该数据集跳过判定（不否定 V4），只在所有数据集都无基线时才整体判"未校验"。
+      output_base: 输出文件基名（不含扩展名），每数据集写 {output_base}_{dataset}.json。
+
+    返回 (passed, primary_score, details)
+      - passed: 全部有基线的数据集均达标 → True；任一不达标 → False
+      - primary_score: 第一个数据集的得分（供 state.v4_score / 报告向后兼容）
+      - details: {dataset: {"score","baseline","rel_drop","ok","verified"}}
+    """
+    details: Dict[str, Any] = {}
+    all_ok = True
+    any_verified = False
+    primary_score = 0.0
+    for idx, (ds, baseline) in enumerate(dataset_baselines.items()):
+        out_path = f"{output_base}_{ds}.json"
+        cmd = f"python3 {gpqa_script} --config {gpqa_config} --dataset {ds} --output {out_path}"
+        rc, stdout, stderr = run_cmd(cmd, timeout=7200)
+        score = 0.0
+        if rc == 0:
+            try:
+                score = load_json(out_path).get('score', 0.0)
+            except Exception as e:
+                print(f"  ⚠ [{ds}] 读取精度结果失败: {e}")
+                score = 0.0
+                rc = 1
+        else:
+            print(f"  ⚠ [{ds}] 精度护栏评测失败: {stderr[:200]}")
+        if idx == 0:
+            primary_score = score
+        if baseline and baseline > 0:
+            any_verified = True
+            rel_drop = (baseline - score) / baseline * 100
+            ds_ok = (rc == 0) and (rel_drop <= guard)
+            details[ds] = {"score": round(score, 2), "baseline": round(baseline, 2),
+                           "rel_drop": round(rel_drop, 2), "ok": ds_ok, "verified": True}
+            status = "达标" if ds_ok else "不达标"
+            print(f"    [{ds}] score={score:.1f}% baseline={baseline:.1f}% "
+                  f"rel_drop={rel_drop:.2f}% → {status}")
+            if not ds_ok:
+                all_ok = False
+        else:
+            # 无基线 → 无法校验该数据集，跳过判定（不否定 V4）
+            details[ds] = {"score": round(score, 2), "baseline": 0.0,
+                           "rel_drop": None, "ok": None, "verified": False}
+            print(f"    [{ds}] score={score:.1f}% 无基线 → 跳过判定（不否定）")
+    # 所有数据集都无基线 → 整体未校验（passed=False，调用方按 accuracy_baseline<=0 走未验证分支）
+    if not any_verified:
+        return False, primary_score, details
+    return all_ok, primary_score, details
+
+
 # =============================================================================
 # 核心：贪心减算子循环
 # =============================================================================
@@ -292,6 +350,7 @@ def run_reduction(
     gpqa_config: str = DEFAULT_GPQA_CONFIG,
     accuracy_guard: float = DEFAULT_ACCURACY_GUARD,
     accuracy_baseline: float = 0.0,
+    dataset_baselines: Optional[Dict[str, float]] = None,
     max_rounds: int = 2,
     seed: int = 0,
     port: int = 8000,
@@ -314,6 +373,16 @@ def run_reduction(
       - V2.1 路径：baseline_source='intersection'，perf_baseline = 起点交集实测吞吐；
       - V2.2/无V1 路径：baseline_source='v2x1.05'，perf_baseline = V2 首测 × 1.05。
     """
+    # 精度基线归一：dataset_baselines 优先（多数据集口径，与 V2/V3 一致）；
+    # 缺省时退化为单数据集（用 accuracy_baseline，dataset 名 gpqa_diamond 作占位）。
+    if not dataset_baselines:
+        dataset_baselines = {"gpqa_diamond": accuracy_baseline} if accuracy_baseline > 0 else {}
+    # 是否存在可校验基线（任一数据集基线 >0）
+    has_baseline = any(b and b > 0 for b in dataset_baselines.values())
+    # 单标量 accuracy_baseline 保持为"主数据集基线"（向后兼容日志/回退判断）
+    if accuracy_baseline <= 0 and has_baseline:
+        accuracy_baseline = next(b for b in dataset_baselines.values() if b and b > 0)
+
     state = load_json(state_path)
     if not state:
         state = {
@@ -321,6 +390,7 @@ def run_reduction(
             "version": "v4",
             "v3_ops": list(v3_ops),
             "start_ops": list(start_ops),          # 精度已合格的回退版
+            "dataset_baselines": {k: round(v, 2) for k, v in dataset_baselines.items()},
             "perf_baseline": round(perf_baseline, 2),
             "baseline_source": baseline_source,
             "v1_composite": v1_composite,
@@ -389,8 +459,8 @@ def run_reduction(
             time.sleep(5)
             continue
 
-        # 步骤3：性能有提升 → 测精度（对比 NV 基线）
-        if accuracy_baseline <= 0:
+        # 步骤3：性能有提升 → 测精度（对比基线，全部数据集逐个判定）
+        if not has_baseline:
             # 缺精度基线无法校验 → 保守起见不采纳减算子组合（避免破坏精度硬闸门），
             # 记录后继续；最终会回退到精度已合格的 start_ops。
             print(f"    ⚠ 缺精度基线，无法校验减算子后精度 → 本轮不采纳（守精度红线）")
@@ -402,22 +472,25 @@ def run_reduction(
             time.sleep(5)
             continue
 
-        print(f"    ▶ 精度校验（对比 NV 基线 {accuracy_baseline:.1f}）...")
-        guard_ok, gscore = run_accuracy_guard(
+        ds_names = ",".join(dataset_baselines.keys())
+        print(f"    ▶ 精度校验（对比基线，数据集: {ds_names}，全部达标才采纳）...")
+        guard_ok, gscore, gdetails = run_accuracy_guard_multi(
             gpqa_script, gpqa_config,
-            os.path.join(output_dir, f"gpqa_v4_round{round_num}.json"),
-            accuracy_baseline, accuracy_guard
+            os.path.join(output_dir, f"gpqa_v4_round{round_num}"),
+            dataset_baselines, accuracy_guard
         )
         rec["score"] = round(gscore, 2)
         rec["accuracy_ok"] = guard_ok
+        rec["accuracy_details"] = gdetails
         subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
         time.sleep(5)
         if guard_ok:
-            print(f"    ✓ 精度达标 (score={gscore:.1f}%) → 采纳该组合为 V4")
+            print(f"    ✓ 全部数据集精度达标 (主数据集 score={gscore:.1f}%) → 采纳该组合为 V4")
             rec["outcome"] = "accepted"
-            selected = {"enabled": list(trial_enabled), "composite": trial_composite, "score": gscore}
+            selected = {"enabled": list(trial_enabled), "composite": trial_composite,
+                        "score": gscore, "accuracy_details": gdetails}
         else:
-            print(f"    ✗ 精度不达标 (score={gscore:.1f}%) → 回步骤2重选")
+            print(f"    ✗ 存在数据集精度不达标 → 回步骤2重选")
             rec["outcome"] = "accuracy_fail"
         probed_rounds.append(rec)
         state["probed_rounds"] = probed_rounds
@@ -454,6 +527,7 @@ def run_reduction(
     final_score = 0.0
     accuracy_ok: Optional[bool] = None
     accuracy_rel_drop_pct: Optional[float] = None
+    accuracy_details: Dict[str, Any] = {}
     ok = restart_and_wait(service_cmd, wait_script, port=port,
                           model_name=model_name, max_timeout=max_timeout)
     if ok:
@@ -469,24 +543,28 @@ def run_reduction(
             accuracy_ok = True
             print("  ▶ V4 回退到起点（等价 V3 配置）→ 继承 V3 已验证的精度结论，"
                   "跳过重复精度终检（避免评测抖动二次否定已合格版本）")
-        elif accuracy_baseline > 0:
-            print("  ▶ V4 最终精度终检...")
-            accuracy_ok, final_score = run_accuracy_guard(
+        elif has_baseline:
+            ds_names = ",".join(dataset_baselines.keys())
+            print(f"  ▶ V4 最终精度终检（数据集: {ds_names}，逐个判定，全部达标才成立）...")
+            accuracy_ok, final_score, final_details = run_accuracy_guard_multi(
                 gpqa_script, gpqa_config,
-                os.path.join(output_dir, "gpqa_v4.json"),
-                accuracy_baseline, accuracy_guard
+                os.path.join(output_dir, "gpqa_v4"),
+                dataset_baselines, accuracy_guard
             )
-            accuracy_rel_drop_pct = round(
-                (accuracy_baseline - final_score) / accuracy_baseline * 100, 2
-            )
+            accuracy_details = final_details
+            # 相对退化按主数据集展示（明细见 accuracy_details）
+            if accuracy_baseline > 0:
+                accuracy_rel_drop_pct = round(
+                    (accuracy_baseline - final_score) / accuracy_baseline * 100, 2
+                )
             if accuracy_ok:
-                print(f"    ✓ V4 精度终检达标: score={final_score:.1f}%, "
-                      f"相对退化={accuracy_rel_drop_pct:.2f}% (护栏 {accuracy_guard:.0f}%)")
+                print(f"    ✓ V4 精度终检达标（全部数据集）: 主数据集 score={final_score:.1f}% "
+                      f"(护栏 {accuracy_guard:.0f}%)")
             else:
-                print(f"    ✗ V4 精度终检不达标: score={final_score:.1f}%, "
-                      f"相对退化={accuracy_rel_drop_pct:.2f}% > 护栏 {accuracy_guard:.0f}%")
+                print(f"    ✗ V4 精度终检不达标（存在数据集超护栏）: 主数据集 score={final_score:.1f}% "
+                      f"(护栏 {accuracy_guard:.0f}%)")
         else:
-            print("  ⚠ 缺精度基线（accuracy_baseline<=0），无法进行 V4 精度终检 "
+            print("  ⚠ 缺精度基线（全部数据集基线<=0），无法进行 V4 精度终检 "
                   "→ 精度状态标记为未验证，编排层需以 NV 基线兜底后重判")
     subprocess.run("pkill -f 'vllm' 2>/dev/null", shell=True, capture_output=True)
 
@@ -501,6 +579,7 @@ def run_reduction(
     state["final_composite"] = final_composite
     state["v4_score"] = final_score
     state["accuracy_ok"] = accuracy_ok
+    state["accuracy_details"] = accuracy_details
     save_json(state, state_path)
 
     # V4 成立准则：精度达标（accuracy_ok is not False）+ 至少保留 1 个算子。
@@ -538,6 +617,8 @@ def run_reduction(
         "accuracy_baseline": round(accuracy_baseline, 2) if accuracy_baseline > 0 else None,
         "accuracy_rel_drop_pct": accuracy_rel_drop_pct,
         "accuracy_guard_pct": accuracy_guard,
+        "accuracy_datasets": {k: round(v, 2) for k, v in dataset_baselines.items()},
+        "accuracy_details": accuracy_details,
     }
     if not success:
         reasons = []
@@ -600,6 +681,11 @@ def main():
                         help="精度护栏基线分数 (NV 基线)。V4 精度合格是版本成立前提，"
                              "应始终传入；0=无基线，精度状态标记为未验证（accuracy_verified=false），"
                              "编排层须以 NV 基线兜底后重判，不得直接判 V4 达标")
+    parser.add_argument("--accuracy-datasets", default="",
+                        help="多数据集精度基线（与 V2/V3 口径一致），格式 'ds1:score1,ds2:score2'"
+                             "（如 'gpqa_diamond:34.2,mmlu:61.5,math_500:80.0'）。传入时 V4 精度终检"
+                             "对每个数据集逐个判定、全部达标才成立；未传时退化为 --accuracy-baseline "
+                             "单数据集口径。基线<=0 的数据集视为无法校验、跳过判定（不否定 V4）")
     parser.add_argument("--v2-path", choices=["2.1", "2.2"], default="2.1",
                         help="V2 路径：2.1=有非plugin V2对照(起点=V2调优后∩V3, 基线=交集实测)；"
                              "2.2=无V1/无非plugin V2(起点=V3, 基线=V2首测×1.05)")
@@ -617,6 +703,20 @@ def main():
     parser.add_argument("--max-timeout", type=int, default=1800)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+
+    # 解析 --accuracy-datasets 'ds1:score1,ds2:score2' → {ds: score}
+    dataset_baselines: Dict[str, float] = {}
+    if args.accuracy_datasets:
+        for pair in args.accuracy_datasets.split(','):
+            pair = pair.strip()
+            if not pair or ':' not in pair:
+                continue
+            ds, _, sval = pair.partition(':')
+            ds = ds.strip()
+            try:
+                dataset_baselines[ds] = float(sval.strip())
+            except ValueError:
+                print(f"⚠ 忽略非法 accuracy-datasets 项: {pair}")
 
     # 加载 /etc/environment 中的 FlagGems 相关变量（docker exec 不继承）
     _load_etc_environment()
@@ -707,6 +807,7 @@ def main():
         gpqa_config=args.gpqa_config,
         accuracy_guard=args.accuracy_guard,
         accuracy_baseline=args.accuracy_baseline,
+        dataset_baselines=dataset_baselines,
         max_rounds=args.max_rounds,
         seed=args.seed,
         port=port,
