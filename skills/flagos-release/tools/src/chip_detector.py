@@ -35,6 +35,7 @@ class ChipVendor(Enum):
     KUNLUNXIN = "kunlunxin"    # 昆仑芯 (xpu-smi)
     CAMBRICON = "cambricon"    # 寒武纪 (cnmon)
     TSINGMICRO = "tsingmicro"  # 清微智能 (tsm_smi)
+    ZHENWU = "zhenwu"          # 平头哥 PPU-ZW810E (ppu-smi；CUDA 兼容，nvidia-smi 为 wrapper)
 
 
 # 芯片厂商名称映射（英文）
@@ -48,6 +49,7 @@ VENDOR_NAMES = {
     ChipVendor.KUNLUNXIN: "kunlunxin",
     ChipVendor.CAMBRICON: "cambricon",
     ChipVendor.TSINGMICRO: "tsingmicro",
+    ChipVendor.ZHENWU: "zhenwu",
 }
 
 
@@ -930,6 +932,10 @@ def _normalize_vendor_for_naming(vendor_name: str) -> str:
         "nvidia": "nvidia",
         "tsingmicro": "tsingmicro",
         "zhenwu": "zhenwu",
+        "ppu": "zhenwu",
+        "t-head": "zhenwu",
+        "thead": "zhenwu",
+        "pingtouge": "zhenwu",
     }
     return alias.get(v, v)
 

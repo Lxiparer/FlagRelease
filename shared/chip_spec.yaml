@@ -81,8 +81,9 @@ zhenwu:
   vendor_en: T-Head
   vendor_cn: 平头哥
   naming_suffix: zhenwu
-  smi_cmd: ""
-  aliases: [zhenwu, t-head, thead, pingtouge, pp]
+  # PPU-ZW810E 是 CUDA 兼容卡，nvidia-smi 实为 PPU wrapper；用 ppu-smi 作识别命令消歧（真 NVIDIA 机无此命令）
+  smi_cmd: ppu-smi
+  aliases: [zhenwu, t-head, thead, pingtouge, pp, ppu]
   chips:
     - { display: "PPU-ZW810E", match: ["ppu-zw810e", "zw810e", "zw810", "ppu"] }
 

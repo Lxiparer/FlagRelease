@@ -37,6 +37,10 @@ VENDOR_ALIASES = {
     "xpu": "kunlunxin",
     "iluvatar": "iluvatar",
     "tianshu": "iluvatar",
+    "zhenwu": "zhenwu",
+    "ppu": "zhenwu",
+    "pp": "zhenwu",
+    "thead": "zhenwu",
 }
 VENDOR_TOKEN_RE = re.compile(r"(?:^|[/:_.@-])([a-z0-9]+)(?=$|[/:_.@-])", re.IGNORECASE)
 # 镜像命名常把厂商名与编号连写(如 metax001),识别时剥掉 token 尾部数字再查表。
@@ -103,6 +107,19 @@ def aggregate_vendors(vendors: Iterable[str]) -> str:
         return "unknown"
     unique = set(normalized)
     return next(iter(unique)) if len(unique) == 1 else "mixed"
+
+
+# 通知展示专用：canonical 厂商标识 -> 对外展示名。仅用于渲染文本，
+# 不影响 vendor 的聚合/比较（那些仍用 canonical 值）。
+VENDOR_DISPLAY_NAMES = {
+    "huawei": "Ascend",
+}
+
+
+def vendor_display(vendor: Any) -> str:
+    """把 canonical 厂商标识映射为通知里展示的名字（如 huawei -> Ascend）。"""
+    key = str(vendor or "").strip()
+    return VENDOR_DISPLAY_NAMES.get(key.lower(), key or "unknown")
 
 
 def nested_dict(value: Any) -> Dict[str, Any]:
@@ -513,7 +530,7 @@ def build_models_markdown_table(
             result = "⛔ 未完成" if ended else "⏳ 待执行"
             duration_cost = "-"
         model_name = str(task.get("model") or "-")
-        model_cell = f"{vendor}<br>{model_name}" if show_vendor else model_name
+        model_cell = f"{vendor_display(vendor)}<br>{model_name}" if show_vendor else model_name
         lines.append(
             "| " + " | ".join(
                 escape_table_cell(value)
@@ -752,7 +769,7 @@ def command_batch_start(args: argparse.Namespace) -> int:
     }
     atomic_write_json(path, state)
     fields: List[Tuple[str, str]] = [("任务规模", f"{state['total_models']} 个模型")]
-    title = f"{state['vendor']}｜{state['total_models']} 个模型"
+    title = f"{vendor_display(state['vendor'])}｜{state['total_models']} 个模型"
     lead = "⏳ 批量任务已启动"
     # 批量开始时展示完整模型列表（含厂商/序号），而非仅前 5 个队列摘要。
     queue = build_task_queue_markdown(state, max_items=0)
@@ -807,7 +824,7 @@ def command_model_start(args: argparse.Namespace) -> int:
     fields: List[Tuple[str, str]] = [("当前进度", f"第 {position} / {total} 个")]
     if args.target:
         fields.append(("镜像", args.target))
-    title = f"{state.get('vendor', 'unknown')}｜{position} / {total}"
+    title = f"{vendor_display(state.get('vendor', 'unknown'))}｜{position} / {total}"
     lead = f"🚀 开始迁移 · {args.model}"
     note = batch_progress_note(state)
     table = build_models_markdown_table(state, show_all=True)
@@ -868,7 +885,7 @@ def command_model_finish(args: argparse.Namespace) -> int:
     atomic_write_json(path, state)
     metrics = batch_metrics(state)
     fields = summary_fields(state, model)
-    title = f"{state.get('vendor', 'unknown')}｜{metrics['processed_models']} / {metrics['total_models']}"
+    title = f"{vendor_display(state.get('vendor', 'unknown'))}｜{metrics['processed_models']} / {metrics['total_models']}"
     lead = f"{model_result_label(model)} · {model['model']}"
     note = batch_progress_note(state)
     payload = {"state": state, "latest": model, "metrics": metrics}
@@ -911,7 +928,7 @@ def command_batch_end(args: argparse.Namespace) -> int:
     fields = batch_end_fields(state, metrics)
     title_total = metrics["total_models"] or metrics["processed_models"]
     title = (
-        f"{state.get('vendor', 'unknown')}｜"
+        f"{vendor_display(state.get('vendor', 'unknown'))}｜"
         f"{metrics['qualified_uploaded']} / {title_total} 达标"
     )
     lead = batch_end_lead(metrics)
@@ -950,7 +967,7 @@ def command_single_start(args: argparse.Namespace) -> int:
         "started_at": now_iso(),
     }
     fields = single_start_fields(args, hardware)
-    title = f"{hardware['vendor']}｜{args.model}"
+    title = f"{vendor_display(hardware['vendor'])}｜{args.model}"
     return emit_or_notify(
         state,
         "task_start",
@@ -978,7 +995,7 @@ def command_single_end(args: argparse.Namespace) -> int:
     )
     state = single_state(model)
     fields = single_end_fields(model)
-    title = f"{model['vendor']}｜{model['model']}"
+    title = f"{vendor_display(model['vendor'])}｜{model['model']}"
     payload = {"state": state, "latest": model, "metrics": batch_metrics(state)}
     return emit_or_notify(
         payload,

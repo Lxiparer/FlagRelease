@@ -95,7 +95,7 @@ workspace:
 # GPU 信息 (由 container-preparation 写入)
 # ============================================================================
 gpu:
-  vendor: ""              # 厂商: nvidia|huawei|hygon|mthreads|kunlunxin|tianshu|metax|tsingmicro|cambricon|alibaba
+  vendor: ""              # 厂商: nvidia|huawei|hygon|mthreads|kunlunxin|tianshu|metax|tsingmicro|cambricon|zhenwu|alibaba
   type: ""                # GPU 型号
   count: 0                # GPU 数量
   visible_devices_env: "" # 指定卡的环境变量名
@@ -110,6 +110,7 @@ gpu:
 #   metax       -> CUDA_VISIBLE_DEVICES
 #   tsingmicro  -> TXDA_VISIBLE_DEVICES
 #   cambricon   -> MLU_VISIBLE_DEVICES
+#   zhenwu      -> CUDA_VISIBLE_DEVICES  (平头哥 PPU-ZW810E，CUDA 兼容)
 #   alibaba     -> CUDA_VISIBLE_DEVICES
 
 # GPU 检测命令对照:
@@ -122,6 +123,7 @@ gpu:
 #   metax       -> mx-smi
 #   tsingmicro  -> tsm_smi
 #   cambricon   -> cnmon
+#   zhenwu      -> ppu-smi  (识别用；nvidia-smi 为 PPU wrapper，显存查询走它)
 
 # ============================================================================
 # 环境检查信息 (由 pre-service-inspection 写入)

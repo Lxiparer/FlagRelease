@@ -228,6 +228,28 @@ docker run -d --name ${CONTAINER_NAME} \
 > **Hygon 识别**：宿主机存在 `/opt/hyhal` 或 `/opt/dtk` 目录，或 `hy-smi` 命令可用，或 `detect_gpu.py` 返回 `vendor=hygon`。
 > **必需设备**：`/dev/kfd`（ROCm kernel driver）、`/dev/mkfd`（Hygon DCU 特有）、`/dev/dri`（DRM 渲染）。缺少 `/dev/mkfd` 时 DCU 不可用。
 
+#### 模板 G：平头哥 PPU（T-Head，vendor=zhenwu）
+
+```bash
+docker run -itd --name=${CONTAINER_NAME} \
+    --privileged --network=host --ipc=host --pid=host \
+    --shm-size=${SHM_SIZE:-512g} \
+    --ulimit memlock=-1 --ulimit stack=67108864 \
+    --security-opt seccomp=unconfined \
+    -v /dev:/dev \
+    -v /usr/local/PPU_SDK:/usr/local/PPU_SDK \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
+    -e XPU_VISIBLE_DEVICES=all \
+    -e XPU_DEVICE_ORDER=PCI_BUS_ID \
+    ${IMAGE} sleep infinity
+```
+
+> **PPU/zhenwu 识别**：`ppu-smi` 命令可用，或 `/usr/local/PPU_SDK` 目录存在，或 `nvidia-smi` 输出含 `PPU-SMI`/`HGGC Version`，或 `detect_gpu.py` 返回 `vendor=zhenwu`。
+> **CUDA 兼容卡**：PPU-ZW810E 走 CUDA 兼容栈——`torch.cuda` 可用，容器内 vLLM 用 `CUDA_VISIBLE_DEVICES` 选卡（`gpu.visible_devices_env=CUDA_VISIBLE_DEVICES`）；`XPU_VISIBLE_DEVICES=all` 用于容器整体放开物理卡。
+> **设备节点**：真实节点为 `/dev/alixpu`、`/dev/alixpu_ctl`、`/dev/alixpu_ppu0..N`，用 `-v /dev:/dev` 整体挂载覆盖（勿写死 `/dev/xpu`）。
+> **nvidia-smi 陷阱**：PPU 机的 `nvidia-smi`（位于 `/usr/local/PPU_SDK/CUDA_SDK/bin`）是 PPU wrapper，输出 PPU-SMI 而非真 NVIDIA，但支持标准 CSV query，选卡/显存检测可正常复用。
+
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
 - 所有模板统一挂载 `/flagos-workspace`（宿主机路径为 `/data/flagos-workspace/${MODEL_NAME}`，按模型隔离）
@@ -275,7 +297,7 @@ model:
   local_path: "<宿主机路径>"
   container_path: "<容器内路径>"
 gpu:
-  vendor: "<nvidia|huawei|mthreads|metax|cambricon|hygon>"
+  vendor: "<nvidia|huawei|mthreads|metax|cambricon|hygon|zhenwu>"
   type: "<GPU 型号>"
   count: <数量>
 workspace:

@@ -147,7 +147,8 @@ def _parse_gpu_memory_fallback() -> List[Dict[str, float]]:
 
     if gpu_vendor == 'metax':
         smi_commands = [smi_commands[1], smi_commands[0]]
-    elif gpu_vendor == 'nvidia':
+    elif gpu_vendor in ('nvidia', 'zhenwu'):
+        # zhenwu(平头哥 PPU)的 nvidia-smi 是 wrapper，支持标准 CSV query，与 nvidia 同路径
         smi_commands = [smi_commands[0]]
     elif gpu_vendor == 'huawei':
         smi_commands = [smi_commands[2]]

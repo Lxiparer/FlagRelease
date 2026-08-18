@@ -447,8 +447,10 @@ def _parse_oplist_to_func_names(lines: List[str]) -> List[str]:
     """
     funcs = set()
     for line in lines:
+        # backend 段格式: runtime.backend._<vendor>.ops...（arch 段可选，如 _nvidia.ampere.ops）
+        # 各厂商 ops 直接挂在 _<vendor>/ops/ 下（含 _thead/平头哥），arch 中间层非必现，故设为可选。
         m = re.match(
-            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+\.\w+\.ops)\.(\w+)(?:\.(\w+))?:\s*GEMS\s+',
+            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+(?:\.\w+)?\.ops)\.(\w+)(?:\.(\w+))?:\s*GEMS\s+',
             line
         )
         if m:
@@ -479,8 +481,9 @@ def _render_ops_comparison(config_ops: List[str], txt_lines: List[str], stage_la
     # 或:   [DEBUG] flag_gems.runtime.backend.<vendor>.<arch>.ops.<module>.<func>: GEMS <NAME>
     txt_entries = []  # [(func_name, module_name, gems_name, line_index)]
     for i, line in enumerate(txt_lines):
+        # arch 段可选（见 _parse_oplist_to_func_names 注释）：_thead/_metax 等无 arch，_nvidia.ampere 有
         m = re.match(
-            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+\.\w+\.ops)\.(\w+)\.(\w+):\s*GEMS\s+(.+)',
+            r'\[DEBUG\] flag_gems\.(?:ops|runtime\.backend\.\w+(?:\.\w+)?\.ops)\.(\w+)\.(\w+):\s*GEMS\s+(.+)',
             line
         )
         if m:

@@ -64,7 +64,7 @@ def read_json_file(path: str) -> Optional[dict]:
 
 def extract_chip_name(gpu_type: str, vendor: str) -> str:
     """去掉厂商前缀，如 'NVIDIA H20-3e' → 'H20-3e'"""
-    prefixes = ["NVIDIA", "AMD", "Intel", "Ascend", "MetaX", "MThreads", "Iluvatar", "Hygon", "Cambricon"]
+    prefixes = ["NVIDIA", "AMD", "Intel", "Ascend", "MetaX", "MThreads", "Iluvatar", "Hygon", "Cambricon", "T-Head"]
     for prefix in prefixes:
         if gpu_type.upper().startswith(prefix.upper()):
             return gpu_type[len(prefix):].strip()

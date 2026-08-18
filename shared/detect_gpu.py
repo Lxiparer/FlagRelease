@@ -46,6 +46,10 @@ from typing import Any, Dict, List, Optional, Tuple
 # 按市场占有率排序，常见厂商优先匹配
 
 GPU_VENDORS: List[Tuple[str, str, str, str]] = [
+    # zhenwu(平头哥 PPU-ZW810E)是 CUDA 兼容卡，其 nvidia-smi 实为 PPU wrapper（输出 PPU-SMI/HGGC Version），
+    # 也支持标准 CSV query。以 ppu-smi 作为唯一识别命令（真 NVIDIA 机无此命令）实现天然消歧，
+    # 必须排在 nvidia 之前，否则会被 nvidia-smi 抢先匹配。显存查询走 wrapper nvidia-smi（见 _FREE_QUERY_CMDS）。
+    ("zhenwu",    "ppu-smi",      "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
     ("nvidia",    "nvidia-smi",   "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
     ("huawei",    "npu-smi",      "npu-smi info",                           "ASCEND_RT_VISIBLE_DEVICES"),
     ("hygon",     "rocm-smi",     "rocm-smi --showmeminfo vram --csv",      "HIP_VISIBLE_DEVICES"),
@@ -65,6 +69,7 @@ VENDOR_KEYWORDS = {
     "mthreads": ["mtt", "musa"],
     "kunlunxin": ["kunlun", "xpu"],
     "metax": ["metax", "c500", "c550", "n100"],
+    "zhenwu": ["ppu-zw810e", "ppu", "zw810", "zw810e"],
 }
 
 
@@ -223,8 +228,8 @@ def _detect_via_cli() -> Optional[Dict[str, Any]]:
             if actual_vendor and actual_vendor != "hygon":
                 continue  # 不是 Hygon，跳过让后续厂商匹配
 
-        # 解析输出
-        if vendor == "nvidia":
+        # 解析输出（zhenwu 的 nvidia-smi wrapper 同为 CSV 格式，复用 nvidia 解析）
+        if vendor in ("nvidia", "zhenwu"):
             info = _parse_nvidia_smi(output)
         else:
             info = _parse_generic_cli(vendor, output)
@@ -307,6 +312,8 @@ def detect_gpu() -> Optional[Dict[str, Any]]:
 # 各厂商的 per-GPU 显存查询命令
 _FREE_QUERY_CMDS = {
     "nvidia":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
+    # zhenwu 复用 PPU 的 nvidia-smi wrapper，支持含 free 列的标准 CSV（真机实测）
+    "zhenwu":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
     "metax":     "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
 }
 
@@ -356,7 +363,7 @@ def _query_gpu_free_for_vendor(vendor: str) -> List[Dict[str, Any]]:
     if vendor in _FREE_QUERY_CMDS:
         output = _run_cmd(_FREE_QUERY_CMDS[vendor])
         if output:
-            has_free = vendor == "nvidia"
+            has_free = vendor in ("nvidia", "zhenwu")
             return _parse_csv_gpu_memory(output, has_free_col=has_free)
 
     # 华为昇腾
