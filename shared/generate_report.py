@@ -65,6 +65,32 @@ def _vendor_display(vendor: str) -> str:
     return vendor or "-"
 
 
+def _dash(value: Any) -> str:
+    """空值兜底：空串 / None / 字符串 "None"/"none"/"null" 统一渲染为 "-"。
+    规范文档 3.2：缺失字段用 "-" 占位，不留空、不漏出 Python None。
+    """
+    if value is None:
+        return "-"
+    s = str(value).strip()
+    if not s or s.lower() in ("none", "null"):
+        return "-"
+    return s
+
+
+def _vendor_display_cn(vendor: str) -> str:
+    """基本信息「厂商」字段展示名：中文(英文) 格式，如 海光(Hygon)。
+
+    规范文档 3.2 要求基本信息厂商字段用中文名(英文名)；性能表厂商列另用纯英文
+    （见 _vendor_display），两处口径不同。规范表不可用时回退纯英文。
+    """
+    if _chip_spec and vendor:
+        try:
+            return _chip_spec.vendor_display(vendor)
+        except Exception:
+            pass
+    return vendor or "-"
+
+
 def _chip_display(vendor: str, gpu_model: str) -> str:
     """芯片型号规范显示名：命中规范表返回规范值（H20-3e/Metax C550/...）。
 
@@ -235,7 +261,10 @@ class ReportData:
         self.issues: Dict[str, List[str]] = {}
         self.issue_files: List[Dict[str, str]] = []
         self.oplists: Dict[str, List[str]] = {}
+        self.ops_list: List[str] = []
         self.op_config: Optional[dict] = None
+        self.acc_compare_v2: Optional[dict] = None
+        self.acc_compare_v3: Optional[dict] = None
         self.ops_control_initial: Optional[dict] = None
         self.workflow_complete = False
         # 多版本数据（新增）
@@ -272,7 +301,11 @@ class ReportData:
             or read_json(os.path.join(r, "gpqa_flagos_optimized.json"))
             or read_json(os.path.join(r, "gpqa_flagos.json"))
         )
-        self.gpqa_versions["v3"] = read_json(os.path.join(r, "gpqa_v3.json")) or read_json(os.path.join(r, "gpqa_plugin.json"))
+        self.gpqa_versions["v3"] = (
+            read_json(os.path.join(r, "gpqa_v3.json"))
+            or read_json(os.path.join(r, "gpqa_v3_plugin.json"))
+            or read_json(os.path.join(r, "gpqa_plugin.json"))
+        )
         self.gpqa_versions["v4"] = read_json(os.path.join(r, "gpqa_v4.json"))
 
         # 多版本性能结果
@@ -329,13 +362,26 @@ class ReportData:
                 self.issue_files.append(parsed)
 
         # oplists
-        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist", "v4_oplist"):
+        # flaggems_enable_oplist.txt 是启动时实际生效的算子清单（DEBUG 全路径格式），
+        # 是 V2 算子列表最可靠的真实来源；历史命名 initial/final/... 一并保留兼容。
+        for name in ("initial_oplist", "accuracy_tuned_oplist", "final_oplist",
+                     "v4_oplist", "flaggems_enable_oplist"):
             lines = read_lines(os.path.join(r, f"{name}.txt"))
             if lines:
                 self.oplists[name] = lines
 
+        # 实际替换算子短名清单（ops_list.json: {"ops": [...]}）——启动探测产出，
+        # 与 flaggems_enable_oplist.txt 同源，作为算子列表的短名兜底。
+        _ops_list = read_json(os.path.join(r, "ops_list.json"))
+        self.ops_list = (_ops_list or {}).get("ops", []) if isinstance(_ops_list, dict) else []
+
         # operator config (search log from operator_search.py)
         self.op_config = read_json(os.path.join(r, "operator_config.json"))
+
+        # 精度对比结果（accuracy_compare.py 产出：含 nv/current/rel_drop_pct/aligned/message）
+        # V2 对比 accuracy_compare.json，V3 对比 accuracy_compare_v3.json
+        self.acc_compare_v2 = read_json(os.path.join(r, "accuracy_compare.json"))
+        self.acc_compare_v3 = read_json(os.path.join(r, "accuracy_compare_v3.json"))
 
         # 初始控制文件（start_service.sh 保存的副本）
         self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))
@@ -862,6 +908,50 @@ def compute_verdict(ctx: dict) -> dict:
     return {"ok": ok, "reasons": reasons, "incompatible": incompatible}
 
 
+def _fmt_acc_compare(compare: Optional[dict], total_q_fallback: Optional[int] = None) -> Optional[str]:
+    """把 accuracy_compare.py 的对比结果渲染成规范样例格式：
+    `精度达标（vs NV55，rel_drop -2.85%）` / `精度不达标（vs V1 30.0，rel_drop 8.20%）`。
+
+    compare 结构（accuracy_compare.json）：
+      baseline_mode(nv/v1) / nv / current / rel_drop_pct / aligned / message
+    返回 None 表示数据不足，交由调用方回退旧逻辑。
+    """
+    if not compare or not isinstance(compare, dict):
+        return None
+    rel_pct = compare.get("rel_drop_pct")
+    if rel_pct is None:
+        return None
+    aligned = compare.get("aligned")
+    # nv 字段可能是标量或 {score, source} 字典
+    _nv = compare.get("nv")
+    baseline = _nv.get("score") if isinstance(_nv, dict) else _nv
+    # baseline_mode: nv_reference → 基线为 NV 参考；v1/local → 本地 V1
+    mode = (compare.get("baseline_mode") or "").lower()
+    base_label = "V1" if mode.startswith("v1") or mode.startswith("local") else "NV"
+    base_str = f"{base_label}{baseline}" if baseline is not None else base_label
+    # 小样本噪声容忍（与 accuracy_compare.py 同口径）：aligned=False 但绝对差 ≤2 题时，
+    # 判负系评测方差假阳性，提升为达标并注明。修正噪声容忍上线前产出的旧 compare 文件。
+    noise = False
+    if not aligned:
+        _cur = compare.get("current")
+        total_q = (_cur.get("total_questions") if isinstance(_cur, dict) else None) or total_q_fallback
+        abs_diff = compare.get("abs_diff")
+        try:
+            if total_q and abs_diff is not None and int(total_q) > 0:
+                per_q = 100.0 / int(total_q)
+                if abs(float(abs_diff)) / per_q <= 2.0 + 1e-9:
+                    noise = True
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+    verdict = "精度达标" if (aligned or noise) else "精度不达标"
+    try:
+        rel_str = f"{float(rel_pct):.2f}%"
+    except (ValueError, TypeError):
+        rel_str = f"{rel_pct}%"
+    suffix = "，小样本噪声容忍" if noise else ""
+    return f"{verdict}（vs {base_str}，rel_drop {rel_str}{suffix}）"
+
+
 def generate_text_report(data: ReportData) -> str:
     """按照 FlagOS 标准报告模板生成 Markdown 报告。"""
     lines: List[str] = []
@@ -910,6 +1000,8 @@ def generate_text_report(data: ReportData) -> str:
     # ── 算子列表 ──
     initial_oplist = data.oplists.get("initial_oplist", [])
     final_oplist = data.oplists.get("final_oplist", [])
+    # 启动实际生效清单（DEBUG 全路径格式），作为 initial/final 缺失时的真实来源
+    enable_oplist = data.oplists.get("flaggems_enable_oplist", [])
     disabled_ops = optimization.get("disabled_ops", [])
     if isinstance(disabled_ops, str):
         disabled_ops = [op.strip() for op in disabled_ops.split(",") if op.strip()]
@@ -917,8 +1009,8 @@ def generate_text_report(data: ReportData) -> str:
     initial_ops_control = data.ops_control_initial or {}
     include_list = initial_ops_control.get("include", [])
 
-    # 发布用 oplist（优先 final，其次 initial）
-    publish_oplist = final_oplist or initial_oplist
+    # 发布用 oplist（优先 final，其次 initial，再次启动实际生效清单）
+    publish_oplist = final_oplist or initial_oplist or enable_oplist
 
     # 步骤完成时间
     steps_timing = timing.get("steps", {}) or {}
@@ -983,20 +1075,27 @@ def generate_text_report(data: ReportData) -> str:
         _fp = flag_pkgs.get("vllm_plugin", "")
         # 采集值若是 installed/True 之类的占位，不当版本号用
         plugin_ver = _fp if _fp and _fp not in ("installed", "True", "true", True) else "-"
-    lines.append(f"| 推理框架插件plugin-FL | {plugin_ver} |")
-    lines.append(f"| FlagGems版本 | {flag_pkgs.get('flaggems', '-')} |")
-    lines.append(f"| Flagtree版本 | {env.get('flagtree_version', flag_pkgs.get('flagtree', '-'))} |")
-    lines.append(f"| FlagCX版本 | {flag_pkgs.get('flagcx', '-')} |")
+    lines.append(f"| 推理框架插件plugin-FL | {_dash(plugin_ver)} |")
+    lines.append(f"| FlagGems版本 | {_dash(flag_pkgs.get('flaggems'))} |")
+    lines.append(f"| Flagtree版本 | {_dash(env.get('flagtree_version') or flag_pkgs.get('flagtree'))} |")
+    lines.append(f"| FlagCX版本 | {_dash(flag_pkgs.get('flagcx'))} |")
     _vendor_raw = gpu.get("vendor", "")
-    lines.append(f"| 厂商 | {_vendor_display(_vendor_raw)} |")
-    # 单卡显存：优先 context 采集值(nvidia-smi)，缺失时按型号查表兜底
+    # 基本信息厂商字段用中文(英文)（规范 3.2）；性能表厂商列另用纯英文
+    lines.append(f"| 厂商 | {_vendor_display_cn(_vendor_raw)} |")
+    # 单卡显存：优先 context 采集值(nvidia-smi)，缺失时按型号查表兜底；统一整数写法（规范 3.2）
     mem_gb = gpu.get("memory_gb") or ctx.get("gpu", {}).get("memory_gb")
     if not mem_gb:
         mem_gb = lookup_gpu_memory(gpu_type)
+    try:
+        mem_str = f"{round(float(mem_gb))}GB" if mem_gb else "-GB"
+    except (ValueError, TypeError):
+        mem_str = "-GB"
+    # 卡数为 0/缺失视为无效，写 "-"（规范 3.2：卡数须为真实值，不得为 0）
+    gpu_count_str = str(gpu_count) if gpu_count else "-"
     # 真实显卡型号：走统一规范表映射到规范显示名（如 A100 / H20-3e / 910B）。
     # 未命中时 _chip_display 内仅整理 NVIDIA 分隔符，不再剥 -3e（H20-3e 是规范值）。
     gpu_type_display = _chip_display(_vendor_raw, gpu_type)
-    lines.append(f"| GPU | {gpu_type_display} : {gpu_count} x {str(mem_gb) + 'GB' if mem_gb else '-GB'} |")
+    lines.append(f"| GPU | {gpu_type_display} : {gpu_count_str} x {mem_str} |")
     lines.append(f"| 容器 | {container.get('name', '-')} |")
     lines.append(f"| release自动化工具版本 | v0.1.0 |")
 
@@ -1031,7 +1130,12 @@ def generate_text_report(data: ReportData) -> str:
     if not v2_whitelist:
         # fallback: context.yaml（results 产物缺失时的可靠回退源）
         v2_whitelist = _ops_from_context(data.context, "v2")
+    if not v2_whitelist and data.ops_list:
+        # fallback: ops_list.json 短名清单（启动探测的实际替换算子）
+        v2_whitelist = list(data.ops_list)
     v2_txt_ops = _parse_oplist_to_func_names(publish_oplist) if publish_oplist else v2_whitelist
+    if not v2_txt_ops:
+        v2_txt_ops = list(data.ops_list) if data.ops_list else v2_whitelist
     version_ops_data["v2"] = {"whitelist": v2_whitelist, "txt": v2_txt_ops}
 
     # V3 — Plugin 调优后
@@ -1129,10 +1233,19 @@ def generate_text_report(data: ReportData) -> str:
                 op_count = "-"
                 config_label = "-"
             elif ver_key == "v2":
-                op_count = str(_count_ops_from_oplist(publish_oplist)) if publish_oplist else "-"
+                # 与「算子替换列表」段同源（去重后的白名单），保证两处算子数一致
+                _v2_wl = version_ops_data.get("v2", {}).get("whitelist", [])
+                if _v2_wl:
+                    op_count = str(len(_v2_wl))
+                elif publish_oplist:
+                    op_count = str(_count_ops_from_oplist(publish_oplist))
             elif ver_key == "v3":
+                # 与「算子替换列表」段同源（去重后的白名单），保证两处一致
+                _v3_wl = version_ops_data.get("v3", {}).get("whitelist", [])
                 if data.op_config_v3:
                     op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
+                elif _v3_wl:
+                    op_count = str(len(_v3_wl))
                 elif publish_oplist:
                     op_count = str(_count_ops_from_oplist(publish_oplist))
             elif ver_key == "v4":
@@ -1154,10 +1267,17 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("|--------|------|")
     v1_gpqa = data.gpqa_versions.get("v1")
     v1_score = v1_gpqa.get("score", 0) if v1_gpqa else (eval_sec.get("v1_score") or 0)
+    # 权威对比来源：accuracy_compare.py 产出（含 NV 基线回退、噪声容忍、rel_drop）
+    _compare_by_ver = {"v2": data.acc_compare_v2, "v3": data.acc_compare_v3}
     for cmp_ver in ["v2", "v3", "v4"]:
         cmp_gpqa = data.gpqa_versions.get(cmp_ver)
         ver_label = VERSION_LABELS[cmp_ver][0]
-        if not cmp_gpqa:
+        # 优先用权威对比文件（能覆盖 V1 无独立分、走 NV 基线的场景）
+        _tq = cmp_gpqa.get("total_questions") if cmp_gpqa else None
+        cell = _fmt_acc_compare(_compare_by_ver.get(cmp_ver), _tq)
+        if cell:
+            lines.append(f"| V1 VS {ver_label} | {cell} |")
+        elif not cmp_gpqa:
             lines.append(f"| V1 VS {ver_label} | - |")
         else:
             cmp_score = cmp_gpqa.get("score", 0)
@@ -1211,16 +1331,23 @@ def generate_text_report(data: ReportData) -> str:
             total_tps_val = metrics.get("Total token throughput (tok/s)", "-")
             tpot = metrics.get("Mean TPOT (ms)", "-")
 
-            # 算子数
+            # 算子数：与「算子替换列表」段同源（去重后的白名单），保证与精度表一致
             op_count = "-"
             if ver_key == "v1":
                 op_count = "0"
                 config_label = "-"
             elif ver_key == "v2":
-                op_count = str(_count_ops_from_oplist(publish_oplist)) if publish_oplist else "-"
+                _wl = version_ops_data.get("v2", {}).get("whitelist", [])
+                if _wl:
+                    op_count = str(len(_wl))
+                elif publish_oplist:
+                    op_count = str(_count_ops_from_oplist(publish_oplist))
             elif ver_key == "v3":
+                _wl3 = version_ops_data.get("v3", {}).get("whitelist", [])
                 if data.op_config_v3:
                     op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
+                elif _wl3:
+                    op_count = str(len(_wl3))
                 elif publish_oplist:
                     op_count = str(_count_ops_from_oplist(publish_oplist))
             elif ver_key == "v4":
