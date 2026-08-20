@@ -718,6 +718,22 @@ def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
                     if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
                         cfg[k] = v
                         applied[k] = v
+
+                # 修复 do_sample=true 但无显式温度时掉入贪心的问题：
+                # 模型声明 do_sample=true 意图是"用采样解码"，此时若白名单未捕获温度
+                # （模型配置里没写 temperature 字段），补一个合理采样默认，避免
+                # temperature=0.0 贪心导致小模型循环到 max_tokens、精度崩溃。
+                # 判断依据：temperature 不在 applied（模型未显式配置）且当前为默认 0.0。
+                if gc.get("do_sample") is True and "temperature" not in applied and cfg.get("temperature", 0.0) == 0.0:
+                    cfg["temperature"] = 0.7
+                    applied["temperature"] = 0.7  # 标记为已应用，避免重复打印
+                    if "top_p" not in applied:
+                        cfg["top_p"] = 0.95
+                        applied["top_p"] = 0.95
+                    if "top_k" not in applied:
+                        cfg["top_k"] = 64
+                        applied["top_k"] = 64
+
                 if applied:
                     print(f"  [gen] 采用模型 generation_config.json 采样参数: {applied}")
                 else:
