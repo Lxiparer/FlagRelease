@@ -44,8 +44,8 @@ import re
 import subprocess
 import sys
 
-DEFAULT_SEARCH_PATHS = ["/data", "/nfs", "/share", "/models", "/home"]
-CONTAINER_SEARCH_PATHS = ["/data", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
+DEFAULT_SEARCH_PATHS = ["/data", "/data1", "/data2", "/nfs", "/share", "/models", "/home"]
+CONTAINER_SEARCH_PATHS = ["/data", "/data1", "/data2", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
 DEFAULT_MAX_DEPTH = 4
 # modelscope 嵌套缓存形态：<root>/models/<org>--<model>/snapshots/<rev>/<权重>
 # 命中此类目录名时定向放宽深度，避免为覆盖深层缓存而全局加深度拖慢无关大目录(如 /home)
