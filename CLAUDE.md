@@ -190,7 +190,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | Harbor 仓库地址 | `harbor.baai.ac.cn/flagrelease-public` | 无需用户提供 |
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
 | 仓库可见性 | 全部私有发布 | 报告中注明是否达标 |
-| 容器内模型搜索路径 | `/data,/data1,/data2,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
+| 容器内模型搜索路径 | `/mnt/data/,/data,/data1,/data2,/models,/root,/home,/workspace,/mnt,/opt` | 不询问 |
 | 容器内模型下载目录 | 镜像模式：下载到已挂载的 `${CONTAINER_MODEL_PATH}`；容器模式：优先已挂载宿主机卷路径 | 镜像模式下模型权重保证落在宿主机 |
 | 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器 |
 | 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
