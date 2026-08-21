@@ -96,6 +96,7 @@ ascend:
   chips:
     - { display: "910C", match: ["910c"] }
     - { display: "910B", match: ["910b", "ascend910b"] }
+    - { display: "910",  match: ["ascend910", "910"] }
 
 arm:
   vendor_en: Arm
