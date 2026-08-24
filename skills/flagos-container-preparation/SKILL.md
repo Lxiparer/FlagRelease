@@ -203,7 +203,7 @@ docker run -d --name ${CONTAINER_NAME} \
 
 ```bash
 docker run -d --name ${CONTAINER_NAME} \
-    --net=host --pid=host --ipc=host --privileged \
+    --net=host --ipc=host --privileged \
     -v /usr/bin/cnmon:/usr/bin/cnmon \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
     -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
@@ -232,7 +232,7 @@ docker run -d --name ${CONTAINER_NAME} \
 
 ```bash
 docker run -itd --name=${CONTAINER_NAME} \
-    --privileged --network=host --ipc=host --pid=host \
+    --privileged --network=host --ipc=host \
     --shm-size=${SHM_SIZE:-512g} \
     --ulimit memlock=-1 --ulimit stack=67108864 \
     --security-opt seccomp=unconfined \
