@@ -95,7 +95,7 @@ workspace:
 # GPU 信息 (由 container-preparation 写入)
 # ============================================================================
 gpu:
-  vendor: ""              # 厂商: nvidia|huawei|hygon|mthreads|kunlunxin|tianshu|metax|tsingmicro|cambricon|zhenwu|alibaba
+  vendor: ""              # 厂商: nvidia|huawei|hygon|mthreads|kunlunxin|iluvatar|metax|tsingmicro|cambricon|zhenwu|alibaba
   type: ""                # GPU 型号
   count: 0                # GPU 数量
   visible_devices_env: "" # 指定卡的环境变量名

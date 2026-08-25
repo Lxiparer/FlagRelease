@@ -56,7 +56,9 @@ GPU_VENDORS: List[Tuple[str, str, str, str]] = [
     ("cambricon", "cnmon",        "cnmon info",                              "MLU_VISIBLE_DEVICES"),
     ("mthreads",  "mthreads-gmi", "mthreads-gmi -q",                        "MUSA_VISIBLE_DEVICES"),
     ("kunlunxin", "xpu_smi",     "xpu_smi",                                 "XPU_VISIBLE_DEVICES"),
-    ("tianshu",   "ixsmi",       "ixsmi -q",                                "CUDA_VISIBLE_DEVICES"),
+    # 注册名用规范名 iluvatar（与 chip_spec.yaml/chip_detector.py/context 全项目一致）；
+    # tianshu 是历史别名，经 _VENDOR_ALIASES 归一到 iluvatar。
+    ("iluvatar",  "ixsmi",       "ixsmi -q",                                "CUDA_VISIBLE_DEVICES"),
     ("metax",     "mx-smi",      "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits", "CUDA_VISIBLE_DEVICES"),
 ]
 
@@ -70,6 +72,7 @@ VENDOR_KEYWORDS = {
     "kunlunxin": ["kunlun", "xpu"],
     "metax": ["metax", "c500", "c550", "n100"],
     "zhenwu": ["ppu-zw810e", "ppu", "zw810", "zw810e"],
+    "iluvatar": ["iluvatar", "tianshu", "bi-v150", "biv150", "bi-v200", "biv200", "tg-v200", "tgv200"],
 }
 
 
@@ -314,7 +317,16 @@ _FREE_QUERY_CMDS = {
     "nvidia":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
     # zhenwu 复用 PPU 的 nvidia-smi wrapper，支持含 free 列的标准 CSV（真机实测）
     "zhenwu":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
+    # iluvatar(天数)的 ixsmi 支持标准 CSV query（含 free 列，真机实测）
+    "iluvatar":  "ixsmi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
     "metax":     "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
+}
+
+# 厂商别名归一化：调用方可能传入历史别名（tianshu）而非规范名（iluvatar）。
+# 归一方向与 chip_spec.yaml/chip_detector.py 一致（均往 iluvatar 收敛）。
+# key 统一小写，归一时先对入参 .lower() 容错大小写。
+_VENDOR_ALIASES = {
+    "tianshu": "iluvatar",
 }
 
 FREE_THRESHOLD_PCT = 5.0  # 显存占用低于此百分比视为空闲
@@ -363,7 +375,7 @@ def _query_gpu_free_for_vendor(vendor: str) -> List[Dict[str, Any]]:
     if vendor in _FREE_QUERY_CMDS:
         output = _run_cmd(_FREE_QUERY_CMDS[vendor])
         if output:
-            has_free = vendor in ("nvidia", "zhenwu")
+            has_free = vendor in ("nvidia", "zhenwu", "iluvatar")
             return _parse_csv_gpu_memory(output, has_free_col=has_free)
 
     # 华为昇腾
@@ -397,6 +409,10 @@ def check_gpu_free(vendor: str = None) -> Dict[str, Any]:
     if not vendor:
         info = detect_gpu()
         vendor = info["vendor"] if info else "unknown"
+
+    # 归一化厂商别名（如 tianshu → iluvatar），大小写不敏感
+    if vendor:
+        vendor = _VENDOR_ALIASES.get(vendor.lower(), vendor.lower())
 
     # 查询 per-GPU 显存
     details = _query_gpu_free_for_vendor(vendor)
