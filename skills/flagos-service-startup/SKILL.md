@@ -1,7 +1,7 @@
 ---
 name: flagos-service-startup
-description: 在容器内启动推理服务（支持 default/native/flagos 模式切换），使用 toggle_flaggems.py 和 wait_for_service.sh
-version: 5.0.0
+description: 在容器内启动推理服务（支持单机/多机、default/native/flagos 模式切换），使用 toggle_flaggems.py 和 wait_for_service.sh
+version: 6.0.0
 license: internal
 triggers:
   - service startup
@@ -30,11 +30,18 @@ provides:
   - runtime.framework
   - runtime.thinking_model
   - environment.initial_env_verified
+  - distributed.enabled
+  - distributed.pp_size
+  - distributed.world_size
 ---
 
 # 服务启动 Skill
 
-支持 default/native/flagos 三种模式，基于 `flaggems_control` 探测结果动态决定启停方式。
+支持单机/多机部署、default/native/flagos 三种模式，基于 `flaggems_control` 探测结果动态决定启停方式。
+
+**部署模式**：
+- **单机部署** — `cluster.mode=single`，使用 `start_service.sh`
+- **多机部署** — `cluster.mode=multi`，使用 `deploy_vllm.py`（配 `deploy_config.yaml`），是多机唯一起服务方式
 
 **启动模式**：
 - **default** — 不修改任何 FlagGems 状态，以容器现有配置原样启动。用于步骤3验证初始环境可用性。
@@ -42,9 +49,12 @@ provides:
 - **flagos** — 启用全量 FlagGems。对应 V2 版本。
 
 **工具脚本**（已由 setup_workspace.sh 部署到容器）:
-- `calc_tp_size.py` — TP 自动推算（根据模型大小和 GPU 显存）
+- `calc_tp_size.py` — 单机 TP 自动推算（根据模型大小和 GPU 显存）
 - `toggle_flaggems.py` — FlagGems 开关切换（替代 sed）
 - `wait_for_service.sh` — 服务就绪检测（动态超时 + 日志监控 + 早期失败检测）
+- `deploy_vllm.py` — 多节点 vLLM 部署（config 驱动 + paramiko SSH + 自管容器/服务生命周期 + 健康检查）
+
+> 第一代多机工具（`start_service_distributed.sh`、`calc_tp_pp.py`、`collect_multi_node_logs.sh`）已废弃，移入 `tools/_deprecated/`，禁止引用。
 
 ---
 
@@ -54,11 +64,75 @@ provides:
 
 ```
 容器内: /flagos-workspace/logs/ ← 服务日志（按模式命名）
-  startup_default.log  — 步骤3 初始服务启动
-  startup_native.log   — 步骤4/5 中关闭 FlagGems 的 native 模式
-  startup_flagos.log   — 步骤4/5 中开启 FlagGems 的 flagos 模式
+  startup_default.log  — 单机：步骤3 初始服务启动
+  startup_native.log   — 单机：步骤4/5 中关闭 FlagGems 的 native 模式
+  startup_flagos.log   — 单机：步骤4/5 中开启 FlagGems 的 flagos 模式
+  startup_rank0.log    — 多机：主节点启动日志
+  startup_rank1.log    — 多机：Worker 节点启动日志
+  ...
 宿主机: /data/flagos-workspace/<model_name>/logs/ ← 实时同步
 ```
+
+---
+
+# 多机部署配置
+
+> 多机部署唯一使用 `deploy_vllm.py`（配 `deploy_config.yaml`）。详见 `docs/multi_node_deployment.md`。
+
+## 参数传递
+
+多机部署通过 `run_pipeline.sh` 参数启用（在 master 节点执行）：
+
+```bash
+bash run_pipeline.sh \
+  <镜像地址> <模型名> <tokens...> \
+  --nnode 2 \
+  --nodes "10.0.0.1:8,10.0.0.2:8" \
+  --master-addr 10.0.0.1 \
+  --ssh-key /root/.ssh/id_rsa
+```
+
+参数说明：
+- `--nnode` — 节点总数（必填，>1 触发多机模式）
+- `--nodes` — 节点列表，格式 `<host>:<gpus>[,<host>:<gpus>]`（必填，第一个为 master）
+- `--master-addr` — 主节点地址（必填，NCCL 通信 + 对外 API）
+- `--master-port` — 主节点端口（默认 29500）
+- `--ssh-key` — SSH 私钥路径（默认无密码）
+- `--ssh-user` — SSH 用户名（默认 root）
+- `--network-if` — NCCL_SOCKET_IFNAME（默认 eth0）
+
+## deploy_config.yaml 生成
+
+步骤1由 pipeline 多机参数生成 `deploy_config.yaml`（结构见 `skills/flagos-container-preparation/tools/deploy_config.yaml`）。核心字段：`docker.container_name/image/run_args`、`nodes[]`（第一个 `local: true`）、`vllm.tensor_parallel_size/pipeline_parallel_size/max_model_len/extra_env`。
+
+**TP/PP 选择**：由 config 显式指定。经验策略——优先 TP 打满单节点，单节点显存不足时启用 PP（≤节点数），`TP × PP = 总 GPU 数`，均取 2 的幂。典型 2 节点×8 卡 → TP=8 PP=2。
+
+## 多节点启动流程
+
+多机场景步骤3唯一起服务方式：
+
+```bash
+# 在 master 节点执行（deploy_config.yaml 中 master 节点标 local: true）
+python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config <生成的>deploy_config.yaml
+```
+
+内部流程：
+1. **preflight**：各节点容器可达性检查（`--status` 等价）
+2. **并行部署**：各节点 `docker exec` 起 vLLM，**worker 节点（node-rank>0）自动追加 `--headless`**
+3. **健康检查**：轮询 master 节点 `http://<master-addr>:<port>/health` 至 200
+4. **失败聚合**：任一节点失败 → `deploy_vllm.py --config <cfg> --fetch-logs` 回传所有节点日志到本地
+
+> ⚠️ **worker 缺 `--headless` 是历史多机失败的真实根因**（表现为 `is_in_the_same_node: Connection closed by peer`）。deploy_vllm.py 已在 node_rank>0 时自动处理，无需手工添加。
+
+## 多机算子调优
+
+多机场景下算子调优流程与单机完全一致，调优决策逻辑零改动。关键机制：
+
+- **算子禁用**：`toggle_flaggems.py --action modify-enable --disabled-ops` 在 **master 容器**写入 `/root/flaggems_ops_control.json`（算子白/黑名单）+ 持久化 `FLAGGEMS_CONTROL_MODE`、`USE_FLAGGEMS` 到 `/etc/environment` 和 `/root/.bashrc`
+- **状态同步**：重启服务时，`deploy_vllm.py` 的 `sync_files` 机制自动将这些文件从 master 复制到所有 worker 容器相同路径，保证全节点算子禁用状态一致
+- **配置激活**：在 `deploy_config.yaml` 中取消注释 `sync_files` 段并列出需同步的文件路径（默认模板已包含）
+
+FlagGems 算子在每个节点的 worker 进程都会执行（每个节点都跑模型层），禁用状态必须全节点一致，否则 worker 用全量算子、master 用裁剪算子会导致不一致甚至崩溃。deploy_vllm.py 在启动前自动完成同步，对调优循环透明。
 
 ---
 
@@ -355,6 +429,16 @@ service:
 
 ## 步骤 3 — 启动服务
 
+### 单机模式（cluster.mode = "single"）
+
+**读取 context.yaml**：
+
+```bash
+CLUSTER_MODE=$(docker exec $CONTAINER cat /flagos-workspace/shared/context.yaml | grep -A1 '^cluster:' | grep 'mode:' | awk '{print $2}' | tr -d '"')
+```
+
+如果 `CLUSTER_MODE = "single"` 或为空，使用单机启动逻辑：
+
 **GPU 选择适配**：如果步骤 2.4 检测到部分 GPU 被占用（`runtime.cuda_visible_devices` 非空），启动命令需注入对应厂商的 VISIBLE_DEVICES 环境变量（`start_service.sh` 会自动从 `gpu.visible_devices_env` 读取正确的变量名）。
 
 **非 plugin 场景**：
@@ -368,6 +452,62 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV
 ```
 
 其中 `${VISIBLE_DEVICES_ENV}` 从 context.yaml 的 `gpu.visible_devices_env` 获取（如 `CUDA_VISIBLE_DEVICES`、`ASCEND_RT_VISIBLE_DEVICES` 等），`${VISIBLE_DEVICES}` 从 `runtime.cuda_visible_devices` 获取。
+
+### 多机模式（cluster.mode = "multi"）
+
+**触发条件**：`cluster.mode = "multi"`（run_pipeline.sh 传入 `--nnode>1` + `--nodes`）
+
+多机场景唯一使用 `deploy_vllm.py`（配 `deploy_config.yaml`）。第一代 `start_service_distributed.sh` / `calc_tp_pp.py` / `collect_multi_node_logs.sh` 已废弃，禁止引用。
+
+**前置检查**：
+1. 验证 `deploy_config.yaml` 已由步骤1生成（含 `nodes[]`、`docker.container_name/image`、`vllm.*`）
+2. master 节点在 `nodes[0]` 且标 `local: true`
+3. 所有节点容器已创建（`deploy_vllm.py --create-container`）
+
+**TP/PP 指定**：由 `deploy_config.yaml` 的 `tensor_parallel_size` / `pipeline_parallel_size` 显式给出（不再运行时自动计算）。经验策略见"多机部署配置"章节。
+
+**服务启动**（在 master 节点执行）：
+
+```bash
+# deploy_vllm.py 自动：并行 SSH 各节点 docker exec 起 vLLM + worker 追加 --headless + 轮询 master /health
+python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config <生成的>deploy_config.yaml
+```
+
+deploy_vllm.py 生成的 vLLM 命令（每节点，与 vLLM 官方多节点部署一致，已通过 Qwen3.6-27B/35B 真实验证）：
+
+```bash
+vllm serve <model_path> \
+    --served-model-name <model_name> \
+    --host 0.0.0.0 --port <port> \
+    --tensor-parallel-size <TP> \
+    --pipeline-parallel-size <PP> \
+    --max-model-len <MAX_MODEL_LEN> \
+    --trust-remote-code [--enforce-eager] \
+    --nnodes <N> --node-rank <rank> \
+    --master-addr <master_ip> \
+    [--headless]    # 仅 worker 节点 (node-rank>0)，deploy_vllm.py 自动追加
+```
+
+> **关键要点**：
+> 1. 使用 vLLM 原生 CLI 参数（`--nnodes`/`--node-rank`/`--master-addr`），**不需要** `MASTER_ADDR`/`RANK`/`WORLD_SIZE` 环境变量，也**不需要** `--distributed-executor-backend mp`。
+> 2. **`--headless` 是 worker 节点（node-rank>0）的必需参数** —— 不加会导致 worker 误起 API server 与 master 争抢初始化，表现为 `is_in_the_same_node: Connection closed by peer`。这是历史多机失败的真实根因，deploy_vllm.py 已自动处理。
+> 3. 已验证成功配置：Qwen3.6-27B/35B, TP=1, PP=2, nnodes=2, vLLM 0.20.2。
+> 4. `master-port` 默认 29500，由 `--master-port` 参数透传（当前 deploy_vllm.py 使用 vLLM 默认端口）。
+
+**运维子命令**：
+
+```bash
+python3 <path>/deploy_vllm.py --config <cfg> --create-container   # 建容器
+python3 <path>/deploy_vllm.py --config <cfg>                      # 部署+起服务+健康检查
+python3 <path>/deploy_vllm.py --config <cfg> --status             # 查状态
+python3 <path>/deploy_vllm.py --config <cfg> --stop               # 停服务
+python3 <path>/deploy_vllm.py --config <cfg> --fetch-logs --lines 200  # 拉各节点日志到本地 logs/remote/
+python3 <path>/deploy_vllm.py --config <cfg> --clear-cache        # 清 triton/torch 缓存
+```
+
+**多机健康检查**：deploy_vllm.py 轮询 master 节点 `http://<master-addr>:<port>/health` 至 200（默认 300s 超时）。
+
+**崩溃日志回传**（仅失败时）：任一节点部署失败，调用 `deploy_vllm.py --config <cfg> --fetch-logs` 将各节点 `/root/vllm_node<rank>.log` 回传到编排机本地 `logs/remote/`。
 
 ### Plugin 场景 vllm 服务启动模板
 

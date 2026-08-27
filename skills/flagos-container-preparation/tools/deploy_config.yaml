@@ -1,0 +1,77 @@
+# 多机 vLLM 分布式部署配置模板
+#
+# 用法: python3 deploy_vllm.py --config deploy_config.yaml
+# 脚本位置: 部署工具见 skills/flagos-container-preparation/tools/deploy_vllm.py
+#
+# 已通过真实验证 (2026-08-25):
+#   - Qwen3.6-35B-A3B: TP=1 PP=2 nnodes=2 ✅ 健康检查+推理通过
+#   - Qwen3.6-27B:     TP=1 PP=2 nnodes=2 ✅ 健康检查+推理通过
+#   - 镜像: flagrelease_nvidia_vllm020plugin_base:0701 (vLLM 0.20.2)
+#
+# 关键成功因素:
+#   1. worker 节点 (node-rank>0) 必须加 --headless 参数
+#   2. 使用 vLLM 原生 CLI 参数: --nnodes/--node-rank/--master-addr
+#   3. 两节点模型路径必须完全一致
+#   4. 不需要 --distributed-executor-backend mp (vLLM 自动处理)
+
+# ┌──────────────────────────────────────────────────────────────┐
+# │ SSH 免密认证（必需）                                          │
+# │ 前置条件：在 master 执行 setup_passwordless_ssh.sh 配置免密  │
+# │   bash skills/flagos-container-preparation/tools/setup_passwordless_ssh.sh \
+# │     --nodes "<节点列表>" --jump-user <堡垒机用户> \           │
+# │     --password <堡垒机密码> --master-ip <master对外IP>       │
+# │ 配置完成后，流程自动使用 ~/.ssh/id_rsa 免密连接各节点        │
+# └──────────────────────────────────────────────────────────────┘
+ssh:
+  # key_file 留空，自动使用系统默认密钥 ~/.ssh/id_rsa 或 ssh-agent
+  key_file: ""
+  port: 22                               # SSH 端口
+
+# Docker 配置
+docker:
+  container_name: "multi-test"           # 各节点上的容器名（必须一致）
+  image: "harbor.baai.ac.cn/flagrelease-public/flagrelease_nvidia_vllm020plugin_base:0701"
+  run_args: >-                           # docker run 额外参数（GPU 限制、挂载等）
+    --network=host
+    --ipc=host
+    --shm-size=64g
+    --gpus='"device=0"'
+    -v /data/models/Qwen3.6-27B:/models:ro
+
+# 节点列表（按 node-rank 顺序排列，第一个节点为 master）
+#   name:      节点名称，仅用于日志标识
+#   host:      节点内网 IP，用于 --master-addr，同时作为 SSH 免密连接目标
+#   ssh_user:  SSH 用户名（通常为 root）
+#   local:     true = 脚本在该节点运行，跳过 SSH 直接本地执行
+nodes:
+  - name: "node-0"
+    host: "172.21.16.6"
+    ssh_user: "root"
+    local: true                          # 本机执行
+  - name: "node-1"
+    host: "172.21.16.14"
+    ssh_user: "root"
+
+# vLLM 启动参数
+vllm:
+  model_path: "/models"                  # 容器内模型路径
+  served_model_name: "qwen3.6-27b"       # 对外暴露的模型名称（API 中使用）
+  host: "0.0.0.0"                        # 监听地址
+  port: 8000                             # 监听端口（必须与 context.yaml 的 service.port 一致，由 run_pipeline.sh SERVICE_PORT 统一）
+  tensor_parallel_size: 1                # 张量并行数（通常 ≤ 单节点 GPU 数）
+  pipeline_parallel_size: 2              # 流水线并行数（通常 = 节点数）
+  max_model_len: 8192                    # 最大序列长度
+  trust_remote_code: true                # 信任模型中的自定义代码
+  enforce_eager: true                    # 强制 eager 模式（禁用 CUDA Graph）
+  extra_env:                             # 容器内额外设置的环境变量
+    VLLM_PLUGINS: "fl"                   # vLLM 插件
+    GLOO_SOCKET_IFNAME: "eth0"           # gloo 通信网络接口
+    NCCL_SOCKET_IFNAME: "eth0"           # NCCL 通信网络接口
+
+# 文件同步（多机算子调优必需，默认开启）
+# deploy_vllm.py 在启动前将 master 容器的这些文件复制到所有 worker 容器相同路径
+# 典型场景：算子调优在 master 禁用算子后重启服务，需同步算子控制状态到 workers
+# 单节点时 sync_files_to_workers 自动跳过，保留此段无副作用
+sync_files:
+  - /root/flaggems_ops_control.json    # FlagGems 算子禁用列表
+  - /etc/environment                   # 环境变量持久化（含 FLAGGEMS_CONTROL_MODE）

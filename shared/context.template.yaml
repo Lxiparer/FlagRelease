@@ -100,6 +100,25 @@ gpu:
   count: 0                # GPU 数量
   visible_devices_env: "" # 指定卡的环境变量名
 
+# ============================================================================
+# 分布式集群配置 (由 container-preparation 写入)
+# ============================================================================
+cluster:
+  mode: "single"          # single | multi (多机模式标志)
+  nnode: 1                # 节点总数
+  nodes: []               # 节点列表
+    # - rank: 0              # 节点序号 (0=主节点)
+    #   host: "10.0.0.1"     # IP 或主机名
+    #   ssh_port: 22         # SSH 端口
+    #   gpus: 8              # 该节点 GPU 数量
+    #   container_name: ""   # 该节点容器名
+    #   status: ""           # reachable | unreachable
+  ssh_key_path: ""        # SSH 私钥路径（宿主机）
+  ssh_user: "root"        # SSH 用户名
+  network_interface: ""   # NCCL_SOCKET_IFNAME (如 eth0、ib0)
+  # 分布式运行时字段（enabled/master_addr/pp_size/world_size 等）见下方 distributed: 块，
+  # 由 run_pipeline.sh 步骤1 多机分支通过 update_context.py 写入
+
 # GPU 厂商与环境变量对照:
 #   nvidia      -> CUDA_VISIBLE_DEVICES
 #   huawei      -> ASCEND_RT_VISIBLE_DEVICES
@@ -222,6 +241,17 @@ runtime:
   cuda_visible_devices: "" # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
   gpu_selection_reason: "" # GPU 选择原因
   thinking_model: false   # 是否为 thinking model
+
+# ============================================================================
+# 分布式运行时配置 (由 service-startup 写入)
+# ============================================================================
+distributed:
+  enabled: false          # 是否启用分布式
+  backend: "mp"           # 分布式后端: mp (不使用 ray)
+  master_addr: ""         # 主节点地址 (rank 0)
+  master_port: 29500      # 主节点通信端口
+  pp_size: 1              # Pipeline parallel 大小
+  world_size: 0           # 总进程数 = nnode * tp_size
 
 # ============================================================================
 # 服务信息 (由 service-startup 写入)

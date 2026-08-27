@@ -74,6 +74,13 @@ cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
 visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
 thinking = ctx.get('runtime', {}).get('thinking_model', False)
 
+# 分布式配置
+distributed_enabled = ctx.get('distributed', {}).get('enabled', False)
+pp_size = ctx.get('distributed', {}).get('pp_size', 1)
+world_size = ctx.get('distributed', {}).get('world_size', 1)
+master_addr = ctx.get('distributed', {}).get('master_addr', '')
+master_port = ctx.get('distributed', {}).get('master_port', 29500)
+
 # TP fallback: 如果为 0，使用 GPU 数量
 if tp_size <= 0:
     tp_size = gpu_count if gpu_count > 0 else 1
@@ -88,6 +95,11 @@ print(json.dumps({
     'cuda_visible': cuda_visible,
     'visible_devices_env': visible_devices_env,
     'thinking': thinking,
+    'distributed_enabled': distributed_enabled,
+    'pp_size': pp_size,
+    'world_size': world_size,
+    'master_addr': master_addr,
+    'master_port': master_port,
 }))
 "
 }
@@ -103,10 +115,22 @@ FRAMEWORK=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.s
 CUDA_VISIBLE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['cuda_visible'])")
 VISIBLE_ENV=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['visible_devices_env'])")
 THINKING=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['thinking'])")
+DISTRIBUTED=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['distributed_enabled'])")
+PP_SIZE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['pp_size'])")
+WORLD_SIZE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['world_size'])")
+MASTER_ADDR=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['master_addr'])")
+MASTER_PORT=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['master_port'])")
 
 if [ -z "$MODEL_PATH" ]; then
     echo "ERROR: model.container_path 为空，无法启动服务" >&2
     exit 1
+fi
+
+# 检测是否为多机模式
+if [ "$DISTRIBUTED" = "True" ] || [ "$DISTRIBUTED" = "true" ]; then
+    echo "[start_service.sh] 检测到多机模式 (distributed.enabled=true)"
+    echo "[start_service.sh] 跳过单机启动逻辑，多机部署请使用 deploy_vllm.py --config deploy_config.yaml"
+    exit 0
 fi
 
 # 强制清理残留进程和编译缓存（每次启动前无条件执行）

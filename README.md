@@ -47,17 +47,22 @@ FlagOS 模型迁移与发布的全自动化工作流框架，基于 Claude Code 
 
 ## 快速开始
 
-位置参数顺序：`<目标> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>`。
-目标含 `:` 或 `/` 视为镜像地址，否则按已有容器名处理。
+### 单机部署
+
+第一参数自动识别：已有容器名 → 容器模式，否则视为镜像地址。7 个位置参数固定顺序为 `<容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>`。
 
 ```bash
-# 单模型流水线（自动识别容器 / 镜像）
-bash prompts/run_pipeline.sh <目标> <模型名> \
-    <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>
+# 单模型流水线（容器模式：第一参数为已有容器名）
+bash prompts/run_pipeline.sh <container_name> <model_name> \
+  <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>
 
-# 批量执行（任务列表每行 | 分隔：镜像地址或容器名 | 模型名）
-bash prompts/run_batch.sh <任务列表文件> \
-    <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>
+# 单模型流水线（镜像模式：第一参数为镜像地址）
+bash prompts/run_pipeline.sh <image:tag> <model_name> \
+  <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>
+
+# 批量执行（tasks.txt 每行 "目标 | 模型名"）
+bash prompts/run_batch.sh tasks.txt \
+  <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD>
 ```
 
 常用可选参数（追加在位置参数之后）：
@@ -66,11 +71,67 @@ bash prompts/run_batch.sh <任务列表文件> \
 |------|------|------|
 | `--verbose` | 两者 | 显示全量终端输出（调试用） |
 | `--proxy p1,p2,...` | 两者 | 代理列表，网络失败时自动切换 |
+| `--datasets ds1,ds2,...` | 两者 | 精度评测数据集（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond，每个独立评测与判定 |
 | `--feishu-webhook URL` | 两者 | 飞书自定义机器人 Webhook，启用进度通知 |
 | `--model-path <路径>` | 单模型 | 显式指定宿主机模型权重路径 |
 | `--stop-on-error` | 批量 | 某任务失败即终止整个批次（默认继续下一个） |
 | `--force` | 批量 | 强制重跑已完成任务（默认跳过 `all_done=true`） |
 | `--timeout <秒>` | 批量 | 单模型超时，默认 86400（24 小时） |
+
+### 多机部署
+
+大参数模型（70B+）支持多节点分布式部署（TP + PP），无需 Ray。在 master 节点上执行，7 个位置参数后追加多机参数即触发多机分支（不传则完全走单机流程）：
+
+```bash
+# 单模型多机（2 节点 × 8 卡）
+bash prompts/run_pipeline.sh \
+  harbor.baai.ac.cn/flagrelease-public/qwen3-70b:latest \
+  Qwen3-70B \
+  <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> \
+  --nnode 2 \
+  --nodes "10.0.0.1:8,10.0.0.2:8" \
+  --master-addr 10.0.0.1 \
+  --ssh-key ~/.ssh/id_rsa
+```
+
+批量任务固定在同一组机器上运行——多机参数在批次级一次性指定，全局透传给列表中每个任务（任务列表格式不变，仍是 `目标 | 模型名`）：
+
+```bash
+# 批量多机（tasks.txt 中所有模型复用同一组节点）
+bash prompts/run_batch.sh \
+  tasks.txt \
+  <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> \
+  --nnode 2 \
+  --nodes "10.0.0.1:8,10.0.0.2:8" \
+  --master-addr 10.0.0.1 \
+  --ssh-key ~/.ssh/id_rsa
+```
+
+多机参数说明：
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--nnode N` | 是 | 节点总数，>1 触发多机；不传则单机 |
+| `--nodes "host:gpus,..."` | 是 | 节点列表，逗号分隔，第一个为 master |
+| `--master-addr IP` | 是 | 主节点 IP（NCCL 通信 + 对外 API）|
+| `--ssh-key path` | 否 | SSH 私钥路径（免密时可省）|
+| `--ssh-user user` | 否 | SSH 用户名，默认 root |
+| `--network-if iface` | 否 | NCCL/GLOO 网络接口，默认 eth0 |
+| `--master-port port` | 否 | NCCL 通信端口，默认 29500 |
+
+> `--nnode > 1` 时必须同时提供 `--nodes` 和 `--master-addr`，缺失会直接报错退出。
+
+多机依赖 master 到各子节点的 SSH 免密。若尚未配置，可用免密配置脚本（经堡垒机分发 master 公钥、每子节点自动尝试 root/secure、幂等）先跑一次：
+
+```bash
+bash skills/flagos-container-preparation/tools/setup_passwordless_ssh.sh \
+  --nodes "10.0.0.1:8,10.0.0.2:8" \
+  --jump-user '<堡垒机用户>' --password '<堡垒机密码>' --master-ip 10.0.0.1
+```
+
+> 该脚本为流程外一次性手动配置，不属于自动化流水线；`-h` 查看全部参数。
+
+**详细文档**：[多机部署指南](docs/multi_node_deployment.md)
 
 ## 飞书进度通知
 

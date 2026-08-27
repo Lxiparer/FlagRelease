@@ -2,7 +2,7 @@
 # FlagOS 批量串行迁移 — 逐个调用 run_pipeline.sh
 #
 # 用法:
-#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL]
+#   bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force] [--datasets ds1,ds2,...] [--proxy proxy1,proxy2,...] [--timeout seconds] [--feishu-webhook URL] [--nnode N --nodes host:gpus,... --master-addr IP [--ssh-key path] [--ssh-user user] [--network-if iface] [--master-port port]]
 #
 # 任务列表文件格式（每行一个任务，| 分隔）:
 #   # 注释行和空行自动跳过
@@ -25,6 +25,13 @@
 #     - native           → native 简化流程（仅评测，不发多版本）
 #   汇总表额外展示每个任务实际走的分支与已产出版本（V1-V5，含 V1 变体/不适配标记），
 #   数据来自 /data/flagos-workspace/<model>/config/context_snapshot.yaml。
+#
+# 多机批量说明:
+#   批量任务固定在同一组机器上运行——多机参数（--nnode/--nodes/--master-addr 等）
+#   在批次级一次性指定，全局透传给列表中每个任务的 run_pipeline.sh 调用。
+#   任务列表格式不变（仍是 目标 | 模型名）。不传多机参数则整批走单机模式。
+#     bash prompts/run_batch.sh tasks.txt <tokens...> \
+#       --nnode 2 --nodes "172.21.16.6:8,172.21.16.14:8" --master-addr 172.21.16.6 --ssh-key /root/.ssh/id_rsa
 #
 # 断点续跑:
 #   默认检查 /data/flagos-workspace/<model>/config/context_snapshot.yaml 中的
@@ -52,6 +59,8 @@ VERBOSE_FLAG=""
 PROXY_FLAG=""
 DATASET_FLAG=""
 MODEL_TIMEOUT=86400  # 单模型超时（秒），默认 24 小时
+# 多机参数：批次级一次性指定，全局透传给每个任务的 run_pipeline.sh
+MULTINODE_FLAGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop-on-error) STOP_ON_ERROR=true; shift ;;
@@ -62,9 +71,32 @@ while [[ $# -gt 0 ]]; do
         --timeout) MODEL_TIMEOUT="$2"; shift 2 ;;
         # export 后 detached worker 与子进程 run_pipeline.sh 均自动继承此变量。
         --feishu-webhook) export FEISHU_WEBHOOK_URL="$2"; shift 2 ;;
+        # 多机参数：原样透传给 run_pipeline.sh（含参数值）
+        --nnode|--nodes|--node-list|--master-addr|--ssh-key|--ssh-user|--network-if|--master-port)
+            MULTINODE_FLAGS+=("$1" "$2"); shift 2 ;;
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
+
+# 多机批量校验：--nnode>1 必须同时提供 --nodes 与 --master-addr
+MULTINODE_ENABLED=false
+if [ ${#MULTINODE_FLAGS[@]} -gt 0 ]; then
+    _mn_nnode=""; _mn_nodes=""; _mn_master=""
+    for ((i=0; i<${#MULTINODE_FLAGS[@]}; i+=2)); do
+        case "${MULTINODE_FLAGS[$i]}" in
+            --nnode) _mn_nnode="${MULTINODE_FLAGS[$((i+1))]}" ;;
+            --nodes|--node-list) _mn_nodes="${MULTINODE_FLAGS[$((i+1))]}" ;;
+            --master-addr) _mn_master="${MULTINODE_FLAGS[$((i+1))]}" ;;
+        esac
+    done
+    if [ -n "$_mn_nnode" ] && [ "$_mn_nnode" -gt 1 ] 2>/dev/null; then
+        if [ -z "$_mn_nodes" ] || [ -z "$_mn_master" ]; then
+            echo "错误: --nnode > 1 时必须同时提供 --nodes 和 --master-addr"
+            exit 1
+        fi
+        MULTINODE_ENABLED=true
+    fi
+fi
 
 if [ ! -f "$TASK_FILE" ]; then
     echo "错误: 任务列表文件不存在: $TASK_FILE"
@@ -261,6 +293,7 @@ echo "  任务总数: ${TOTAL}"
 echo "  单模型超时: $(( MODEL_TIMEOUT / 3600 ))h$(( (MODEL_TIMEOUT % 3600) / 60 ))m"
 echo "  断点续跑: $( $FORCE && echo '关闭 (--force)' || echo '开启' )"
 echo "  失败策略: $( $STOP_ON_ERROR && echo '失败即停' || echo '继续下一个' )"
+echo "  部署模式: $( $MULTINODE_ENABLED && echo "多机 (${_mn_nnode} 节点: ${_mn_nodes}, master=${_mn_master})" || echo '单机' )"
 echo "  开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  批次日志: ${BATCH_LOG}"
 echo "============================================================"
@@ -331,7 +364,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
         --batch-elapsed-seconds "$(( TASK_START_TS - BATCH_START_TS ))" || :
     FLAGOS_BATCH_MODE=1 \
     timeout --signal=TERM --kill-after=60 "${MODEL_TIMEOUT}" \
-        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $DATASET_FLAG $PROXY_FLAG < /dev/null
+        bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG $DATASET_FLAG $PROXY_FLAG ${MULTINODE_FLAGS[@]+"${MULTINODE_FLAGS[@]}"} < /dev/null
     EXIT_CODE=$?
     TASK_END_TS=$(date +%s)
     TASK_ELAPSED=$(( TASK_END_TS - TASK_START_TS ))

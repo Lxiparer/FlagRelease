@@ -151,6 +151,27 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 `vllm + flagtree + flaggems`（无 plugin）是当前 NV 模型发布的优先场景，推荐版本组合：`vllm>=0.7.3 + flaggems>=5.1.0 + flagtree>=0.5.0`。
 
+### 多机部署场景
+
+**触发条件**：`run_pipeline.sh` 传入 `--nnode > 1` 且提供 `--nodes` 节点列表。不传则为单机模式，单机流程完全不变。
+
+**唯一工具**：多机部署由 `skills/flagos-container-preparation/tools/deploy_vllm.py`（配 `deploy_config.yaml`）完成，是多机场景下**唯一**的容器创建与服务启动方式。第一代工具（`start_service_distributed.sh`、`calc_tp_pp.py`、`setup_ssh_cluster.sh`、`launch_containers_multi.sh` 等）已废弃，移入各 `_deprecated/` 目录，**禁止引用**。
+
+**步骤映射**：
+- 步骤1：由 pipeline 多机参数生成 `deploy_config.yaml` → `deploy_vllm.py --create-container` 全节点建容器 → master 容器 `setup_workspace.sh` 部署工具
+- 步骤2：master 节点检测（各节点环境一致）
+- 步骤3：`deploy_vllm.py`（deploy + 健康检查）；失败走 `--fetch-logs` 聚合日志
+- 步骤4-13：复用主流程，评测/性能仅请求 master 节点 `http://<master-addr>:<port>`
+- **步骤5/7（算子调优）**：调优决策逻辑完全不变，在 master 容器禁用算子后，重启服务时 deploy_vllm.py 的 `sync_files` 机制自动将 `/root/flaggems_ops_control.json` + 环境变量同步到所有 worker 节点，实现全节点一致禁用
+
+**关键约束**：
+- worker 节点（node-rank>0）命令必须带 `--headless`（deploy_vllm.py 自动追加）。缺失会导致 `is_in_the_same_node: Connection closed by peer`
+- 所有节点模型路径、容器名、镜像必须完全一致
+- 不使用 `--distributed-executor-backend mp`（vLLM 自动处理）
+- 流水线须在 master 节点上执行（deploy_config.yaml 中 master 节点 `local: true`）
+
+详见 `docs/multi_node_deployment.md`。
+
 ---
 
 ## 环境场景定义
@@ -204,6 +225,10 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。各场景的 FlagG
 | Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 达标不重新调优；不达标进三级递进继续调优 |
 | 网络代理切换 | 从 `FLAGOS_PROXY_LIST` 逐个尝试 | 网络操作失败时自动切换代理重试，全部失败才终止 |
 | 容器内代理传递 | `docker exec -e http_proxy=<proxy> -e https_proxy=<proxy>` | 所有需要外网的 docker exec 命令必须传入代理 |
+| 多机模式识别 | `--nnode > 1` 且提供 `--nodes` → 多机模式；否则单机 | 单机流程零改动 |
+| 多机部署工具 | 唯一使用 `deploy_vllm.py` + `deploy_config.yaml`，第一代工具已废弃禁止引用 | 步骤1/3 走此工具 |
+| 多机 worker 参数 | node-rank>0 自动追加 `--headless`（deploy_vllm.py 处理） | 不询问 |
+| 多机算子调优 | deploy_vllm.py 的 sync_files 机制自动同步算子禁用状态到所有节点，调优逻辑零改动 | 与单机完全一致 |
 
 ---
 

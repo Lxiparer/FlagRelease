@@ -2,9 +2,10 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL] [--nnode N --nodes host:gpus,... --master-addr IP [--ssh-key path] [--ssh-user user] [--network-if iface] [--master-port port]]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
+# 多机部署：--nnode > 1 且提供 --nodes 触发多机模式（唯一用 deploy_vllm.py）；不传则单机，单机流程完全不变
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
 # 数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定
 #
@@ -61,6 +62,18 @@ FILTER_FLAGS=""
 PROXY_LIST=""
 DATASETS_CSV="gpqa_diamond"   # 精度评测数据集（逗号分隔，默认 gpqa_diamond）
 
+# 多机部署参数初始化（不传则为单机模式，单机流程完全不变）
+NNODE=""
+NODE_LIST=""
+MASTER_ADDR=""
+SSH_KEY=""
+SSH_USER="root"
+NETWORK_IF=""
+MASTER_PORT="29500"          # NCCL/分布式通信端口（--master-port）
+# 对外服务端口：deploy_config.yaml 的 vllm.port、context.yaml 的 service.port、
+# 健康检查与评测请求统一取此值，避免多处手填不一致。单机默认 8000 不变。
+SERVICE_PORT="8000"
+
 if [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
     echo "⚠ --image 标志已弃用，直接传镜像地址作为第一参数即可自动识别"
@@ -98,10 +111,11 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL] [--nnode N --nodes host:gpus,... --master-addr IP [--ssh-key path] [--ssh-user user] [--network-if iface] [--master-port port]]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo "数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定"
+        echo "多机部署：--nnode > 1 且提供 --nodes 触发多机模式（唯一用 deploy_vllm.py）；不传则单机，单机流程完全不变"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
@@ -143,6 +157,13 @@ else
                 DATASETS_CSV="$2"
                 shift 2
                 ;;
+            --nnode) NNODE="$2"; shift 2 ;;
+            --nodes|--node-list) NODE_LIST="$2"; shift 2 ;;
+            --master-addr) MASTER_ADDR="$2"; shift 2 ;;
+            --ssh-key) SSH_KEY="$2"; shift 2 ;;
+            --ssh-user) SSH_USER="$2"; shift 2 ;;
+            --network-if) NETWORK_IF="$2"; shift 2 ;;
+            --master-port) MASTER_PORT="$2"; shift 2 ;;
             *)
                 echo "警告: 未知参数 '$1'，已忽略"
                 shift
@@ -237,6 +258,34 @@ if [ -n "$MODEL_PATH" ] && [ -z "${MODEL_FOUND_ON_HOST:-}" ]; then
         USER_SPECIFIED_MODEL_PATH=true
         echo "[pre-flight] 使用指定模型路径: ${MODEL_PATH}"
     fi
+fi
+
+# ========== 多机部署参数构造（单机时全部为空，不影响单机流程） ==========
+MULTINODE_PARAMS=""
+if [ -n "$NNODE" ] && [ "$NNODE" -gt 1 ]; then
+    MULTINODE_PARAMS="nnode=${NNODE}"
+    [ -n "$NODE_LIST" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, node_list=${NODE_LIST}"
+    [ -n "$MASTER_ADDR" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, master_addr=${MASTER_ADDR}"
+    [ -n "$SSH_KEY" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, ssh_key=${SSH_KEY}"
+    [ -n "$SSH_USER" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, ssh_user=${SSH_USER}"
+    [ -n "$NETWORK_IF" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, network_if=${NETWORK_IF}"
+    [ -n "$MASTER_PORT" ] && [ "$MASTER_PORT" != "29500" ] && MULTINODE_PARAMS="${MULTINODE_PARAMS}, master_port=${MASTER_PORT}"
+fi
+
+# 多机模式步骤3扩展（唯一使用 deploy_vllm.py 起服务，第一代已废弃）；单机为空串
+MULTINODE_STEP3=""
+if [ -n "$NNODE" ] && [ "$NNODE" -gt 1 ]; then
+    MULTINODE_STEP3="
+
+**步骤3 多机启动（cluster.mode=multi，替代下方单机 wait_for_service 策略）**：
+- 多机场景唯一使用 deploy_vllm.py 起服务，禁止使用 start_service.sh / start_service_distributed.sh
+- 在 master 节点（宿主机）前台执行（Bash timeout=1800000 毫秒）：
+  python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config /data/flagos-workspace/${MODEL}/config/deploy_config.yaml
+- deploy_vllm.py 自动：sync_files 同步算子控制状态(若配置)→各节点并行 docker exec 起 vLLM + worker 节点（node-rank>0）追加 --headless + 轮询 master http://${MASTER_ADDR:-<master>}:${SERVICE_PORT}/health 至 200
+- 退出码 0 = 服务就绪（健康检查通过）；非 0 = 失败
+- **失败处理**：调用 deploy_vllm.py --config <cfg> --fetch-logs --lines 200 回传各节点日志到本地 logs/remote/，分析根因。若日志出现 'is_in_the_same_node: Connection closed by peer'，检查 worker 是否缺 --headless（deploy_vllm.py 应已自动处理）
+- **算子调优的重启方式**：调优决策逻辑（选哪些算子）与单机一致，但"如何重启服务"不同——见下方段2「多机场景服务重启硬性约束」，禁止 docker restart/start_service.sh，统一走 deploy_vllm.py --stop 再起
+- 服务就绪后设置 workflow.service_ok=true，记录 commands.serve_start（deploy_vllm.py 生成的 vllm serve 命令）"
 fi
 
 # ========== 镜像模式：镜像存在性检查 + 拉取（确定性归 shell，agent 不参与） ===
@@ -407,6 +456,31 @@ if $IMAGE_MODE; then
      python3 skills/flagos-container-preparation/tools/check_model_local.py --model \"${MODEL}\" --mode container --container \${CONTAINER} --output-json
      从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml"
     fi
+
+    # 多机模式步骤1扩展（唯一使用 deploy_vllm.py + deploy_config.yaml，第一代工具已废弃）；单机为空串
+    MULTINODE_STEP1=""
+    if [ -n "$NNODE" ] && [ "$NNODE" -gt 1 ]; then
+        MULTINODE_STEP1="
+   - **多机部署模式检测**：nnode=${NNODE} > 1，设置 cluster.mode=multi。多机部署唯一使用 deploy_vllm.py（配 deploy_config.yaml），禁止使用第一代 setup_ssh_cluster.sh / launch_containers_multi.sh / start_service_distributed.sh（已废弃移入 _deprecated/）
+   - **生成 deploy_config.yaml**：以 skills/flagos-container-preparation/tools/deploy_config.yaml 为模板，按多机参数生成实际配置，写入 /data/flagos-workspace/${MODEL}/config/deploy_config.yaml，填充字段：
+     * docker.container_name=\${CONTAINER_NAME}, docker.image=${IMAGE}, docker.run_args（--network=host --ipc=host --shm-size=64g --gpus=all -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH}:ro -v /data/flagos-workspace/${MODEL}:/flagos-workspace）
+     * nodes[]：解析 node_list='${NODE_LIST}'（格式 host:gpus,...）。**master 必须排在 nodes[0]**：若指定了 master_addr=${MASTER_ADDR:-<未指定>}，将 node_list 中 host 等于该值的节点提到首位（deploy_vllm.py 取 nodes[0].host 作 --master-addr，顺序即决定 master）；未指定 master_addr 时以 node_list 首项为 master。nodes[0] 标 local: true，ssh_user=${SSH_USER:-root}
+     * **SSH 认证（仅免密公钥方式）**：ssh_key='${SSH_KEY}' 若非空则填 ssh.key_file=${SSH_KEY}（显式私钥路径）；若为空则 ssh.key_file 留空——deploy_vllm.py 自动走系统默认密钥 ~/.ssh/id_rsa / ssh-agent 免密。前置条件：已用 setup_passwordless_ssh.sh 配好 master→worker 免密（config 无 password 字段，流程不支持密码认证）
+     * vllm.model_path=${CONTAINER_MODEL_PATH}, served_model_name=${MODEL}, **vllm.port=${SERVICE_PORT}（必须与 context.yaml 的 service.port 一致，下方要求写同一值）**, tensor_parallel_size/pipeline_parallel_size 按 GPU 数与节点数选择（优先 TP 打满单节点，单节点显存不足才 PP≤节点数），extra_env.NCCL_SOCKET_IFNAME=${NETWORK_IF:-eth0}
+     * **起服务前先自检 SSH 免密连通**：生成 config 后立即执行 python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config <cfg> --status（内置 preflight 检查各 worker SSH + 容器状态）。若某 worker 连不通，说明免密未配好，提示用户在 master 执行 setup_passwordless_ssh.sh 配置公钥后重试，不要继续
+     * **sync_files 段（多机算子调优必需，禁止省略）**：写入 sync_files: [/root/flaggems_ops_control.json, /etc/environment]。缺失此段会导致步骤5/7 在 master 禁用算子后 worker 不同步、全节点算子集不一致（master 裁剪、worker 全量）从而崩溃或结果不一致
+   - **多节点容器创建**：在 master 节点执行
+     python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config /data/flagos-workspace/${MODEL}/config/deploy_config.yaml --create-container
+     在所有节点创建同名容器、挂载相同模型路径。worker 节点镜像若缺失，先 --pull-image
+   - **master 容器工具部署**：仅在 master 节点容器执行 setup_workspace.sh 部署工具脚本（deploy_vllm.py 会随之部署到 master 容器，供步骤3调用）
+   - **写入 context.yaml 多机标志（必需，否则 start_service.sh 的多机保护失效、下游误起单机服务抢端口）**：容器工具部署后，在 master 容器执行 update_context.py 写入：
+     docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py \\
+       --set 'cluster.mode=multi' --set 'cluster.nnode=${NNODE}' \\
+       --set 'distributed.enabled=true' --set 'distributed.master_addr=${MASTER_ADDR}' --set 'distributed.master_port=${MASTER_PORT}' \\
+       --set 'distributed.pp_size=<PP 值，同 deploy_config.pipeline_parallel_size>' --set 'distributed.world_size=<TP×PP>' \\
+       --set 'service.port=${SERVICE_PORT}'\"
+     这一步让 start_service.sh 检测到 distributed.enabled=true 主动早退（多机唯一起服务方式是 deploy_vllm.py），并使 service.port 与 deploy_config.vllm.port 对齐"
+    fi
     STEP1=$(cat <<STEP1_EOF
 1. 容器准备（从镜像创建）：
    - ${MODEL_NOTE}
@@ -417,7 +491,7 @@ if $IMAGE_MODE; then
      docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace/${MODEL}:/flagos-workspace ${IMAGE}
    - **平头哥 PPU（vendor=zhenwu，CUDA 兼容卡，识别标志：ppu-smi 命令 / /usr/local/PPU_SDK 目录 / nvidia-smi 输出含 PPU-SMI）用 SKILL.md 模板 G**：禁用 `--gpus=all`，改用 `--privileged -v /dev:/dev -v /usr/local/PPU_SDK:/usr/local/PPU_SDK -e XPU_VISIBLE_DEVICES=all` 等参数
    - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败可 docker inspect 同类容器**仅抄参考其挂载/设备参数拼新的 docker run 命令**（容器名仍必须用 ${CONTAINER_NAME_PRE}），重试一次 → 仍失败则终止
-   - **绝对禁止复用任何已存在的容器**（包括同镜像创建的）。docker run 失败不是复用的理由——复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟${DOWNLOAD_NOTE}
+   - **绝对禁止复用任何已存在的容器**（包括同镜像创建的）。docker run 失败不是复用的理由——复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟${DOWNLOAD_NOTE}${MULTINODE_STEP1}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
    - **记录实际 docker run 命令到 context**：步骤1完成后，将实际成功执行的完整 docker run 命令写入 context.yaml：
@@ -425,6 +499,7 @@ if $IMAGE_MODE; then
 STEP1_EOF
     )
     PROMPT_SEG1="镜像: ${IMAGE}，模型名: ${MODEL}
+多机部署参数: ${MULTINODE_PARAMS:-单机模式}
 ${COMMON_TOKENS}
 ${COMMON_PLAN_FIRST}
 ${COMMON_PLAN_STEPS}
@@ -432,6 +507,7 @@ ${COMMON_PLAN_STEPS}
 ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+${MULTINODE_STEP3}
 
 **步骤3 服务等待策略（长任务执行协议 — 硬性）**：
 wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
@@ -504,6 +580,7 @@ else
 STEP1_EOF
     )
     PROMPT_SEG1="容器名: ${CONTAINER}，模型名: ${MODEL}
+多机部署参数: ${MULTINODE_PARAMS:-单机模式}
 ${COMMON_TOKENS}
 ${COMMON_PLAN_FIRST}
 ${COMMON_PLAN_STEPS}
@@ -511,8 +588,9 @@ ${COMMON_PLAN_STEPS}
 ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+${MULTINODE_STEP3}
 
-**步骤3 服务等待策略（长任务执行协议 — 硬性）**：
+**步骤3 服务等待策略（长任务执行协议 — 硬性，单机模式适用）**：
 wait_for_service.sh 最长运行 5760 秒（1.6 小时），**禁止**用 Bash(timeout=大数) 前台阻塞等待——Bash 工具前台命令有 10 分钟硬上限，超过自动转后台、Claude 静默等待，批次控制器按 10 分钟无输出判会话失败并终止（长命令前台等待 = 会话被杀、任务丢失）；**禁止** TaskOutput 轮询。按三步执行：
 1. 写任务命令文件（一条 docker exec）：
    docker exec \${CONTAINER} bash -c \"mkdir -p /flagos-workspace/logs/tasks && cat > /flagos-workspace/logs/tasks/startup_default.cmd << 'CMD_EOF'
@@ -1567,6 +1645,20 @@ env_type=native 表示纯原生环境，无 FlagGems。本段**只执行步骤4�
 - 步骤5/7 直接标记为 skipped（skip_reason='native 场景无 FlagGems'）
 - 精度评测只有 V1（native 模式），无 V2 对比
 - 性能评测只有 V1（native 模式），无 V2 对比"
+fi
+
+# 多机场景追加硬性约束：所有服务重启改走 deploy_vllm.py（覆盖上方单机重启约束）
+if [ -n "$NNODE" ] && [ "$NNODE" -gt 1 ]; then
+    PROMPT_SEG2="${PROMPT_SEG2}
+
+**⚠ 多机场景服务重启硬性约束（cluster.mode=multi，覆盖上方「服务重启硬性约束」的单机方式）**：
+本流程为多机部署（nnode=${NNODE}），步骤5/7 算子调优及任何需要重启 vLLM 的场景，**禁止**使用 docker restart \${CONTAINER} / start_service.sh / safe_restart_service.sh —— 这些只作用于 master 单机容器，会让 worker 节点 vLLM 进程游离、分布式组解体；且 start_service.sh 检测到 distributed.enabled=true 会直接早退不起服务。
+- **唯一正确的多机重启方式**（在 master 节点宿主机执行，非容器内）：
+  1. 停全节点服务：python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config /data/flagos-workspace/${MODEL}/config/deploy_config.yaml --stop
+  2. 重新起服务（内部自动 sync_files 同步算子控制状态到所有 worker + 健康检查至 200）：python3 skills/flagos-container-preparation/tools/deploy_vllm.py --config /data/flagos-workspace/${MODEL}/config/deploy_config.yaml
+  按上方「长任务执行协议」用 Bash(timeout=1800000 毫秒) 前台执行第 2 条，退出码 0 = 全节点就绪
+- **算子控制的正确姿势**：在 master 容器内用 toggle_flaggems.py / 写 /root/flaggems_ops_control.json 调整算子后，**不要**在容器内重启服务；改为在宿主机执行上面两步——deploy_vllm.py 的 sync_files 会把 master 的 flaggems_ops_control.json + /etc/environment 同步到所有 worker，保证全节点算子集一致。调优决策逻辑（选哪些算子）与单机完全一致，仅"如何重启"不同
+- 评测/性能请求打 master：http://localhost:${SERVICE_PORT}（master 宿主机 --network=host，localhost 即 master 服务）；context.yaml 的 service.port 已在步骤1写为 ${SERVICE_PORT}，与 deploy_config.vllm.port 一致"
 fi
 
 echo ""
