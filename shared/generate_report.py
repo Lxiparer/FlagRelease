@@ -273,6 +273,7 @@ class ReportData:
         self.op_config_v3: Optional[dict] = None
         self.op_config_v4: Optional[dict] = None
         self.nv_baseline: Optional[dict] = None
+        self.live_versions: Dict[str, Any] = {}   # probe_versions.py 现场探测结果
 
     def collect(self) -> bool:
         """收集数据，返回 False 表示无 context.yaml。"""
@@ -386,7 +387,36 @@ class ReportData:
         # 初始控制文件（start_service.sh 保存的副本）
         self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))
 
+        # 现场版本探测（probe_versions.py）：报告在容器内生成，pip list 即当前真实环境，
+        # 比 context 步骤2 的 __version__ 采集值可靠（源码装/中途装组件都能抓到）。
+        # 现场值优先、context 兜底——见基本信息段消费逻辑。任何失败都退化为空 dict。
+        self.live_versions = self._probe_live_versions()
+
         return True
+
+    def _probe_live_versions(self) -> dict:
+        """现场调 probe_versions.py 抓真实版本。失败返回 {}，绝不阻断报告。"""
+        import subprocess as _sp
+        # 优先同目录部署副本（scripts/），回退项目内 shared/
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(here, "probe_versions.py"),
+            os.path.join(self.workspace, "scripts", "probe_versions.py"),
+        ]
+        script = next((p for p in candidates if os.path.isfile(p)), None)
+        if not script:
+            return {}
+        try:
+            r = _sp.run(
+                [sys.executable, script],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+            if r.stdout.strip():
+                data = json.loads(r.stdout)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
 
     # helpers
     def get(self, *keys, default=None):
@@ -1060,12 +1090,27 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| 权重来源 | {_clean_model_name(model.get('url', '') or model.get('name', '-')) or '-'} |")
     lines.append(f"| 权重数制 | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype') or 'bf16'} |")
+    # ── 版本字段：现场探测优先，context 采集值兜底 ──
+    # probe_versions.py 在报告生成时现场 pip list 抓取，比步骤2 的 __version__ 采集可靠
+    # （源码 pip install . 装的常无 __version__ → context 里是 installed/None）。
+    # 采集值中的占位符 installed/True 不当版本号，统一让位给现场值或显示 "-"。
+    lv = data.live_versions or {}
+
+    def _ver(field, *fallbacks):
+        """现场值优先；否则取首个非占位兜底值；都无则 None。"""
+        v = lv.get(field)
+        if v:
+            return v
+        for fb in fallbacks:
+            if fb and fb not in ("installed", "True", "true", True):
+                return fb
+        return None
+
     lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
-    lines.append(f"| 推理框架后端版本 | {core_pkgs.get('vllm', '-')} |")
-    # plugin-FL 版本：优先真实版本号（plugin_install.version），
-    # 其次从发布镜像 tag 的 pluginX.Y.Z 解析，最后回退 flag_packages 的采集值
+    lines.append(f"| 推理框架后端版本 | {_dash(_ver('vllm', core_pkgs.get('vllm')))} |")
+    # plugin-FL 版本：现场探测 → plugin_install.version → 发布镜像 tag 的 pluginX.Y.Z → 采集值
     _plugin_install = ctx.get("plugin_install", {}) or {}
-    plugin_ver = _plugin_install.get("version", "") or ""
+    plugin_ver = lv.get("plugin_fl") or _plugin_install.get("version", "") or ""
     if not plugin_ver:
         _pimg = plugin_wf.get("plugin_image_url", "") or ""
         m = re.search(r"plugin([0-9][0-9A-Za-z._]*?)(?:-|:)", _pimg)
@@ -1076,9 +1121,9 @@ def generate_text_report(data: ReportData) -> str:
         # 采集值若是 installed/True 之类的占位，不当版本号用
         plugin_ver = _fp if _fp and _fp not in ("installed", "True", "true", True) else "-"
     lines.append(f"| 推理框架插件plugin-FL | {_dash(plugin_ver)} |")
-    lines.append(f"| FlagGems版本 | {_dash(flag_pkgs.get('flaggems'))} |")
-    lines.append(f"| Flagtree版本 | {_dash(env.get('flagtree_version') or flag_pkgs.get('flagtree'))} |")
-    lines.append(f"| FlagCX版本 | {_dash(flag_pkgs.get('flagcx'))} |")
+    lines.append(f"| FlagGems版本 | {_dash(_ver('flaggems', flag_pkgs.get('flaggems')))} |")
+    lines.append(f"| Flagtree版本 | {_dash(_ver('flagtree', env.get('flagtree_version'), flag_pkgs.get('flagtree')))} |")
+    lines.append(f"| FlagCX版本 | {_dash(_ver('flagcx', flag_pkgs.get('flagcx')))} |")
     _vendor_raw = gpu.get("vendor", "")
     # 基本信息厂商字段用中文(英文)（规范 3.2）；性能表厂商列另用纯英文
     lines.append(f"| 厂商 | {_vendor_display_cn(_vendor_raw)} |")
@@ -1771,6 +1816,8 @@ def generate_json_report(data: ReportData) -> dict:
         },
         "environment": {
             "env_type": data.get("environment", "env_type", default=""),
+            # 现场探测的真实组件版本（probe_versions.py），供下游消费；缺失项为 null
+            "versions": data.live_versions or {},
         },
         "accuracy": {
             "v1_score": v1_score,
