@@ -113,6 +113,24 @@ DATASET_CONFIG = {
         },
         'benchmark_name': 'MATH-500',
     },
+    # MMStar：多模态（VLM）视觉必答 4 选一 MCQ。evalscope 注册名 mm_star，
+    # VisionLanguageAdapter（图文输入，图片以 base64 内嵌 chat message），
+    # eval_split=val，6 子集各 250 题（reformat_subset=True → per-subset 语义），
+    # metric=acc，0-shot。⚠ 仅对多模态模型有意义：纯文本 LLM 收到图片会报错/胡答，
+    # 且 vLLM 须以支持图像输入的方式起服务（见 multimodal 门控）。
+    'mm_star': {
+        'full_count': 1500,
+        'few_shot_num': 0,
+        'default_limit': 0,         # 默认全量 1500 题（6 子集 × 250）。多模态采样偏最难子集会显著偏低
+                                    # （300 题实测 44.67% vs 全量 62.6%），故默认全量；如需降采样显式传 --limit N/子集
+        'per_subset_limit': True,   # reformat_subset=True，limit 应用到每个子集
+        'multimodal': True,         # 多模态标志：驱动 prompt 预留放大 / 并发保守 / 门控
+        'preload': {
+            'modelscope': ('evalscope/MMStar', None, 'val'),
+            'huggingface': ('Lin-Chen/MMStar', None, 'val'),
+        },
+        'benchmark_name': 'MMStar',
+    },
 }
 
 
@@ -172,7 +190,19 @@ def query_model_max_len(api_base: str, api_key: str, model_name: str) -> Optiona
     return None
 
 
-def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: bool = False) -> Tuple[int, Optional[int]]:
+# 多模态 prompt 预留：单张高分辨率图经 vision encoder 可占数千 image token，
+# 文本流程固定预留 8K 对 VLM 不够，prompt(文本+image tokens) 可能超 max_model_len
+# 被服务拒绝（错误文本当输出 → 全题 0 分）。MMStar 图分辨率跨度大（160×160~1350×1015），
+# 保守预留 16K 给 prompt+image，给正常图文请求足够余量。
+MM_PROMPT_RESERVE = 16384
+# 多模态 max_tokens 硬上限。MMStar 等 MCQ 任务正常答案很短（几十~几百 token），
+# 超大窗口只会让复读死循环吃满 token（实测 temp=0 也复读到 8~9 万字符），
+# 收窄到 4096 强制模型早收尾给答案，避免 runaway 白跑且必 0 分。
+MM_MAX_TOKENS_CAP = 4096
+
+
+def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: bool = False,
+                    is_multimodal: bool = False) -> Tuple[int, Optional[int]]:
     """
     自动计算 max_tokens，基于服务端实际 max_model_len。
 
@@ -181,13 +211,15 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
        （慢速芯片 24576 token ≈ 70min）；正常思考链回答一般几千~一万多 token
        封顶，cap 20000 不会截断正常答案，只收窄 runaway 复读窗口。
     标准模型：clamp(max_model_len - 8192, 4096, 32768)
+    多模态模型：prompt 预留放大到 MM_PROMPT_RESERVE（图片 token 占用大）。
 
     Returns:
         (max_tokens, max_model_len or None)
     """
     max_model_len = query_model_max_len(api_base, api_key, model_name)
+    reserve = MM_PROMPT_RESERVE if is_multimodal else 8192
     if max_model_len:
-        tokens = max_model_len - 8192  # 预留 8K 给 prompt
+        tokens = max_model_len - reserve  # 预留给 prompt（多模态含 image token）
         if is_thinking:
             tokens = max(tokens, 8192)
             tokens = min(tokens, THINKING_MAX_TOKENS_CAP)
@@ -198,10 +230,17 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
         # 给 prompt 留余量——vllm 以 max_model_len 同时约束 prompt+output 总长,
         # thinking 下限 8192 + 任意非空 prompt 必超限被拒(错误文本当输出, 全题 0 分)。
         # 真实流水线服务 max_model_len>=32768 不触发此分支, 行为不变。
-        if max_model_len <= 16384:
+        # 多模态：预留 16K 后再取半，避免 image token 撑破上下文。
+        small_ctx = 32768 if is_multimodal else 16384
+        if max_model_len <= small_ctx:
             tokens = min(tokens, max_model_len // 2)
+        # 多模态硬上限：MCQ 答案短，收窄窗口逼模型早收尾，避免 runaway 复读吃满窗口
+        if is_multimodal:
+            tokens = min(tokens, MM_MAX_TOKENS_CAP)
         return tokens, max_model_len
     # fallback
+    if is_multimodal:
+        return MM_MAX_TOKENS_CAP, None
     return (16384 if is_thinking else 8192), None
 
 
@@ -584,12 +623,17 @@ def probe_throughput(
     generation_config: Dict,
     dataset_args: Dict,
     evalscope_config: Dict,
+    is_multimodal: bool = False,
 ) -> Tuple[int, float]:
     """
     三阶段并发探测：
     1. 直接 API 调用测单条推理延迟（剥离 evalscope 框架开销）
     2. 基于延迟 + thinking 模型特性估算候选并发
     3. 快速验证（3 题并发测试，选最优）
+
+    多模态：探测样题是纯文本，无法反映图文请求的真实（更高）延迟与显存占用，
+    会高估并发导致正式评测 OOM。故 is_multimodal=True 时将候选并发档位对半下调
+    （下限 1），偏保守。真正的并发上限仍由阶段3 的 3 题并发验证（遇错即止）兜底。
 
     Returns:
         (eval_batch_size, probe_elapsed_seconds)
@@ -609,6 +653,10 @@ def probe_throughput(
 
     # 阶段 2: 估算候选
     candidates = _estimate_concurrency(latency, is_thinking)
+    if is_multimodal:
+        # 图文请求实际更慢 + 显存占用更高，纯文本探测偏乐观 → 候选对半下调
+        candidates = sorted({max(1, c // 2) for c in candidates})
+        print(f"[PROBE] 多模态：候选并发下调为保守档位")
     print(f"[PROBE] 候选并发: {candidates}")
 
     # 阶段 3: 快速验证
@@ -678,7 +726,35 @@ def _find_score(d: dict, depth: int = 0) -> Optional[float]:
 _GEN_PARAM_WHITELIST = ("temperature", "top_p", "top_k", "repetition_penalty")
 
 
-def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
+def _resolve_model_dir(model_path: Optional[str] = None) -> Optional[str]:
+    """定位模型目录（用于读取 generation_config.json）。
+
+    候选来源按优先级：
+      1. 传入的 model_path 若本身是存在的目录（独立裸跑场景：--model-name 直接是本地路径）
+      2. context.yaml 的 model.local_path / model.container_path（流水线场景兜底）
+    全程 best-effort，任何异常都返回 None。
+    """
+    import os as _os
+    # 1) --model-name 本身就是本地目录
+    if model_path and _os.path.isdir(model_path):
+        return model_path
+    # 2) 流水线 context.yaml 兜底
+    try:
+        import yaml as _yaml
+        ctx_path = "/flagos-workspace/shared/context.yaml"
+        with open(ctx_path) as f:
+            ctx = _yaml.safe_load(f) or {}
+        model_sec = ctx.get("model", {}) or {}
+        mp = model_sec.get("local_path") or model_sec.get("container_path")
+        if mp and _os.path.isdir(mp):
+            return mp
+    except Exception:
+        pass
+    return None
+
+
+def resolve_gen_params(is_thinking: bool, max_tokens: int,
+                       model_path: Optional[str] = None) -> Dict:
     """构建 generation_config：优先采用模型自带 generation_config.json 的采样参数，
     读取失败/文件缺失/字段非法时无声回退现有默认。
 
@@ -686,6 +762,7 @@ def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
     确保绝不因本逻辑新增精度评测报错点（关系整体流程成功率）。
 
     优先级：模型 generation_config.json 白名单字段 > 现有默认（标准 0.0 / thinking 0.6）。
+    模型目录定位：--model-name 本地路径优先，context.yaml 兜底（见 _resolve_model_dir）。
     stream/timeout/n 属评测框架控制项，不受模型配置影响。
     """
     # 1) 现有默认（回退基线，与改动前完全一致）
@@ -698,14 +775,9 @@ def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
 
     # 2) best-effort 读模型配置覆盖采样字段（全程不 raise）
     try:
-        import yaml as _yaml
         import json as _json
         import os as _os
-        ctx_path = "/flagos-workspace/shared/context.yaml"
-        with open(ctx_path) as f:
-            ctx = _yaml.safe_load(f) or {}
-        model_sec = ctx.get("model", {}) or {}
-        mp = model_sec.get("local_path") or model_sec.get("container_path")
+        mp = _resolve_model_dir(model_path)
         if mp:
             gc_path = _os.path.join(mp, "generation_config.json")
             if _os.path.isfile(gc_path):
@@ -741,7 +813,7 @@ def resolve_gen_params(is_thinking: bool, max_tokens: int) -> Dict:
             else:
                 print("  [gen] 未找到模型 generation_config.json，沿用默认采样参数")
         else:
-            print("  [gen] context.yaml 无模型路径，沿用默认采样参数")
+            print("  [gen] 未定位到模型目录（--model-name 非本地路径且 context.yaml 无路径），沿用默认采样参数")
     except Exception as e:  # 任何异常都静默回退，绝不影响评测
         print(f"  [gen] 读取模型配置失败（{e}），回退默认采样参数")
 
@@ -787,13 +859,15 @@ def run_fast_gpqa(
     print(f"  模型: {model_name}")
     print(f"  API:  {api_base}")
 
-    # Step 1: 检测 thinking 模型
+    # Step 1: 检测 thinking 模型 + 多模态数据集
     is_thinking = detect_thinking(model_name)
+    is_multimodal = bool(cfg.get('multimodal'))
     mode_str = "thinking" if is_thinking else "standard"
-    print(f"  模式: {mode_str}")
+    print(f"  模式: {mode_str}{' + 多模态(VLM)' if is_multimodal else ''}")
 
-    # Step 2: 自动设 max_tokens（基于 max_model_len 动态计算）
-    max_tokens, max_model_len = auto_max_tokens(api_base, api_key, model_name, is_thinking)
+    # Step 2: 自动设 max_tokens（基于 max_model_len 动态计算；多模态放大 prompt 预留）
+    max_tokens, max_model_len = auto_max_tokens(api_base, api_key, model_name, is_thinking,
+                                                is_multimodal=is_multimodal)
     if max_model_len:
         print(f"  max_model_len: {max_model_len} (从服务端获取)")
     else:
@@ -802,14 +876,21 @@ def run_fast_gpqa(
 
     # Step 3: 截断检测 — 发样题检查 finish_reason
     # thinking 模型翻倍重试受 THINKING_MAX_TOKENS_CAP 约束（防线1）
+    # 多模态：截断翻倍上限锁死 MM_MAX_TOKENS_CAP，避免样题撞 length 后翻倍破窗
+    if is_multimodal:
+        trunc_cap = MM_MAX_TOKENS_CAP
+    elif is_thinking:
+        trunc_cap = THINKING_MAX_TOKENS_CAP
+    else:
+        trunc_cap = None
     truncation_detected, max_tokens = check_truncation(
         api_base, api_key, model_name, max_tokens, max_model_len,
-        max_tokens_cap=THINKING_MAX_TOKENS_CAP if is_thinking else None,
+        max_tokens_cap=trunc_cap,
     )
 
     # Step 4: 构建 generation_config（优先采用模型自带 generation_config.json 的采样参数，
     # 读取失败/缺失时无声回退现有默认；纯增强层，绝不新增评测报错点）
-    gen_config = resolve_gen_params(is_thinking, max_tokens)
+    gen_config = resolve_gen_params(is_thinking, max_tokens, model_path=model_name)
 
     # Step 5: 构建 dataset_args（few-shot 按数据集配置；thinking 模型加 remove_until 过滤）
     dataset_args = {dataset: {'few_shot_num': cfg['few_shot_num']}}
@@ -830,6 +911,7 @@ def run_fast_gpqa(
         generation_config=gen_config,
         dataset_args=dataset_args,
         evalscope_config=evalscope_config,
+        is_multimodal=is_multimodal,
     )
 
     # Step 7: 正式评测
@@ -947,7 +1029,7 @@ def run_fast_gpqa(
         report['crash_reason'] = reason
     report['_meta'] = {
             'model': '模型名称或路径',
-            'benchmark': '评测基准名称（gpqa_diamond / mmlu / math_500）',
+            'benchmark': '评测基准名称（gpqa_diamond / mmlu / math_500 / mm_star[多模态]）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
             'score': f'{cfg["benchmark_name"]} 正确率百分比',
             'total_questions': f'实际评测题数（evalscope 报告为准；mmlu/math_500 为 per-subset：mmlu --limit 100 = 5700 题（57 子集×100）、math_500 --limit 10 = 50 题（5 子集×10），--limit 0 为全量 {cfg["full_count"]} 题）',
@@ -1002,7 +1084,7 @@ def run_fast_gpqa(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='快速精度评测（GPQA Diamond / MMLU / MATH-500）',
+        description='快速精度评测（GPQA Diamond / MMLU / MATH-500 / MMStar[多模态]）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -1010,6 +1092,9 @@ def main():
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu --limit 100
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset math_500 --limit 0
+  # MMStar（多模态/VLM，仅对视觉语言模型有意义；6 子集 × limit，默认 50/子集=300 题，--limit 0 全量 1500）
+  python fast_gpqa.py --model-name Qwen2.5-VL-7B --api-base http://localhost:8000/v1 --dataset mm_star
+  python fast_gpqa.py --model-name Qwen2.5-VL-7B --api-base http://localhost:8000/v1 --dataset mm_star --limit 0
   # 多数据集（空格或逗号分隔；多数据集时 --output 为目录，每数据集写 {dataset}_result.json）
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu math_500 --output /flagos-workspace/results/multi
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu,math_500

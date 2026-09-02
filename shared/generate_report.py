@@ -108,6 +108,18 @@ def _chip_display(vendor: str, gpu_model: str) -> str:
     return gpu_model or ""
 
 
+def _gpu_field(data, key: str, default: str = "") -> str:
+    """取芯片字段：现场探测（detect_gpu）优先，context 采集值兜底。
+
+    供 JSON 报告等直接从 ReportData 取 gpu 字段的地方复用，
+    与 MD 报告在 gpu 定义处做的现场合并保持同口径。
+    """
+    live = (getattr(data, "live_gpu", None) or {}).get(key)
+    if live not in (None, "", 0):
+        return live
+    return data.get("gpu", key, default=default)
+
+
 def _clean_model_name(name: str) -> str:
     """模型名展示清理：去首尾空白与尾部斜杠（"org/Model/ " → "org/Model"）。
 
@@ -273,6 +285,8 @@ class ReportData:
         self.op_config_v3: Optional[dict] = None
         self.op_config_v4: Optional[dict] = None
         self.nv_baseline: Optional[dict] = None
+        self.live_versions: Dict[str, Any] = {}   # probe_versions.py 现场探测结果
+        self.live_gpu: Dict[str, Any] = {}         # detect_gpu.py 现场探测结果
 
     def collect(self) -> bool:
         """收集数据，返回 False 表示无 context.yaml。"""
@@ -386,7 +400,59 @@ class ReportData:
         # 初始控制文件（start_service.sh 保存的副本）
         self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))
 
+        # 现场版本探测（probe_versions.py）：报告在容器内生成，pip list 即当前真实环境，
+        # 比 context 步骤2 的 __version__ 采集值可靠（源码装/中途装组件都能抓到）。
+        # 现场值优先、context 兜底——见基本信息段消费逻辑。任何失败都退化为空 dict。
+        self.live_versions = self._probe_live_versions()
+        # 现场芯片探测（detect_gpu.py）：厂商/型号/物理卡数/显存，现场优先、context 兜底
+        self.live_gpu = self._probe_live_gpu()
+
         return True
+
+    def _run_probe(self, script_name: str, args=None, timeout=120) -> dict:
+        """现场调用一个探测脚本（scripts/ 部署副本优先，回退项目 shared/），
+        解析其 stdout JSON。失败返回 {}，绝不抛错——保证报告在任何环境都能出。"""
+        import subprocess as _sp
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(here, script_name),
+            os.path.join(self.workspace, "scripts", script_name),
+        ]
+        script = next((p for p in candidates if os.path.isfile(p)), None)
+        if not script:
+            return {}
+        try:
+            r = _sp.run(
+                [sys.executable, script] + list(args or []),
+                capture_output=True, text=True, timeout=timeout, check=False,
+            )
+            if r.stdout.strip():
+                data = json.loads(r.stdout)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
+
+    def _probe_live_versions(self) -> dict:
+        """现场调 probe_versions.py 抓真实组件版本。"""
+        return self._run_probe("probe_versions.py")
+
+    def _probe_live_gpu(self) -> dict:
+        """现场调 detect_gpu.py 抓真实芯片信息（厂商/型号/物理卡数/单卡显存）。
+
+        detect_gpu 用 name/count/memory_gb，报告消费 type/count/memory_gb——
+        统一映射为报告口径（name→type）。卡数按物理卡数取现场值（用户定稿）。
+        失败返回 {}，由基本信息段回退 context 采集值。
+        """
+        raw = self._run_probe("detect_gpu.py")
+        if not raw or "vendor" not in raw:
+            return {}
+        return {
+            "vendor": raw.get("vendor", ""),
+            "type": raw.get("name", ""),      # detect_gpu 的 name 即芯片型号
+            "count": raw.get("count"),
+            "memory_gb": raw.get("memory_gb"),
+        }
 
     # helpers
     def get(self, *keys, default=None):
@@ -978,7 +1044,12 @@ def generate_text_report(data: ReportData) -> str:
     eval_sec = ctx.get("eval", {}) or {}
     insp = ctx.get("inspection", {}) or {}
     env = ctx.get("environment", {}) or {}
-    gpu = ctx.get("gpu", {}) or {}
+    # 芯片信息现场探测优先、context 兜底：在 gpu 定义处合并，令下游所有消费点
+    # （基本信息/性能表/summary）统一受益。仅覆盖现场探测到的非空值，探测失败不清空。
+    gpu = dict(ctx.get("gpu", {}) or {})
+    for _k, _v in (data.live_gpu or {}).items():
+        if _v not in (None, "", 0):
+            gpu[_k] = _v
     model = ctx.get("model", {}) or {}
     runtime = ctx.get("runtime", {}) or {}
     timing = ctx.get("timing", {}) or {}
@@ -1060,12 +1131,27 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"| 权重来源 | {_clean_model_name(model.get('url', '') or model.get('name', '-')) or '-'} |")
     lines.append(f"| 权重数制 | {model.get('dtype') or 'bf16'} |")
     lines.append(f"| 计算数制（默认权重数制） | {model.get('dtype') or 'bf16'} |")
+    # ── 版本字段：现场探测优先，context 采集值兜底 ──
+    # probe_versions.py 在报告生成时现场 pip list 抓取，比步骤2 的 __version__ 采集可靠
+    # （源码 pip install . 装的常无 __version__ → context 里是 installed/None）。
+    # 采集值中的占位符 installed/True 不当版本号，统一让位给现场值或显示 "-"。
+    lv = data.live_versions or {}
+
+    def _ver(field, *fallbacks):
+        """现场值优先；否则取首个非占位兜底值；都无则 None。"""
+        v = lv.get(field)
+        if v:
+            return v
+        for fb in fallbacks:
+            if fb and fb not in ("installed", "True", "true", True):
+                return fb
+        return None
+
     lines.append(f"| 推理框架后端 | {runtime.get('framework', 'vllm')} |")
-    lines.append(f"| 推理框架后端版本 | {core_pkgs.get('vllm', '-')} |")
-    # plugin-FL 版本：优先真实版本号（plugin_install.version），
-    # 其次从发布镜像 tag 的 pluginX.Y.Z 解析，最后回退 flag_packages 的采集值
+    lines.append(f"| 推理框架后端版本 | {_dash(_ver('vllm', core_pkgs.get('vllm')))} |")
+    # plugin-FL 版本：现场探测 → plugin_install.version → 发布镜像 tag 的 pluginX.Y.Z → 采集值
     _plugin_install = ctx.get("plugin_install", {}) or {}
-    plugin_ver = _plugin_install.get("version", "") or ""
+    plugin_ver = lv.get("plugin_fl") or _plugin_install.get("version", "") or ""
     if not plugin_ver:
         _pimg = plugin_wf.get("plugin_image_url", "") or ""
         m = re.search(r"plugin([0-9][0-9A-Za-z._]*?)(?:-|:)", _pimg)
@@ -1076,9 +1162,9 @@ def generate_text_report(data: ReportData) -> str:
         # 采集值若是 installed/True 之类的占位，不当版本号用
         plugin_ver = _fp if _fp and _fp not in ("installed", "True", "true", True) else "-"
     lines.append(f"| 推理框架插件plugin-FL | {_dash(plugin_ver)} |")
-    lines.append(f"| FlagGems版本 | {_dash(flag_pkgs.get('flaggems'))} |")
-    lines.append(f"| Flagtree版本 | {_dash(env.get('flagtree_version') or flag_pkgs.get('flagtree'))} |")
-    lines.append(f"| FlagCX版本 | {_dash(flag_pkgs.get('flagcx'))} |")
+    lines.append(f"| FlagGems版本 | {_dash(_ver('flaggems', flag_pkgs.get('flaggems')))} |")
+    lines.append(f"| Flagtree版本 | {_dash(_ver('flagtree', env.get('flagtree_version'), flag_pkgs.get('flagtree')))} |")
+    lines.append(f"| FlagCX版本 | {_dash(_ver('flagcx', flag_pkgs.get('flagcx')))} |")
     _vendor_raw = gpu.get("vendor", "")
     # 基本信息厂商字段用中文(英文)（规范 3.2）；性能表厂商列另用纯英文
     lines.append(f"| 厂商 | {_vendor_display_cn(_vendor_raw)} |")
@@ -1761,16 +1847,18 @@ def generate_json_report(data: ReportData) -> dict:
             "name": data.get("container", "name", default=""),
         },
         "gpu": {
-            "count": data.get("gpu", "count", default=0),
+            # 芯片信息现场探测优先、context 兜底（与 MD 展示同源）
+            "count": (data.live_gpu or {}).get("count") or data.get("gpu", "count", default=0),
             # type/vendor 走规范表归一（NVIDIA H20-3e → H20-3e；nvidia → Nvidia），
             # 与 MD 展示同口径——报告 JSON 不再出现脏值（2026-08 兜底规范化）
-            "type": _chip_display(data.get("gpu", "vendor", default=""),
-                                  data.get("gpu", "type", default="")),
-            "vendor": _vendor_display(data.get("gpu", "vendor", default=""))
-            if data.get("gpu", "vendor", default="") else "",
+            "type": _chip_display(_gpu_field(data, "vendor"), _gpu_field(data, "type")),
+            "vendor": _vendor_display(_gpu_field(data, "vendor"))
+            if _gpu_field(data, "vendor") else "",
         },
         "environment": {
             "env_type": data.get("environment", "env_type", default=""),
+            # 现场探测的真实组件版本（probe_versions.py），供下游消费；缺失项为 null
+            "versions": data.live_versions or {},
         },
         "accuracy": {
             "v1_score": v1_score,

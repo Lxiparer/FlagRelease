@@ -131,8 +131,10 @@ eval:
 | GPQA Diamond | `gpqa_diamond` | 0-shot | 50（--limit 0 全量 198） | 主流程 V1/V2 精度判据 |
 | MMLU | `mmlu` | 5-shot | 20/子集 | **per-subset 语义**：57 子集各取 limit 题（默认 20/子集 = 1140 题；--limit 100 = 5700 题，--limit 0 = 全量 14042） |
 | MATH-500 | `math_500` | 0-shot | 200（40/等级） | 500 题 test，`\boxed{}` 答案；**同为 per-subset 语义**（实测 1.5.1：5 子集 Level 1-5 各取 limit 题，默认 40/等级 = 200 题，--limit 0 = 全量 500） |
+| MMStar | `mm_star` | 0-shot | **全量 1500**（默认；降采样显式传 --limit N/子集） | **多模态（VLM）视觉必答 4 选一 MCQ**，仅对视觉语言模型有意义（纯文本 LLM 收到图片会报错/胡答，且 vLLM 须以支持图像输入方式起服务）；6 子集各 250 题（**per-subset 语义**，reformat_subset=True）；**默认全量**（采样偏最难子集会显著偏低：300 题 44.67% vs 全量 62.6%）；多模态专用 max_tokens 硬上限 4096（MCQ 答案短，防复读死循环吃满窗口）、prompt 预留 16K、并发档位对半下调 |
 
 > 默认题数降采样为 2026-08-14 定稿（迁移成本优化）：mmlu 20/子集 gap 实测 -0.4pt（95% ±2.05pt）、math 200 题 ±5.4pt（用户已确认接受），详见 `eval-sampling-gap-measured` 记忆。
+> MMStar 全量 1500 题实测（Qwen3-VL-4B-Instruct，2026-08-28）：max_tokens=4096 + 遵循模型 generation_config.json 采样参数下 62.6%，约 15 分钟（并发 8，~0.6s/题）；采样偏最难子集（300 题）会显著偏低，多模态精度评测建议 `--limit 0` 全量。
 
 **多数据集**：`--dataset` 支持一次指定多个（空格或逗号分隔），依次评测、每数据集独立结果文件；多数据集时 `--output` 视为目录（写 `{dir}/{dataset}_result.json`），单数据集时仍为文件路径：
 
@@ -197,7 +199,7 @@ model:
 
 dataset_dir: ""                         # 可选，预下载缓存目录
 dataset_hub: "modelscope"               # modelscope 或 huggingface
-dataset: "gpqa_diamond"                 # 可选，gpqa_diamond / mmlu / math_500
+dataset: "gpqa_diamond"                 # 可选，gpqa_diamond / mmlu / math_500 / mm_star（多模态，仅 VLM）
 ```
 
 **步骤 4：运行评测**
@@ -220,7 +222,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 ## 输出
 
-终端打印 + `{dataset}_result.json`（gpqa_diamond → `gpqa_result.json`，mmlu → `mmlu_result.json`，math_500 → `math_500_result.json`）：
+终端打印 + `{dataset}_result.json`（gpqa_diamond → `gpqa_result.json`，mmlu → `mmlu_result.json`，math_500 → `math_500_result.json`，mm_star → `mm_star_result.json`）：
 
 ```
 ============================================================
@@ -266,6 +268,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 - **V1 与 V2 必须使用相同参数**：thinking 模型两侧均 `--limit 30`，普通模型两侧均默认 50 题（同样本可对比，禁止一方 30 一方 50）
 - **非 gpqa 数据集预算**：mmlu 默认 20/子集 = 1140 题（57 子集 × 20），math_500 默认 40/等级 = 200 题。task_runner `--timeout` 按「题数 × 单题耗时（实测 1.5B 模型约 0.2-3s/题）× 1.25 缓冲」估算，如 mmlu 1140 题建议 ≥21600s，math_500 200 题 ≥7200s（timeout 是防挂死上限而非性能预期，国产慢卡 10×~30× 也绝不误杀；--limit 100/--limit 0 取更大样本时相应上调）
+- **mm_star（多模态）预算**：全量 1500 题（6 子集 × 250），max_tokens 硬上限 4096 使单题上界可控。实测 Qwen3-VL-4B-Instruct 并发 8 约 15 分钟（~0.6s/题），慢卡按 10×~30× 上调，`--timeout` 建议 ≥14400s；**多模态精度评测传 `--limit 0` 全量**（采样偏最难子集会显著偏低）。⚠ 前置门控：服务须以支持图像输入方式启动，纯文本 LLM 不适用 mm_star
 - **禁止因耗时长跳过评测**：评测耗时长（尤其 thinking 模型 6h+）是预算内预期，严禁因等待时间长主动跳过、放弃或截断评测；预算内完成即为正常，超时按等待策略重试
 - **执行方式（2026-08 长任务执行协议）**：Bash 工具前台命令有 10 分钟硬上限，超过自动转后台 + 批次控制器 10 分钟无输出判会话失败。**禁止**用 Bash(timeout=大数) 前台阻塞等待评测（旧 Bash timeout(ms) 列已废弃），**禁止** TaskOutput 轮询。评测命令写入任务文件后经 task_runner.py detached 启动（`--timeout <max_timeout>`），Claude 每 8 分钟短轮询状态文件，见下方「长任务执行协议」三步模板
 - 安全网保障：预算调大不会让 runaway 无限拖 —— fast_gpqa max_tokens cap（防线1）锁死复读生成窗口；eval_wrapper 收尾停滞看门狗照杀（防线3），生成中停滞仅提示不杀（慢≠死），给足预算不会误杀正常长推理

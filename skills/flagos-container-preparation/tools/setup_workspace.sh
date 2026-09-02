@@ -297,6 +297,8 @@ SCRIPT_MAP=(
     "shared/chip_spec.yaml:scripts/chip_spec.yaml"
     # 越位执行数据清理工具
     "shared/rollback_overflow.py:scripts/rollback_overflow.py"
+    # 独立版本探测（报告现场抓取版本，不依赖 context 传递）
+    "shared/probe_versions.py:scripts/probe_versions.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do

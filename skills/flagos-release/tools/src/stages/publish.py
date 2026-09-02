@@ -1300,14 +1300,34 @@ except Exception as e:
         vars["weights_local_path"] = canonical_path
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
-        # 强制 docker run 镜像与 docker pull 同源（image_harbor）：
-        # 历史 context 残留的基础镜像名曾导致 README 拉取/运行镜像不一致
-        if vars["container_run_cmd"] and image_harbor and image_harbor != "N/A":
+        # 强制 docker run 镜像与 docker pull 同源：README 里 docker run 必须写入具体镜像名，
+        # 绝不能把 {{IMAGE}} 占位符或历史基础镜像名漏进 README。
+        # 之前 bug：image_harbor 取到 "N/A" 时整段替换被跳过 → {{IMAGE}} 原样进 README。
+        # 现改为多级兜底解析真实镜像名，任一非空即用；彻底解析不到才报错阻断（不静默留占位符）。
+        if vars["container_run_cmd"]:
             import re
+            resolved_image = next(
+                (v for v in (
+                    image_harbor if image_harbor and image_harbor != "N/A" else None,
+                    model_info.image_harbor_path,
+                    self.config.publish.harbor_path,
+                    self.config.publish.existing_harbor_image,
+                    self.config.publish.image_target_tag,
+                ) if v),
+                "",
+            )
+            if resolved_image:
+                if '{{IMAGE}}' in vars["container_run_cmd"]:
+                    vars["container_run_cmd"] = vars["container_run_cmd"].replace('{{IMAGE}}', resolved_image)
+                elif re.search(r'harbor\S+', vars["container_run_cmd"]):
+                    vars["container_run_cmd"] = re.sub(r'harbor\S+', resolved_image, vars["container_run_cmd"], count=1)
+            # 兜底解析仍失败 → 占位符会漏进 README，属发布数据缺失，明确阻断而非静默产出坏 README
             if '{{IMAGE}}' in vars["container_run_cmd"]:
-                vars["container_run_cmd"] = vars["container_run_cmd"].replace('{{IMAGE}}', image_harbor)
-            else:
-                vars["container_run_cmd"] = re.sub(r'harbor\S+', image_harbor, vars["container_run_cmd"], count=1)
+                raise RuntimeError(
+                    "README 生成失败：docker run 命令无法确定镜像名（image_harbor_path / "
+                    "harbor_path / existing_harbor_image / image_target_tag 均为空），"
+                    "拒绝写出含 {{IMAGE}} 占位符的 README。请检查镜像打 tag / 推送是否成功。"
+                )
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
         vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 
