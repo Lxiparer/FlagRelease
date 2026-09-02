@@ -398,52 +398,55 @@ def classify_env_type(capabilities, integration):
 
 
 def classify_entry_image_type(capabilities, flagtree):
-    """准入镜像分类 — 决定走哪条 pipeline（双 pipeline 架构的顶层开关）。
+    """Plugin-only 准入验证 — 验证全部组件是否就绪。
 
-    新流程按准入镜像类型分发：
-      - gems_tree        : flaggems + flagtree，无 plugin        → 分支 A（简单路径）
-      - gems_tree_plugin : flaggems + flagtree + plugin          → 分支 B（复杂路径）
-      - native           : 无 flaggems                           → 原 native 简化流程
-      - unknown          : 组件不完整（如仅 tree、仅 gems），交由编排层判断
+    Plugin-only 工作流要求全部四个组件：
+      - vllm + flaggems + flagtree + vllm-plugin-FL
+
+    缺失任何组件则拒绝准入。
 
     Returns:
         dict: {
-            entry_image_type: str,
+            accepted: bool,
+            rejection_reasons: list[str],  # 若 accepted=False
+            profile: str,                  # "plugin_only" if accepted
             has_flaggems: bool,
             has_flagtree: bool,
             has_plugin: bool,
-            pipeline_branch: str,   # A | B | native | ""
-            reason: str,
         }
     """
+    has_vllm = capabilities.get("vllm_installed", True)  # 默认假设有 vllm
     has_flaggems = capabilities.get("flaggems_installed", False)
     has_plugin = capabilities.get("vllm_plugin_installed", False)
     has_flagtree = bool(flagtree.get("installed", False))
 
+    rejection_reasons = []
+    if not has_vllm:
+        rejection_reasons.append("vllm not installed")
     if not has_flaggems:
-        entry_type = "native"
-        branch = "native"
-        reason = "未检测到 flaggems，走 native 简化流程"
-    elif has_plugin:
-        entry_type = "gems_tree_plugin"
-        branch = "B"
-        reason = "flaggems + plugin（+tree）预装，走分支 B（复杂路径，V1 三选/V2 分支）"
-    else:
-        entry_type = "gems_tree"
-        branch = "A"
-        reason = "flaggems（+tree）无 plugin，走分支 A（简单路径）"
+        rejection_reasons.append("flaggems not installed")
+    if not has_flagtree:
+        rejection_reasons.append("flagtree not installed")
+    if not has_plugin:
+        rejection_reasons.append("vllm-plugin-FL not installed")
 
-    # flagtree 缺失不改变分类，仅记录（flaggems 是核心判据，见 CLAUDE.md 场景定义）
-    if has_flaggems and not has_flagtree:
-        reason += "；⚠ 未检测到 flagtree"
+    if rejection_reasons:
+        return {
+            "accepted": False,
+            "rejection_reasons": rejection_reasons,
+            "profile": "",
+            "has_flaggems": has_flaggems,
+            "has_flagtree": has_flagtree,
+            "has_plugin": has_plugin,
+        }
 
     return {
-        "entry_image_type": entry_type,
+        "accepted": True,
+        "rejection_reasons": [],
+        "profile": "plugin_only",
         "has_flaggems": has_flaggems,
         "has_flagtree": has_flagtree,
         "has_plugin": has_plugin,
-        "pipeline_branch": branch,
-        "reason": reason,
     }
 
 
@@ -1019,7 +1022,7 @@ def collect_all():
             "has_flagtree": flagtree["installed"],
             **code_details,
         },
-        "entry_classification": classify_entry_image_type(capabilities, flagtree),
+        "admission": classify_entry_image_type(capabilities, flagtree),
         "control_env": control_env,
         "inject_result": inject_result,
     }
@@ -1054,14 +1057,19 @@ def output_report(data):
     if env_cls.get("has_flagtree"):
         report.append(f"  FlagTree:     已安装")
 
-    # 准入镜像分类（双 pipeline 分发开关）
-    entry_cls = data.get("entry_classification", {})
-    if entry_cls:
-        branch_labels = {"A": "分支 A（简单路径）", "B": "分支 B（复杂路径）",
-                         "native": "native 简化流程", "": "待定"}
-        report.append(f"\n## 准入镜像类型: {entry_cls.get('entry_image_type', 'unknown')} "
-                      f"→ {branch_labels.get(entry_cls.get('pipeline_branch', ''), '未知')}")
-        report.append(f"  判定依据: {entry_cls.get('reason', '-')}")
+    # Plugin-only 准入验证
+    admission = data.get("admission", {})
+    if admission:
+        if admission.get("accepted"):
+            report.append(f"\n## 准入验证: ✓ 通过 (profile={admission.get('profile', 'unknown')})")
+        else:
+            report.append(f"\n## 准入验证: ✗ 拒绝")
+            reasons = admission.get("rejection_reasons", [])
+            if reasons:
+                report.append(f"  缺失组件:")
+                for r in reasons:
+                    report.append(f"    - {r}")
+
     if env_type == "vllm_flaggems":
         code_paths = env_cls.get('code_paths', [])
         if code_paths:

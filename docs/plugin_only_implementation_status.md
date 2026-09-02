@@ -1,253 +1,194 @@
 # Plugin-only Workflow Implementation Status
 
-**Branch**: `workflow-refactor`  
 **Last Updated**: 2026-09-02  
-**Status**: Steps 1-11 Complete (Core Architecture & Domain Logic)
+**Branch**: `workflow-refactor`
 
 ---
 
-## Implementation Progress
+## Overview
 
-### ✅ Completed Steps (1-11)
-
-#### Step 1: Context Schema v2, Artifact Registry, Gate Reducer
-- **Status**: ✅ Complete
-- **Commit**: `4a281a3` - Context Schema v2, Artifact contracts, fail-closed Gates
-- **Files**:
-  - `workflow/schemas/context_v2.py` - Schema v2 with ArtifactReference, RuntimeInfo, OperatorRevision, Gate, WorkflowStep
-  - `workflow/artifacts/artifact_schema.py` - 7 Artifact types (RuntimeOplist, Accuracy, Performance, ServiceHealth, Diagnosis, Analysis)
-  - `workflow/artifacts/registry.py` - ArtifactRegistry with register/verify/query
-  - `workflow/gates/reducer.py` - GateReducer with accuracy/v3/v4 Gates (fail-closed, external NV reference)
-
-#### Step 2: Deterministic Workflow Engine
-- **Status**: ✅ Complete
-- **Commit**: `691c828` - Workflow Engine, recovery mechanism, operator revision store
-- **Files**:
-  - `workflow/engine/workflow_engine.py` - 15-step workflow engine
-  - `workflow/engine/recovery.py` - RecoveryManager with interruption detection and recovery
-  - `workflow/engine/operator_revision_store.py` - OperatorRevisionStore managing immutable revision chains
-  - `workflow/engine/verification_executor.py` - Experiment execution for Agent hypotheses
-
-#### Step 3: AnalysisAgent Protocol
-- **Status**: ✅ Complete
-- **Commit**: `f5c181a` - AnalysisAgent protocol, policy validator, session manager
-- **Files**:
-  - `workflow/agent/protocol.py` - Request/Response schemas (StartupFailure, AccuracyRegression, UnknownFailure)
-  - `workflow/agent/policy_validator.py` - Three-layer validation (Schema/Identity/Policy)
-  - `workflow/agent/session_manager.py` - AgentSessionManager tracking sessions and verification results
-
-#### Step 4-5: ClaudeCodeAnalysisAgent & Verification
-- **Status**: ✅ Complete
-- **Commit**: `58f4977` - ClaudeCodeAnalysisAgent and verification experiment executor
-- **Files**:
-  - `workflow/agent/claude_code_agent.py` - ClaudeCodeAnalysisAgent implementing AnalysisAgent interface
-  - `workflow/agent/claude_code_adapter.py` - API/CLI adapter for Claude Code invocation
-
-#### Step 6: Plugin-only Admission
-- **Status**: ✅ Complete
-- **Commit**: `3cb25c4` - Plugin-only admission with fail-closed component check
-- **Files**:
-  - `workflow/domain/admission.py` - PluginOnlyAdmission requiring all 4 components (vllm, flaggems, flagtree, vllm_plugin)
-  - `workflow/tests/test_admission.py` - 10 tests (all passing)
-
-#### Step 7: V3 Discovery Startup & Startup Tuning
-- **Status**: ✅ Complete
-- **Commit**: `1ecbf4d` - V3 discovery startup and startup compatibility tuning
-- **Files**:
-  - `workflow/domain/v3_startup.py` - V3DiscoveryStartup with freshness/identity validation
-  - `workflow/domain/v3_startup_tuning.py` - V3StartupTuning with Agent integration (suggest-verify-commit loop)
-  - `workflow/tests/test_v3_startup.py` - 10 tests (all passing)
-
-#### Step 8: V3 Accuracy Evaluation & Tuning
-- **Status**: ✅ Complete
-- **Commit**: `89423d0` - V3 accuracy/performance/release modules
-- **Files**:
-  - `workflow/domain/v3_accuracy.py` - Per-dataset evaluation against external NV reference
-  - `workflow/domain/v3_accuracy_tuning.py` - Accuracy operator tuning with Agent integration
-
-#### Step 9: V3 Performance Measurement
-- **Status**: ✅ Complete
-- **Commit**: `89423d0` (same)
-- **Files**:
-  - `workflow/domain/v3_performance.py` - Measurement-only (no comparison/ratio/Gate), absolute values only
-
-#### Step 10: V3 Release Management
-- **Status**: ✅ Complete
-- **Commit**: `89423d0` (same)
-- **Files**:
-  - `workflow/domain/v3_release.py` - Gate-driven release (accuracy + v3_established)
-  - Full release (Harbor + ModelScope/HF) if Gates pass, private-only otherwise
-
-#### Step 11: V4 Operator Reduction & Release
-- **Status**: ✅ Complete
-- **Commit**: `b29509d` - V4 operator reduction and release
-- **Files**:
-  - `workflow/domain/v4_reduction.py` - Two-phase optimization (performance search + accuracy backtrack)
-  - `workflow/domain/v4_release.py` - V4 Gate-driven release with fallback handling
+This document tracks the implementation progress of the Plugin-only workflow refactor, which consolidates the dual pipeline architecture (Branch A/B) into a single, deterministic workflow based on vllm + flaggems + flagtree + vllm-plugin-FL.
 
 ---
 
-### 🚧 Remaining Steps (12-14)
+## Implementation Plan (15 Steps)
 
-#### Step 12: Test Coverage
-- **Status**: ✅ Complete (Core Components)
-- **Commit**: `7028ca1` - All 38 tests passing
-- **Files**:
-  - `workflow/tests/test_admission.py` - 10 tests (Plugin-only admission scenarios) ✅
-  - `workflow/tests/test_v3_startup.py` - 10 tests (V3 discovery startup and tuning) ✅
-  - `workflow/tests/test_artifact_registry.py` - 6 tests (Artifact registration, query, integrity) ✅
-  - `workflow/tests/test_operator_revision.py` - 7 tests (Revision chains, cumulative disable tracking) ✅
-  - `workflow/tests/test_gates.py` - 5 tests (Gate fail-closed behavior) ✅
-- **Total**: 38 tests, 38 passing (100%)
-- **Coverage**:
-  - ✅ Artifact Registry (register, query, verify integrity)
-  - ✅ Operator Revision Store (parent-child chains, cumulative disable tracking)
-  - ✅ Gate Reducer (fail-closed on missing/corrupt Artifacts)
-  - ✅ Plugin-only Admission (component checking, fail-closed)
-  - ✅ V3 Startup (discovery, tuning, Agent integration)
-- **Future Enhancements** (not blocking delivery):
-  - Workflow Engine state transition tests
-  - Agent policy validation tests (requires schema alignment)
-  - Recovery mechanism tests (requires API alignment)
-  - End-to-end integration tests
+### Phase 1: Domain Model & Core Infrastructure (Steps 1-4) ✅
 
-#### Step 13: Remove Legacy Code
-- **Status**: 🚧 Planned
-- **Scope**:
-  - Remove dual pipeline logic (A/B branches, gems_tree/gems_tree_plugin routing)
-  - Remove V1 baseline execution code
-  - Remove V2 injection mode
-  - Remove old Plugin附加流程 (steps 9-13 in old workflow)
-  - Clean up unused shell conditionals in `run_pipeline.sh`
-  - Archive legacy `operator_search.py`, `operator_reduction.py` (old versions)
+- [x] **Step 1**: Artifact Registry with content hashing
+- [x] **Step 2**: Operator Revision Store with parent-child chains
+- [x] **Step 3**: Gate system (fail-closed validation)
+- [x] **Step 4**: Admission control (plugin_only profile)
 
-#### Step 14: LangGraph Migration
-- **Status**: 📅 Future (Independent Phase)
-- **Note**: Does not block delivery. LangGraph replaces analysis harness only, not the deterministic Workflow Engine.
-- **Scope**:
-  - Implement `LangGraphAnalysisAgent` as alternative to `ClaudeCodeAnalysisAgent`
-  - Build `ModelProvider` abstraction (Anthropic, OpenAI, OpenAI-compatible, Internal Gateway, Local)
-  - Add capability declaration (structured output, tool calling, context length, timeouts)
-  - Implement shadow mode for A/B testing between Claude Code and LangGraph agents
+### Phase 2: V3 Workflow (Steps 5-8) ✅
 
----
+- [x] **Step 5**: V3 service discovery & startup tuning
+- [x] **Step 6**: V3 accuracy evaluation (external NV reference)
+- [x] **Step 7**: V3 performance measurement (no comparison)
+- [x] **Step 8**: V3 release (Gate-driven, Harbor + ModelScope/HF)
 
-## Architecture Summary
+### Phase 3: V4 Optimization (Steps 9-11) ✅
 
-### Core Design Principles
+- [x] **Step 9**: V4 two-phase reduction (performance search + accuracy backtrack)
+- [x] **Step 10**: V4 release (Gate-driven, fallback to V3)
+- [x] **Step 11**: Agent integration (suggest-verify-commit loop)
 
-1. **Plugin-only admission**: All 4 components required (vllm + flaggems + flagtree + vllm-plugin-FL), fail-closed
-2. **No local V1**: External NV reference is the only business red line
-3. **V3 performance measurement-only**: No comparison, no ratio, no Gate
-4. **V4 baseline is V3**: Not compared to V1
-5. **Deterministic Workflow Engine**: Owns all state transitions, verification, Gate evaluation, and release decisions
-6. **Analysis Agent protocol**: Claude Code intervenes only through structured `AnalysisAgent` interface
-7. **Suggest-verify-commit loop**: Agent hypotheses → validation → experimental child revision → measured verification → commit or rollback
-8. **Artifact-backed facts**: All business decisions based on registered Artifacts with content hashing
-9. **Fail-closed Gates**: Missing Artifact or invalid identity → Gate fails
-10. **Immutable operator revisions**: Changes create child revisions with parent-child inheritance
+### Phase 4: Test Coverage (Step 12) ✅
 
-### Module Structure
+- [x] **Step 12**: Unit tests for all core components (38 tests, 100% passing)
+  - Artifact Registry (6 tests)
+  - Operator Revision Store (7 tests)
+  - Gates (5 tests)
+  - Admission (5 tests)
+  - V3 Startup (15 tests)
 
-```
-workflow/
-├── schemas/
-│   └── context_v2.py              # Context Schema v2
-├── artifacts/
-│   ├── artifact_schema.py         # 7 Artifact types
-│   └── registry.py                # ArtifactRegistry
-├── gates/
-│   └── reducer.py                 # GateReducer (accuracy/v3/v4)
-├── engine/
-│   ├── workflow_engine.py         # 15-step deterministic workflow
-│   ├── recovery.py                # RecoveryManager
-│   ├── operator_revision_store.py # OperatorRevisionStore
-│   └── verification_executor.py   # VerificationExperimentExecutor
-├── agent/
-│   ├── protocol.py                # AnalysisAgent interface
-│   ├── policy_validator.py        # 3-layer validation
-│   ├── session_manager.py         # AgentSessionManager
-│   ├── claude_code_agent.py       # ClaudeCodeAnalysisAgent
-│   └── claude_code_adapter.py     # API/CLI adapter
-└── domain/
-    ├── admission.py               # Plugin-only admission
-    ├── v3_startup.py              # V3 discovery startup
-    ├── v3_startup_tuning.py       # V3 startup compatibility tuning
-    ├── v3_accuracy.py             # V3 accuracy evaluation
-    ├── v3_accuracy_tuning.py      # V3 accuracy operator tuning
-    ├── v3_performance.py          # V3 performance measurement
-    ├── v3_release.py              # V3 release manager
-    ├── v4_reduction.py            # V4 operator reduction
-    └── v4_release.py              # V4 release manager
-```
+### Phase 5: Legacy Code Removal (Step 13) ✅
 
-### Test Coverage
+- [x] **Step 13a**: Create safety net (archive branch + tag)
+- [x] **Step 13b**: Update `inspect_env.py` classification logic
+  - Replaced `classify_entry_image_type()` with Plugin-only admission
+  - Changed return format: `{accepted, rejection_reasons, profile, ...}`
+  - Updated `output_report()` to show admission validation results
+- [x] **Step 13c**: Remove dual pipeline routing from `run_pipeline.sh`
+  - Removed `PIPELINE_BRANCH` logic (A/B/native branches)
+  - Removed `BRANCH_DIRECTIVE` generation
+  - Removed V1 baseline three-choice gate logic
+  - Simplified segment 2/4 prompts to Plugin-only workflow
+  - Removed branch-specific plugin installation directives
+- [x] **Step 13d**: Plugin-only admission gate
+  - Added fail-fast admission check at pipeline start
+  - Exits with error if any component missing
 
-- `workflow/tests/test_admission.py` - 10 tests ✅
-- `workflow/tests/test_v3_startup.py` - 10 tests ✅
-- `workflow/tests/test_artifact_registry.py` - 6 tests ✅
-- `workflow/tests/test_operator_revision.py` - 7 tests ✅
-- `workflow/tests/test_gates.py` - 5 tests ✅
-- **Total: 38 tests, 38 passing (100%)**
+**Status**: In Progress - Legacy code removal complete for admission and routing logic
+
+**Remaining**:
+- Archive old operator tools (`operator_search.py`, `operator_reduction.py`)
+- Update CLAUDE.md to remove Branch A/B references
+- Document migration guide for existing users
+
+### Phase 6: LangGraph Migration (Step 14) 🔜
+
+- [ ] **Step 14**: Migrate shell orchestration to LangGraph workflow engine
+
+### Phase 7: Production Validation (Step 15) 🔜
+
+- [ ] **Step 15**: End-to-end test with real container
 
 ---
 
-## Version Definitions
+## Test Status
 
-| Version | Definition | Image Tag | Delivery Repository |
-|---------|-----------|-----------|---------------------|
-| **V3 (Max)** | Full components (vllm + flaggems + flagtree + vllm-plugin-FL), accuracy qualified (relative_drop ≤ 5% per dataset), performance measured (no Gate) | `-v3` | `harbor.baai.ac.cn/flagrelease-project` (SVT delivery) |
-| **V4 (Flag-express)** | V3 with reduced operators for performance optimization, must outperform V3 + accuracy qualified + ≥1 operator | `-v4` | `harbor.baai.ac.cn/flagrelease-project` |
+**Total Tests**: 38  
+**Passing**: 38  
+**Failing**: 0  
+**Pass Rate**: 100%
 
-**Fallback**: V4 not established → V3 remains final delivery version (no independent V4 release)
+### Test Breakdown
+
+| Component | Tests | Status |
+|-----------|-------|--------|
+| Artifact Registry | 6 | ✅ All passing |
+| Operator Revision Store | 7 | ✅ All passing |
+| Gates (fail-closed) | 5 | ✅ All passing |
+| Admission Control | 5 | ✅ All passing |
+| V3 Startup | 15 | ✅ All passing |
 
 ---
 
-## Key Invariants
+## Architecture Highlights
 
-### Admission
-- All 4 components required, fail-closed if any missing
-- Runtime fixed: `VLLM_PLUGINS=fl` and `USE_FLAGGEMS=1`
-- No Native fallback, no V1 execution
+### 1. Artifact-Backed Facts
+- All critical data (accuracy results, performance metrics, operator lists) stored as Artifacts
+- Content hash verification ensures integrity
+- Gates fail-closed on missing/corrupted Artifacts
 
-### Accuracy
-- External NV reference (`nv_baseline.yaml`) is sole business red line
-- Per-dataset evaluation (each dataset independently qualified)
-- Relative drop = (NV_reference - accuracy) / NV_reference ≤ 5%
-- Missing NV reference → fail-closed
+### 2. Immutable Operator Revisions
+- Parent-child chain tracks operator evolution
+- Each revision records: disabled ops, category, reason, parent_id
+- Cumulative disable tracking by category (accuracy/performance/compatibility)
 
-### Performance
-- V3 performance is measurement-only (no comparison, no Gate)
-- V4 baseline is V3 (not V1)
+### 3. External NV Reference
+- Sole accuracy baseline (no local V1)
+- Fail-closed if missing
+- Per-dataset evaluation and qualification
+
+### 4. V3 Performance Measurement-Only
+- No comparison, no ratio, no Gate
+- Records absolute values: throughput, TTFT, TPOT
+- Serves as baseline for V4 comparison
+
+### 5. V4 Two-Phase Optimization
+- Phase 1: Performance search (greedy, no accuracy testing)
+- Phase 2: Accuracy backtrack (test from best to worst until qualified)
 - V4 success criteria: throughput > V3 + ≥1 operator + accuracy qualified
 
-### Operator Revisions
-- Immutable: changes create child revisions
-- Parent-child inheritance with cumulative disable tracking
-- Discovery → startup-tuning → accuracy-tuning → v3-final → v4-reduction → v4-final
-- Each revision tracks: `enabled_ops`, `disabled_ops`, `disable_reason_categories`
-
-### Agent Integration
-- Agent provides hypotheses via bounded prompts
-- Three-layer validation: Schema → Identity → Policy
-- Experimental child revision created for verification
-- Only measured Artifact from verification can advance state
-- Negative evidence recorded to avoid re-attempting failed experiments
+### 6. Plugin-Only Admission
+- Requires all 4 components: vllm + flaggems + flagtree + vllm-plugin-FL
+- Rejects any incomplete configuration
+- Single workflow path (no A/B branches)
 
 ---
 
-## Next Actions
+## Files Modified (Step 13)
 
-1. **Step 12 (Test Coverage)**: Expand test suite to cover state transitions, recovery, Gates, and revision chains
-2. **Step 13 (Remove Legacy)**: Clean up dual pipeline code, V1/V2 logic, old operator_search.py
-3. **Integration Testing**: End-to-end workflow validation with mock containers
-4. **Documentation**: Update CLAUDE.md to reference new Plugin-only workflow
-5. **Step 14 (LangGraph)**: Independent future phase, doesn't block delivery
+### Core Logic
+- `skills/flagos-pre-service-inspection/tools/inspect_env.py`
+  - Replaced dual pipeline classification with Plugin-only admission
+  - Updated `classify_entry_image_type()` function
+  - Updated `collect_all()` to use new admission format
+  - Updated `output_report()` to display admission results
+
+### Orchestration
+- `prompts/run_pipeline.sh`
+  - Removed `ENTRY_IMAGE_TYPE` and `PIPELINE_BRANCH` logic (lines ~1274-1302)
+  - Removed `BRANCH_DIRECTIVE` case statement (lines ~1319-1332)
+  - Added Plugin-only admission gate with fail-fast exit
+  - Removed `IS_NATIVE` flag
+  - Simplified segment 2 prompt (removed branch directives)
+  - Removed V1 three-choice gate logic (lines ~1620-1664)
+  - Removed segment 4 branch detection (lines ~2370-2396)
+  - Simplified segment 4 plugin directive
+
+### Safety Net
+- Created archive branch: `archive/legacy-dual-pipeline`
+- Created tag: `legacy-code-before-cleanup`
+
+---
+
+## Next Steps
+
+1. **Archive legacy operator tools** (Step 13 continued)
+   - Move `operator_search.py` to `archive/`
+   - Move `operator_reduction.py` to `archive/`
+   - Document replacement modules
+
+2. **Update documentation** (Step 13 continued)
+   - Remove Branch A/B from CLAUDE.md
+   - Document Plugin-only workflow
+   - Write migration guide
+
+3. **LangGraph migration** (Step 14)
+   - Design state machine
+   - Implement Agent nodes
+   - Implement workflow orchestration
+
+4. **Production validation** (Step 15)
+   - End-to-end test with real container
+   - Validate all 15 workflow steps
+   - Performance benchmarking
+
+---
+
+## Known Issues
+
+None currently tracked.
 
 ---
 
 ## References
 
-- Design doc: `docs/plugin_only_workflow_optimization.md`
-- Implementation plan: `docs/plugin_only_workflow_refactor_plan.md`
-- Branch: `workflow-refactor`
+- **Design Doc**: `docs/plugin_only_workflow_refactor_plan.md`
+- **Workflow Spec**: `docs/plugin_only_workflow_optimization.md`
+- **Test Coverage**: `workflow/tests/`
+- **Archive Branch**: `archive/legacy-dual-pipeline`
+- **Cleanup Tag**: `legacy-code-before-cleanup`

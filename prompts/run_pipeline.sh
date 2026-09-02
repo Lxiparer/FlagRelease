@@ -1271,65 +1271,58 @@ else:
     fi
 fi
 
-# ===== 双 pipeline 路由：读取段1 inspect_env 产出的 entry_image_type =====
-# 分支 A (gems_tree): 简单路径 — V1裸启动 → V2代码注入 → V3切plugin → V4减算子
-# 分支 B (gems_tree_plugin): 复杂路径 — V1三选 → V2(2.1/2.2) → V3(3.1/3.2) → V4
-# 分类是确定性的（inspect_env.classify_entry_image_type），此处只读结果不做判断。
-ENTRY_IMAGE_TYPE=$(python3 -c "
+# ===== Plugin-only 准入验证：读取段1 inspect_env 产出的 admission 结果 =====
+# Plugin-only 要求全部四个组件：vllm + flaggems + flagtree + vllm-plugin-FL
+# 缺失任何组件则拒绝准入并终止流程
+ADMISSION_ACCEPTED=$(python3 -c "
 import yaml
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
-wf = ctx.get('workflow', {})
-# 优先读 workflow.entry_image_type；回退到 inspect_env 的 entry_classification
-et = wf.get('entry_image_type', '')
-if not et:
-    et = ctx.get('entry_classification', {}).get('entry_image_type', '')
-print(et or 'unknown')
-" 2>/dev/null) || ENTRY_IMAGE_TYPE="unknown"
+admission = ctx.get('admission', {})
+print(str(admission.get('accepted', False)))
+" 2>/dev/null) || ADMISSION_ACCEPTED="False"
 
-case "${ENTRY_IMAGE_TYPE}" in
-    gems_tree)         PIPELINE_BRANCH="A" ;;
-    gems_tree_plugin)  PIPELINE_BRANCH="B" ;;
-    native)            PIPELINE_BRANCH="native" ;;
-    *)                 PIPELINE_BRANCH="" ;;
-esac
-echo "══════════════════════════════════════════════════════════════"
-echo "  双 pipeline 路由: entry_image_type=${ENTRY_IMAGE_TYPE} → 分支 ${PIPELINE_BRANCH:-未知}"
-echo "══════════════════════════════════════════════════════════════"
-# 持久化分支决策到 context（供段2/3 及报告消费）
-if [ -n "${PIPELINE_BRANCH}" ]; then
-    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py --set workflow.pipeline_branch='${PIPELINE_BRANCH}' --json" 2>/dev/null || true
+if [ "${ADMISSION_ACCEPTED}" != "True" ]; then
+    echo "══════════════════════════════════════════════════════════════"
+    echo "  ✗ Plugin-only 准入验证失败"
+    echo "══════════════════════════════════════════════════════════════"
+    REJECTION_REASONS=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+reasons = ctx.get('admission', {}).get('rejection_reasons', [])
+for r in reasons:
+    print(f'  - {r}')
+" 2>/dev/null)
+    echo "  缺失组件:"
+    echo "${REJECTION_REASONS}"
+    echo ""
+    echo "  Plugin-only 工作流要求全部四个组件："
+    echo "    1. vllm"
+    echo "    2. flaggems"
+    echo "    3. flagtree"
+    echo "    4. vllm-plugin-FL"
+    echo ""
+    echo "  流程终止"
+    exit 1
 fi
 
+echo "══════════════════════════════════════════════════════════════"
+echo "  ✓ Plugin-only 准入验证通过"
+echo "══════════════════════════════════════════════════════════════"
+
 SKIP_SEG2=false
-IS_NATIVE=false
 if [ "${SERVICE_OK}" = "False" ]; then
-    echo "⚠ service_ok=false（FlagGems 不可用），跳过段2（步骤4-7），直接进入段3发布"
+    echo "⚠ service_ok=false（Plugin 不可用），跳过段2（步骤4-7），直接进入段3发布"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 跳过：service_ok=false"
     SKIP_SEG2=true
 fi
-if [ "${SEG_ENV}" = "native" ]; then
-    IS_NATIVE=true
-    echo "ℹ env_type=native（纯原生环境），段2仅执行步骤4/6，跳过步骤5/7（无 FlagGems 算子调优）"
 fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
-# 双 pipeline 分支指令：据段1路由结果注入，指引下游会话按对应 pipeline 定义执行
-case "${PIPELINE_BRANCH}" in
-    A)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 A（gems_tree 简单路径）**：本次准入镜像为 flaggems+tree 无 plugin。按 CLAUDE.md 分支 A 工作流执行：V1(裸启动基线) → V2(代码注入全量算子) → V3(切 plugin 白名单) → V4(减算子提性能)。精度基线优先本地 V1，缺失时用 nv_baseline.yaml 兜底；性能基线在 V1 完全不可用时按 CLAUDE.md 合成基线规则（V2 初始性能 ×1.05，synthesize_perf_baseline.py）兜底。"
-        ;;
-    B)
-        BRANCH_DIRECTIVE="**PIPELINE 分支 B（gems_tree_plugin 复杂路径）**：本次准入镜像为 flaggems+tree+plugin。按新流程 v3.1 工作流执行（共4版本）：V1(步骤1-3,三选baseline_selector.py确定v1.1/v1.2/v1.3/none+V1精度观察+性能基线) → V2(步骤4-5, 2.1代码注入精度+性能调优 或 2.2仅精度;精度达标发harbor+MS/HF) → V3(步骤6-7, 3.1清注入或3.2免清+plugin全量+仅精度;达标发flagrelease-project交付) → V4(步骤8-9,随机选1~3算子只开+≤2轮;达标发harbor+更新README)。精度基线统一用 NV（nv_baseline.yaml），性能基线 V1 实测或 V2.2 路径下 V2 首测×1.05。"
-        ;;
-    native)
-        BRANCH_DIRECTIVE="**PIPELINE native 简化路径**：本次准入镜像无 flaggems，仅执行精度/性能评测，不做算子调优与多版本发布。"
-        ;;
-    *)
-        BRANCH_DIRECTIVE=""
-        ;;
-esac
+# Plugin-only 工作流：V3(Primary) → V4(Optimized)
+# 不再需要分支路由，所有模型走统一 Plugin-only 路径
 
 # ===== 评测时间预算计算（2026-08-10）：解决 thinking 模型评测必超时问题 =====
 # 背景：thinking 模型（QwQ/DeepSeek-R1 等）正常评测 7-10h，原 max-timeout 写死
@@ -1416,14 +1409,17 @@ for _ds in ${DATASET_LIST}; do
 - **${_ds}**：V1 输出 /flagos-workspace/results/${_PREF}_native.json，V2 输出 /flagos-workspace/results/${_PREF}_flagos.json；任务文件 eval_v1_${_PREF}.cmd / eval_v2_${_PREF}.cmd（state/log 同命名）；评测命令：python3 fast_gpqa.py --config fast_gpqa_config.yaml --dataset ${_ds} ${_LIMIT_ARGS}--output <输出路径>；判定：accuracy_compare.py --v1 <V1结果> --v2 <V2结果> --metric ${_ds} --output /flagos-workspace/results/accuracy_compare_${_PREF}.json"
 done
 
-PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}，pipeline分支: ${PIPELINE_BRANCH:-未定}
+PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
 
-${BRANCH_DIRECTIVE}
+**Plugin-only 工作流**：本次准入镜像包含全部四个组件（vllm + flaggems + flagtree + vllm-plugin-FL）。
+按新工作流执行：V3(Primary，全量算子) → V4(Optimized，减算子提性能)。
+精度基线：外部 NV 参考（nv_baseline.yaml），无本地 V1。
+性能基线：V3 实测值作为 V4 对比基准。
 
 **变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
-按 CLAUDE.md 工作流定义执行步骤4精度评测、步骤5精度算子调优（如需）、步骤6性能评测、步骤7性能算子调优（如需）。
+按 Plugin-only 工作流定义执行步骤4精度评测、步骤5精度算子调优（如需）、步骤6性能评测、步骤7性能算子调优（如需）。
 
 **前段状态（段1已完成，无需验证）**：
 - 步骤1/2/3 已在上一段全部完成，容器 ${SEG_CTR} 已就绪，工具脚本已部署
@@ -1621,46 +1617,10 @@ echo "  容器名: ${SEG_CTR}"
 # 段2末确定性兜底刷新报告
 regenerate_report "${SEG_CTR}"
 
-# ===== 分支 B V1 三选强制闸门：确保 baseline_selector.py 真实执行过，不信任 Claude 臆断的 v1_variant =====
-# 动机：baseline_selector.py 全程无 shell 强制调用点，Claude 可能自起服务测一下就把
-# baseline.v1_variant/v1_available 写成臆断值，导致下游 V2 分支(2.1/2.2)、合成基线触发、
-# 精度基线回退 NV 全部建立在未经三选验证的判据上。v1_gate.py 只认 v1_baseline_selection.json
-# 里 baseline_selector 产出的 attempts[] 真实痕迹(每变体 service_ok/smoke_passed)，
-# needed=缺真实三选产物 → shell 兜底直调 baseline_selector.py。仅分支 B 需要三选。
-if [ "${PIPELINE_BRANCH:-}" = "B" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
-    RES_DIR_V1="/data/flagos-workspace/${MODEL}/results"
-    V1_SELECTION="${RES_DIR_V1}/v1_baseline_selection.json"
-    V1_GATE=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE="needed"
-    if [ "$V1_GATE" = "ok" ]; then
-        echo "  ✓ V1 三选闸门：baseline_selector.py 已真实执行过（v1_baseline_selection.json 含完整 attempts 痕迹）"
-    else
-        echo "  ⚠ V1 三选闸门：缺 baseline_selector 真实产物（Claude 疑似臆断 v1_variant）→ shell 兜底直调三选状态机..."
-        # 取端口与模型名供三选启动服务/冒烟使用（一次 docker exec 读全，read_context 不含 port）
-        V1_META=$(docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
-import yaml
-try:
-    with open('/flagos-workspace/shared/context.yaml') as f:
-        c = yaml.safe_load(f)
-    print(str(c.get('service',{}).get('port',8000)) + '|' + c.get('model',{}).get('name',''))
-except: print('8000|')
-\"" 2>/dev/null) || V1_META="8000|"
-        V1_PORT=$(echo "$V1_META" | cut -d'|' -f1); V1_PORT="${V1_PORT:-8000}"
-        V1_MODEL_NAME=$(echo "$V1_META" | cut -d'|' -f2-)
-        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/baseline_selector.py \
-            --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
-            --vendor-plugin auto \
-            --port ${V1_PORT} \
-            --model-name '${V1_MODEL_NAME}' \
-            --output /flagos-workspace/results/v1_baseline_selection.json \
-            --json" 2>&1 | tee -a "${LOG_FILE}" || true
-        # 同步三选产出的 context 与结果回宿主机
-        if [ -f "${SHARED_CTX}" ]; then
-            cp "${SHARED_CTX}" "${CTX_FILE}" 2>/dev/null || true
-        else
-            docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
-        fi
-        docker cp "${SEG_CTR}:/flagos-workspace/results/v1_baseline_selection.json" "${V1_SELECTION}" 2>/dev/null || true
-        # 复检
+# ===== Plugin-only 工作流：无需 V1 三选闸门 =====
+# Plugin-only 工作流不依赖本地 V1 基线，精度基线统一使用外部 NV 参考
+# 跳过 V1 三选逻辑
+
         V1_GATE_RECHECK=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE_RECHECK="needed"
         if [ "$V1_GATE_RECHECK" = "ok" ]; then
             echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 三选已确定"
@@ -2407,33 +2367,10 @@ with open('${CTX_FILE}') as f:
 print(ctx.get('image', {}).get('registry_url', ''))
 " 2>/dev/null) || SEG3_HARBOR_IMAGE=""
 
-# 段4 从 context 重读分支（断点续跑时 PIPELINE_BRANCH 变量可能为空）。
-# 分支 B（准入镜像自带 plugin）步骤9 禁止重装 plugin。
-SEG4_BRANCH=$(python3 -c "
-import yaml
-try:
-    with open('${CTX_FILE}') as f:
-        ctx = yaml.safe_load(f)
-    wf = ctx.get('workflow', {}) or {}
-    et = str(wf.get('entry_image_type', '') or '')
-    pb = str(wf.get('pipeline_branch', '') or '')
-    if et == 'gems_tree_plugin' or pb == 'B':
-        print('B')
-    elif et == 'gems_tree' or pb == 'A':
-        print('A')
-    else:
-        print('')
-except: print('')
-" 2>/dev/null) || SEG4_BRANCH=""
-
-# 分支专属的步骤9 plugin 安装指令
-if [ "${SEG4_BRANCH}" = "B" ]; then
-    SEG4_PLUGIN_DIRECTIVE="**⚠ 分支 B（准入镜像自带 plugin）步骤9 硬约束**：本次准入镜像 entry_image_type=gems_tree_plugin，**已自带可用 plugin**。步骤9 **禁止执行 install_plugin.py --action install（禁止重装 plugin）**——重装会 rm -rf + 重新 clone/pip，覆盖镜像里厂商适配好的 plugin、破坏 V3 对比语义。步骤9 只需 install_plugin.py --action verify 确认可用 + 记状态；plugin 通过启动环境变量 VLLM_PLUGINS=fl 在步骤10 使能。（即便误调 install，工具内置分支闸门也会拒绝重装返回 skipped，但仍不应主动调 install。）"
-elif [ "${SEG4_BRANCH}" = "A" ]; then
-    SEG4_PLUGIN_DIRECTIVE="**分支 A（准入镜像无 plugin）步骤9**：entry_image_type=gems_tree，准入镜像无 plugin → 照常 install_plugin.py --action install 安装 plugin，再 --action verify 验证。"
-else
-    SEG4_PLUGIN_DIRECTIVE="**步骤9 plugin 安装**：按 skills/flagos-plugin-install/SKILL.md 编排层指令的分支分流执行（先读 workflow.entry_image_type 判断分支 A/B：分支 B 自带 plugin 禁止重装，仅 verify + VLLM_PLUGINS=fl 使能；分支 A 无 plugin 照常 install）。"
-fi
+# ===== Plugin-only 工作流：无需分支判断 =====
+# Plugin-only 工作流要求准入镜像已包含 vllm-plugin-FL
+# 步骤9仅需验证 plugin 可用性，无需安装
+SEG4_PLUGIN_DIRECTIVE="**Plugin-only 工作流步骤9**：准入镜像已包含 vllm-plugin-FL。步骤9 仅需 install_plugin.py --action verify 确认 plugin 可用 + 记录状态。Plugin 通过启动环境变量 VLLM_PLUGINS=fl 在后续步骤中启用。"
 
 if [ "${QUALIFIED_SEG4}" = "True" ]; then
     # 提取段4所需参数
