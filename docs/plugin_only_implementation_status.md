@@ -90,14 +90,19 @@
 ### 🚧 Remaining Steps (12-14)
 
 #### Step 12: Test Coverage
-- **Status**: 🚧 Planned
-- **Scope**:
+- **Status**: ✅ Partial Complete
+- **Commit**: `c97312a` - Test coverage for core components
+- **Files**:
+  - `workflow/tests/test_admission.py` - 10 tests (Plugin-only admission scenarios) ✅
+  - `workflow/tests/test_v3_startup.py` - 10 tests (V3 discovery startup and tuning) ✅
+  - `workflow/tests/test_artifact_registry.py` - 6 tests (Artifact registration, query, integrity) ✅
+  - `workflow/tests/test_operator_revision.py` - 7 tests (Revision chains, cumulative disable tracking) ✅
+  - `workflow/tests/test_gates.py` - 8 tests (Gate evaluation, fail-closed behavior) ⚠️
+- **Total**: 41 tests, 34 passing, 7 failing (Gate tests due to Artifact query tag matching)
+- **Remaining**:
   - State transition tests (workflow engine step transitions)
-  - Artifact validation tests (content hash, identity, freshness)
   - Agent policy tests (Schema/Identity/Policy layer validation)
   - Recovery tests (interruption detection, resume logic)
-  - Revision chain tests (parent-child inheritance, immutability)
-  - Gate reducer tests (accuracy/v3/v4 establishment)
   - Integration tests (end-to-end workflow scenarios)
 
 #### Step 13: Remove Legacy Code
@@ -174,7 +179,10 @@ workflow/
 
 - `workflow/tests/test_admission.py` - 10 tests ✅
 - `workflow/tests/test_v3_startup.py` - 10 tests ✅
-- Total: 20 tests passing
+- `workflow/tests/test_artifact_registry.py` - 6 tests ✅
+- `workflow/tests/test_operator_revision.py` - 7 tests ✅
+- `workflow/tests/test_gates.py` - 8 tests ⚠️ (7 failing due to Artifact query tag matching)
+- **Total: 41 tests, 34 passing**
 
 ---
 
