@@ -66,9 +66,12 @@ This document tracks the implementation progress of the Plugin-only workflow ref
 - Update CLAUDE.md to remove Branch A/B references
 - Document migration guide for existing users
 
-### Phase 6: LangGraph Migration (Step 14) 🔜
+### Phase 6: LangGraph Migration (Step 14) ⏸️ DEFERRED
 
-- [ ] **Step 14**: Migrate shell orchestration to LangGraph workflow engine
+- [ ] **Step 14**: ~~Migrate shell orchestration to LangGraph workflow engine~~
+  - **Status**: DEFERRED - See `docs/step_14_langgraph_deferred.md`
+  - **Rationale**: Current architecture sufficient post-refactor, ROI too low
+  - **Alternative**: Near-term enhancements (checkpoint/resume, parallel eval, state consolidation)
 
 ### Phase 7: Production Validation (Step 15) 🔜
 
@@ -152,6 +155,39 @@ This document tracks the implementation progress of the Plugin-only workflow ref
 ### Safety Net
 - Created archive branch: `archive/legacy-dual-pipeline`
 - Created tag: `legacy-code-before-cleanup`
+
+---
+
+## Current Priority Stack (Updated 2026-09-02)
+
+### Immediate (This Week)
+
+1. ✅ **Step 13: Legacy code removal** (80% complete)
+   - [x] Remove dual pipeline logic
+   - [x] Plugin-only admission
+   - [ ] Archive old operator tools
+   - [ ] Update CLAUDE.md
+   - [ ] Write migration guide
+
+2. 🔜 **Near-term enhancements** (instead of Step 14)
+   - [ ] Add checkpoint/resume to run_pipeline.sh
+   - [ ] Add parallel evaluation support
+   - [ ] Consolidate state to context.yaml only
+
+### Short-Term (Next 2 Weeks)
+
+3. 🔜 **Step 15: End-to-end validation**
+   - [ ] Test with real container
+   - [ ] Validate all 15 workflow steps
+   - [ ] Performance benchmark
+   - [ ] Document known issues
+
+### Deferred
+
+4. ⏸️ **Step 14: LangGraph migration** (DEFERRED)
+   - Status: On hold pending reevaluation
+   - See: `docs/step_14_langgraph_deferred.md`
+   - Reconsider if: workflow complexity increases or orchestration bugs become frequent
 
 ---
 
