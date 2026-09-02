@@ -12,6 +12,7 @@ from .protocol import (
 )
 from .policy_validator import PolicyValidator
 from .session_manager import AgentSessionManager
+from .claude_code_agent import ClaudeCodeAnalysisAgent
 
 __all__ = [
     'StartupFailureRequest',
@@ -24,4 +25,5 @@ __all__ = [
     'AnalysisAgent',
     'PolicyValidator',
     'AgentSessionManager',
+    'ClaudeCodeAnalysisAgent',
 ]
