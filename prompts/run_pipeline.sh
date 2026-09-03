@@ -699,6 +699,48 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
+# ===== 评测后处理：生成对比文件和算子配置（报告数据契约修复）=====
+# 在每个评测结果文件产出后调用，为 generate_report 补齐所需的对比和配置文件
+# 参数: $1=容器名, $2=候选版本(v2/v3/v4), $3=数据集列表(逗号分隔)
+run_postprocessing() {
+    local ctr="$1"
+    local candidate="$2"
+    local datasets="${3:-gpqa_diamond}"
+
+    [ -z "${ctr}" ] && return 0
+    docker inspect --type=container "${ctr}" &>/dev/null || return 0
+
+    # 对每个数据集独立生成对比和配置文件
+    IFS=',' read -ra DS_ARRAY <<< "${datasets}"
+    for ds in "${DS_ARRAY[@]}"; do
+        ds=$(echo "${ds}" | xargs)  # trim
+        local ds_prefix=$(ds_prefix "${ds}")
+
+        # 检查评测结果是否存在
+        local eval_result
+        case "${candidate}" in
+            v2) eval_result="${ds_prefix}_flagos.json" ;;
+            v3) eval_result="${ds_prefix}_flagos_optimized.json" ;;
+            v4) eval_result="${ds_prefix}_v4.json" ;;
+            *) eval_result="gpqa_${candidate}.json" ;;
+        esac
+
+        if ! docker exec "${ctr}" test -f "/flagos-workspace/results/${eval_result}" 2>/dev/null; then
+            continue  # 评测结果不存在，跳过后处理
+        fi
+
+        # 调用后处理脚本生成对比和配置文件
+        docker exec "${ctr}" bash -c "
+            cd /flagos-workspace && \
+            PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/workflow/cli/generate_comparison_and_config.py \
+                --candidate ${candidate} \
+                --dataset ${ds} \
+                --nv-baseline /flagos-workspace/shared/nv_baseline.yaml \
+                --workspace /flagos-workspace
+        " >/dev/null 2>&1 || true
+    done
+}
+
 # ===== 段末确定性兜底：主动生成/刷新报告（不依赖 Claude 是否记得执行） =====
 # 方案A：每段 claude 调用完成后，脚本主动补跑一次 generate_report。
 # 即便 Claude 在段内漏做（上下文压缩遗忘/中途中断/API 抖动），段末也一定刷新一次报告。
@@ -2084,7 +2126,9 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 - 宿主机路径: {ws.get('host_path','')}''')
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
-# 段2 全部补跑（retry/step7 闸门）结束后，用最新 context 再刷新一次报告
+# 段2 全部补跑（retry/step7 闸门）结束后，先运行后处理生成报告所需的对比和配置文件
+run_postprocessing "${SEG_CTR}" "v2" "${DATASETS_CSV}"
+# 再刷新报告
 regenerate_report "${SEG_CTR}"
 
 # ===== 段3: 5 (V2 发布) =====
@@ -2871,7 +2915,8 @@ elif docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
     docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
 fi
 
-# 段4末确定性兜底刷新报告
+# 段4末确定性兜底刷新报告（先运行后处理生成 V3 对比和配置文件）
+run_postprocessing "${SEG_CTR}" "v3" "${DATASETS_CSV}"
 regenerate_report "${SEG_CTR}"
 
 else

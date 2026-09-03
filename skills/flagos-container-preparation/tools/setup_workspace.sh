@@ -209,7 +209,7 @@ fi
 # 2. 创建容器内目录结构
 echo "[2/6] 创建目录结构..."
 docker exec "${CONTAINER}" bash -c "
-    mkdir -p /flagos-workspace/{scripts,logs,results,reports,eval,perf/config,shared,output,traces,config}
+    mkdir -p /flagos-workspace/{scripts,logs,results,reports,eval,perf/config,shared,output,traces,config,workflow/cli}
 "
 echo "  目录创建完成"
 
@@ -266,6 +266,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
+    # 评测后处理：生成报告数据契约所需的对比和配置文件
+    "workflow/cli/generate_comparison_and_config.py:workflow/cli/generate_comparison_and_config.py"
     # 精度调优 checkpoint 持久化
     "skills/flagos-eval-comprehensive/tools/persist_tuning_checkpoint.py:scripts/persist_tuning_checkpoint.py"
     # 远端评测监控
