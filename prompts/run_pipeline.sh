@@ -1359,7 +1359,6 @@ if [ "${SERVICE_OK}" = "False" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 跳过：service_ok=false"
     SKIP_SEG2=true
 fi
-fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
@@ -1658,19 +1657,6 @@ echo "  容器名: ${SEG_CTR}"
 
 # 段2末确定性兜底刷新报告
 regenerate_report "${SEG_CTR}"
-
-# ===== Plugin-only 工作流：无需 V1 三选闸门 =====
-# Plugin-only 工作流不依赖本地 V1 基线，精度基线统一使用外部 NV 参考
-# 跳过 V1 三选逻辑
-
-        V1_GATE_RECHECK=$(python3 "${SCRIPT_DIR}/v1_gate.py" --selection "${V1_SELECTION}" 2>/dev/null) || V1_GATE_RECHECK="needed"
-        if [ "$V1_GATE_RECHECK" = "ok" ]; then
-            echo "  ✓ shell 兜底 baseline_selector.py 执行完毕，V1 三选已确定"
-        else
-            echo "  ✗ shell 兜底后仍无有效三选产物（容器/脚本异常），下游将按 v1_available 现状继续"
-        fi
-    fi
-fi
 
 # ===== 段2 结束后：直接执行精度评测（默认流程，不依赖 Claude 是否正确调用） =====
 run_eval_if_missing() {
