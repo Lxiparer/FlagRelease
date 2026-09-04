@@ -312,15 +312,19 @@ class ReportData:
         self.gpqa_versions["v1"] = read_json(os.path.join(r, "gpqa_v1.json")) or read_json(os.path.join(r, "gpqa_native.json"))
         self.gpqa_versions["v2"] = (
             read_json(os.path.join(r, "gpqa_v2.json"))
-            or read_json(os.path.join(r, "gpqa_flagos_optimized.json"))
-            or read_json(os.path.join(r, "gpqa_flagos.json"))
+            or read_json(os.path.join(r, "gpqa_flagos.json"))            # V2 canonical output
+            or read_json(os.path.join(r, "gpqa_flagos_optimized.json"))  # legacy fallback (V2 tuned == optimized)
         )
         self.gpqa_versions["v3"] = (
             read_json(os.path.join(r, "gpqa_v3.json"))
             or read_json(os.path.join(r, "gpqa_v3_plugin.json"))
             or read_json(os.path.join(r, "gpqa_plugin.json"))
+            or read_json(os.path.join(r, "gpqa_flagos_optimized.json"))  # additional fallback
         )
-        self.gpqa_versions["v4"] = read_json(os.path.join(r, "gpqa_v4.json"))
+        self.gpqa_versions["v4"] = (
+            read_json(os.path.join(r, "gpqa_v4.json"))
+            or read_json(os.path.join(r, "gpqa_v4_optimized.json"))  # fallback
+        )
 
         # 多版本性能结果
         self.perf_versions["v1"] = read_json(os.path.join(r, "v1_performance.json")) or self.native_perf
@@ -329,7 +333,10 @@ class ReportData:
             or self.optimized_perf
             or self.flagos_perf
         )
-        self.perf_versions["v3"] = read_json(os.path.join(r, "v3_performance.json"))
+        self.perf_versions["v3"] = (
+            read_json(os.path.join(r, "v3_performance.json"))
+            or read_json(os.path.join(r, "flagos_optimized.json"))  # fallback to old naming
+        )
         self.perf_versions["v4"] = read_json(os.path.join(r, "v4_performance.json"))
 
         # V3/V4 算子配置
@@ -395,7 +402,14 @@ class ReportData:
         # 精度对比结果（accuracy_compare.py 产出：含 nv/current/rel_drop_pct/aligned/message）
         # V2 对比 accuracy_compare.json，V3 对比 accuracy_compare_v3.json
         self.acc_compare_v2 = read_json(os.path.join(r, "accuracy_compare.json"))
-        self.acc_compare_v3 = read_json(os.path.join(r, "accuracy_compare_v3.json"))
+        self.acc_compare_v3 = (
+            read_json(os.path.join(r, "accuracy_compare_v3.json"))
+            or read_json(os.path.join(r, "accuracy_compare_gpqa_diamond_v3.json"))  # per-dataset fallback
+        )
+        self.acc_compare_v4 = (
+            read_json(os.path.join(r, "accuracy_compare_v4.json"))
+            or read_json(os.path.join(r, "accuracy_compare_gpqa_diamond_v4.json"))  # per-dataset fallback
+        )
 
         # 初始控制文件（start_service.sh 保存的副本）
         self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))

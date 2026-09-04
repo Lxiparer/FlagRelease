@@ -58,17 +58,45 @@ def load_nv_baseline(baseline_file: str, dataset: str):
         return None
 
 
-def load_evaluation_result(workspace: str, candidate: str):
+def dataset_prefix(dataset: str) -> str:
+    """数据集 → 结果文件前缀（与 run_pipeline.sh 的 ds_prefix 保持一致）
+
+    gpqa_diamond 沿用历史短名 gpqa（gpqa_native.json 等），其余数据集前缀即其名。
+    """
+    return "gpqa" if dataset == "gpqa_diamond" else dataset
+
+
+def eval_result_filename(candidate: str, dataset: str) -> str:
+    """按 候选版本 + 数据集 推导评测结果文件名
+
+    必须与 run_pipeline.sh 的 run_eval_if_missing / 评测命令 output 命名一致：
+        v2 → {prefix}_flagos.json
+        v3 → {prefix}_flagos_optimized.json
+        v4 → {prefix}_v4.json
+    """
+    prefix = dataset_prefix(dataset)
+    if candidate == "v2":
+        return f"{prefix}_flagos.json"
+    if candidate == "v3":
+        return f"{prefix}_flagos_optimized.json"
+    if candidate == "v4":
+        return f"{prefix}_v4.json"
+    # 兜底：历史命名
+    return f"{prefix}_{candidate}.json"
+
+
+def load_evaluation_result(workspace: str, candidate: str, dataset: str):
     """读取评测结果
 
     Args:
         workspace: 工作空间根目录
-        candidate: v3/v4
+        candidate: v2/v3/v4
+        dataset: 数据集名称（决定文件前缀）
 
     Returns:
         评测结果字典，失败返回 None
     """
-    result_file = Path(workspace) / "results" / f"gpqa_{candidate}.json"
+    result_file = Path(workspace) / "results" / eval_result_filename(candidate, dataset)
 
     try:
         with open(result_file, 'r', encoding='utf-8') as f:
@@ -147,18 +175,31 @@ def generate_comparison_file(
         "candidate": candidate,
     }
 
-    # 主对比文件
-    if dataset == "gpqa_diamond":
-        output_file = Path(workspace) / "results" / f"accuracy_compare_{candidate}.json"
+    # 输出文件名必须与 generate_report.py 消费的契约一致：
+    #   V2 → accuracy_compare.json（gpqa_diamond）/ accuracy_compare_{dataset}.json（其它）
+    #   V3 → accuracy_compare_v3.json / accuracy_compare_{dataset}_v3.json
+    #   V4 → accuracy_compare_v4.json / accuracy_compare_{dataset}_v4.json
+    results_dir = Path(workspace) / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    outputs = []
+    if candidate == "v2":
+        # gpqa_diamond 主文件即 accuracy_compare.json（报告 V2 消费此名）
+        if dataset == "gpqa_diamond":
+            outputs.append(results_dir / "accuracy_compare.json")
+        else:
+            outputs.append(results_dir / f"accuracy_compare_{dataset}.json")
     else:
-        output_file = Path(workspace) / "results" / f"accuracy_compare_{dataset}_{candidate}.json"
+        if dataset == "gpqa_diamond":
+            outputs.append(results_dir / f"accuracy_compare_{candidate}.json")
+        else:
+            outputs.append(results_dir / f"accuracy_compare_{dataset}_{candidate}.json")
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    for output_file in outputs:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(comparison, f, indent=2, ensure_ascii=False)
+        print(f"✓ Generated: {output_file}")
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(comparison, f, indent=2, ensure_ascii=False)
-
-    print(f"✓ Generated: {output_file}")
     return qualified
 
 
@@ -183,7 +224,9 @@ def export_operator_config(
         "candidate": candidate,
     }
 
-    output_file = Path(workspace) / "results" / f"operator_config_{candidate}.json"
+    # 报告契约：V2 → operator_config.json，V3 → operator_config_v3.json，V4 → operator_config_v4.json
+    fname = "operator_config.json" if candidate == "v2" else f"operator_config_{candidate}.json"
+    output_file = Path(workspace) / "results" / fname
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -199,8 +242,8 @@ def main():
     parser.add_argument(
         "--candidate",
         required=True,
-        choices=["v3", "v4"],
-        help="Candidate version (v3 or v4)"
+        choices=["v2", "v3", "v4"],
+        help="Candidate version (v2, v3 or v4)"
     )
     parser.add_argument(
         "--dataset",
@@ -237,15 +280,18 @@ def main():
 
     # 2. 读取评测结果
     print(f"\n[2/4] Loading evaluation result...")
-    eval_result = load_evaluation_result(args.workspace, args.candidate)
+    eval_result = load_evaluation_result(args.workspace, args.candidate, args.dataset)
 
     if eval_result is None:
         print(f"✗ Error: Could not load evaluation result for {args.candidate}")
         sys.exit(1)
 
-    accuracy = eval_result.get('accuracy')
+    # fast_gpqa.py 产出字段为 'score'（正确率百分比）；兼容历史/其它评测器的 'accuracy'
+    accuracy = eval_result.get('score')
     if accuracy is None:
-        print(f"✗ Error: 'accuracy' field not found in evaluation result")
+        accuracy = eval_result.get('accuracy')
+    if accuracy is None:
+        print(f"✗ Error: neither 'score' nor 'accuracy' field found in evaluation result")
         print(f"  Available fields: {list(eval_result.keys())}")
         sys.exit(1)
 

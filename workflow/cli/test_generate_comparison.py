@@ -41,15 +41,21 @@ def create_mock_nv_baseline(workspace: Path):
 
 
 def create_mock_evaluation_result(workspace: Path, candidate: str, accuracy: float):
-    """创建模拟的评测结果"""
+    """创建模拟的评测结果（使用 fast_gpqa.py 真实 schema：score + total_questions，
+    文件名与 run_pipeline.sh 契约一致：v2→gpqa_flagos.json，v3→gpqa_flagos_optimized.json，v4→gpqa_v4.json）"""
     result = {
-        "accuracy": accuracy,
-        "total": 30,
-        "correct": int(30 * accuracy / 100),
-        "dataset": "gpqa_diamond",
+        "_producer": "fast_gpqa.py",
+        "score": accuracy,
+        "total_questions": 30,
+        "benchmark": "gpqa_diamond",
     }
 
-    result_file = workspace / "results" / f"gpqa_{candidate}.json"
+    fname = {
+        "v2": "gpqa_flagos.json",
+        "v3": "gpqa_flagos_optimized.json",
+        "v4": "gpqa_v4.json",
+    }.get(candidate, f"gpqa_{candidate}.json")
+    result_file = workspace / "results" / fname
     with open(result_file, 'w') as f:
         json.dump(result, f, indent=2)
 
