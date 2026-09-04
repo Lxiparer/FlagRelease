@@ -2273,3 +2273,365 @@ models:
       math_500: 92.8
     source: "NV 实测"
     updated_at: "2026-08-12"
+
+  # ============================================================
+  # 多模态 VLM — MMStar 参考基线（mm_star, 百分比; val 全量 1500 题）
+  # 补充于 2026-09-04
+  # ============================================================
+
+  Qwen3-VL-4B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-4B-Instruct
+      - qwen3-vl-4b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Molmo2-4B:
+    aliases:
+      - allenai/Molmo2-4B
+      - molmo2-4b
+    metrics:
+      mm_star: 51
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-4B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-4B-Instruct
+      - internvl3_5-4b-instruct
+      - internvl3-5-4b-instruct
+    metrics:
+      mm_star: 53.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-4B:
+    aliases:
+      - OpenGVLab/InternVL3_5-4B
+      - internvl3_5-4b
+      - internvl3-5-4b
+    metrics:
+      mm_star: 51.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-4B-SFT_RL:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-4B-SFT_RL
+      - sage-mm-qwen3-vl-4b-sft_rl
+      - sage-mm-qwen3-vl-4b-sft-rl
+    metrics:
+      mm_star: 50.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-8B-SFT_RL:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-8B-SFT_RL
+      - sage-mm-qwen3-vl-8b-sft_rl
+      - sage-mm-qwen3-vl-8b-sft-rl
+    metrics:
+      mm_star: 54.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-8B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-8B-Thinking
+      - qwen3-vl-8b-thinking
+    metrics:
+      mm_star: 54.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  SAGE-MM-Qwen3-VL-8B-SFT:
+    aliases:
+      - allenai/SAGE-MM-Qwen3-VL-8B-SFT
+      - sage-mm-qwen3-vl-8b-sft
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-8B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-8B-Instruct
+      - qwen3-vl-8b-instruct
+    metrics:
+      mm_star: 55
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Molmo2-8B:
+    aliases:
+      - allenai/Molmo2-8B
+      - molmo2-8b
+    metrics:
+      mm_star: 53.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-8B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-8B-Instruct
+      - internvl3_5-8b-instruct
+      - internvl3-5-8b-instruct
+    metrics:
+      mm_star: 54.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-8B:
+    aliases:
+      - OpenGVLab/InternVL3_5-8B
+      - internvl3_5-8b
+      - internvl3-5-8b
+    metrics:
+      mm_star: 52.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  CapRL-InternVL3.5-8B:
+    aliases:
+      - internlm/CapRL-InternVL3.5-8B
+      - caprl-internvl3.5-8b
+    metrics:
+      mm_star: 52.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-9B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-9B-Instruct
+      - internvl3-9b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-9B:
+    aliases:
+      - OpenGVLab/InternVL3-9B
+      - internvl3-9b
+    metrics:
+      mm_star: 56.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  MiniCPM-V-4_5:
+    aliases:
+      - openbmb/MiniCPM-V-4_5
+      - minicpm-v-4_5
+      - minicpm-v-4-5
+    metrics:
+      mm_star: 56.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  MiniCPM-o-4_5:
+    aliases:
+      - openbmb/MiniCPM-o-4_5
+      - minicpm-o-4_5
+      - minicpm-o-4-5
+    metrics:
+      mm_star: 61.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-14B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-14B-Instruct
+      - internvl3-14b-instruct
+    metrics:
+      mm_star: 52.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-14B:
+    aliases:
+      - OpenGVLab/InternVL3-14B
+      - internvl3-14b
+    metrics:
+      mm_star: 55
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-14B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-14B-Instruct
+      - internvl3_5-14b-instruct
+      - internvl3-5-14b-instruct
+    metrics:
+      mm_star: 56.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2-16B:
+    aliases:
+      - AIDC-AI/Ovis2-16B
+      - ovis2-16b
+    metrics:
+      mm_star: 55.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-26B:
+    aliases:
+      - OpenGVLab/InternVL2_5-26B
+      - internvl2_5-26b
+      - internvl2-5-26b
+    metrics:
+      mm_star: 51.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-30B-A3B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-30B-A3B-Instruct
+      - internvl3_5-30b-a3b-instruct
+      - internvl3-5-30b-a3b-instruct
+    metrics:
+      mm_star: 60.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-30B-A3B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-30B-A3B-Thinking
+      - qwen3-vl-30b-a3b-thinking
+    metrics:
+      mm_star: 55.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-30B-A3B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-30B-A3B-Instruct
+      - qwen3-vl-30b-a3b-instruct
+    metrics:
+      mm_star: 54
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2.6-30B-A3B:
+    aliases:
+      - AIDC-AI/Ovis2.6-30B-A3B
+      - ovis2.6-30b-a3b
+    metrics:
+      mm_star: 52.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-32B-Thinking:
+    aliases:
+      - Qwen/Qwen3-VL-32B-Thinking
+      - qwen3-vl-32b-thinking
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen3-VL-32B-Instruct:
+    aliases:
+      - Qwen/Qwen3-VL-32B-Instruct
+      - qwen3-vl-32b-instruct
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Ovis2-34B:
+    aliases:
+      - AIDC-AI/Ovis2-34B
+      - ovis2-34b
+    metrics:
+      mm_star: 58
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-38B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3_5-38B-Instruct
+      - internvl3_5-38b-instruct
+      - internvl3-5-38b-instruct
+    metrics:
+      mm_star: 59.67
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-38B:
+    aliases:
+      - OpenGVLab/InternVL3-38B
+      - internvl3-38b
+    metrics:
+      mm_star: 58.83
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3_5-38B:
+    aliases:
+      - OpenGVLab/InternVL3_5-38B
+      - internvl3_5-38b
+      - internvl3-5-38b
+    metrics:
+      mm_star: 59.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-38B:
+    aliases:
+      - OpenGVLab/InternVL2_5-38B
+      - internvl2_5-38b
+      - internvl2-5-38b
+    metrics:
+      mm_star: 54.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-38B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-38B-Instruct
+      - internvl3-38b-instruct
+    metrics:
+      mm_star: 57.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  Qwen2.5-VL-72B-Instruct:
+    aliases:
+      - Qwen/Qwen2.5-VL-72B-Instruct
+      - qwen2.5-vl-72b-instruct
+    metrics:
+      mm_star: 54.33
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL2_5-78B:
+    aliases:
+      - OpenGVLab/InternVL2_5-78B
+      - internvl2_5-78b
+      - internvl2-5-78b
+    metrics:
+      mm_star: 55.5
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-78B-Instruct:
+    aliases:
+      - OpenGVLab/InternVL3-78B-Instruct
+      - internvl3-78b-instruct
+    metrics:
+      mm_star: 60.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
+
+  InternVL3-78B:
+    aliases:
+      - OpenGVLab/InternVL3-78B
+      - internvl3-78b
+    metrics:
+      mm_star: 62.17
+    source: "外部参考基线（VLM MMStar 榜单）"
+    updated_at: "2026-09-04"
