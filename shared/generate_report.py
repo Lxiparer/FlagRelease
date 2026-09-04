@@ -279,9 +279,14 @@ class ReportData:
         self.acc_compare_v3: Optional[dict] = None
         self.ops_control_initial: Optional[dict] = None
         self.workflow_complete = False
+        self.acc_compare_v4: Optional[dict] = None
         # 多版本数据（新增）
         self.gpqa_versions: Dict[str, Optional[dict]] = {}   # {v1: gpqa_json, v2: ..., v3: ..., v4: ...}
         self.perf_versions: Dict[str, Optional[dict]] = {}   # {v1: perf_json, v2: ..., v3: ..., v4: ...}
+        # 多数据集精度（版本×数据集），单数据集(仅 gpqa)时退化为原行为
+        self.datasets: List[str] = ["gpqa_diamond"]
+        self.acc_by_dataset: Dict[str, Dict[str, Optional[dict]]] = {}
+        self.acc_compare_by_dataset: Dict[str, Dict[str, Optional[dict]]] = {}
         self.op_config_v3: Optional[dict] = None
         self.op_config_v4: Optional[dict] = None
         self.nv_baseline: Optional[dict] = None
@@ -325,6 +330,8 @@ class ReportData:
             read_json(os.path.join(r, "gpqa_v4.json"))
             or read_json(os.path.join(r, "gpqa_v4_optimized.json"))  # fallback
         )
+
+        # 多数据集精度加载见 collect() 末尾 _collect_multidataset()（需在 acc_compare_v2/v3 加载之后）
 
         # 多版本性能结果
         self.perf_versions["v1"] = read_json(os.path.join(r, "v1_performance.json")) or self.native_perf
@@ -410,6 +417,34 @@ class ReportData:
             read_json(os.path.join(r, "accuracy_compare_v4.json"))
             or read_json(os.path.join(r, "accuracy_compare_gpqa_diamond_v4.json"))  # per-dataset fallback
         )
+
+        # 多数据集精度（版本×数据集）。需在 acc_compare_v2/v3/v4 加载后执行。
+        # gpqa_diamond 复用已有 gpqa_versions / acc_compare_v* （含全部历史 fallback），
+        # 其它数据集按文件命名契约（{prefix}_native/_flagos/_flagos_optimized/_v4.json）读取。
+        self.datasets = discover_datasets(r)
+        self.acc_by_dataset = {}          # {dataset: {v1:json, v2:.., v3:.., v4:..}}
+        self.acc_compare_by_dataset = {}  # {dataset: {v2:json, v3:.., v4:..}}
+        for ds in self.datasets:
+            pfx = dataset_file_prefix(ds)
+            if ds == "gpqa_diamond":
+                self.acc_by_dataset[ds] = dict(self.gpqa_versions)
+                self.acc_compare_by_dataset[ds] = {
+                    "v2": self.acc_compare_v2,
+                    "v3": self.acc_compare_v3,
+                    "v4": self.acc_compare_v4,
+                }
+                continue
+            self.acc_by_dataset[ds] = {
+                "v1": read_json(os.path.join(r, f"{pfx}_native.json")),
+                "v2": read_json(os.path.join(r, f"{pfx}_flagos.json")),
+                "v3": read_json(os.path.join(r, f"{pfx}_flagos_optimized.json")),
+                "v4": read_json(os.path.join(r, f"{pfx}_v4.json")),
+            }
+            self.acc_compare_by_dataset[ds] = {
+                "v2": read_json(os.path.join(r, f"accuracy_compare_{pfx}.json")),
+                "v3": read_json(os.path.join(r, f"accuracy_compare_{pfx}_v3.json")),
+                "v4": read_json(os.path.join(r, f"accuracy_compare_{pfx}_v4.json")),
+            }
 
         # 初始控制文件（start_service.sh 保存的副本）
         self.ops_control_initial = read_json(os.path.join(r, "ops_control_initial.json"))
@@ -925,6 +960,63 @@ VERSION_LABELS = {
     "v4": ("V4", "Flag-express", "减算子提性能版(≥V3,近/超V1)"),
 }
 
+# 数据集展示名（与 fast_gpqa.py DATASET_CONFIG[*]['benchmark_name'] 对齐）
+DATASET_DISPLAY = {
+    "gpqa_diamond": "GPQA_Diamond",
+    "mmlu": "MMLU",
+    "math_500": "MATH-500",
+    "mm_star": "MMStar",
+}
+
+
+def dataset_display_name(dataset: str) -> str:
+    """数据集 → 报告展示名，未知数据集回退原名。"""
+    return DATASET_DISPLAY.get(dataset, dataset)
+
+
+def dataset_file_prefix(dataset: str) -> str:
+    """数据集 → 结果文件前缀（与 run_pipeline.sh ds_prefix 一致）：
+    gpqa_diamond 用历史短名 gpqa，其余数据集前缀即其名。"""
+    return "gpqa" if dataset == "gpqa_diamond" else dataset
+
+
+def _prefix_to_dataset(prefix: str) -> str:
+    """文件前缀 → 数据集名（ds_prefix 的逆映射）。"""
+    return "gpqa_diamond" if prefix == "gpqa" else prefix
+
+
+def discover_datasets(results_dir: str) -> List[str]:
+    """扫描 results/ 下评测产物，发现本次评测过的数据集集合。
+
+    识别以下后缀的文件并反推 prefix：
+        {prefix}_native.json / {prefix}_flagos.json /
+        {prefix}_flagos_optimized.json / {prefix}_v4.json
+    gpqa_diamond 恒在列（向后兼容单数据集旧报告），其余按名称排序追加。
+    """
+    suffixes = ("_native.json", "_flagos_optimized.json", "_flagos.json", "_v4.json")
+    found = set()
+    try:
+        for fname in os.listdir(results_dir):
+            if not fname.endswith(".json"):
+                continue
+            for suf in suffixes:
+                if fname.endswith(suf):
+                    prefix = fname[: -len(suf)]
+                    if prefix:
+                        found.add(_prefix_to_dataset(prefix))
+                    break
+    except OSError:
+        pass
+
+    # gpqa_diamond 恒在首位（单数据集旧报告零变化）；其余稳定排序
+    ordered = ["gpqa_diamond"] if "gpqa_diamond" in found or not found else []
+    for ds in sorted(found):
+        if ds not in ordered:
+            ordered.append(ds)
+    if not ordered:
+        ordered = ["gpqa_diamond"]
+    return ordered
+
 
 # =============================================================================
 # 性能数据提取
@@ -1316,84 +1408,96 @@ def generate_text_report(data: ReportData) -> str:
     lines.append("## 精度评测")
 
     # V1-V4 版本的精度表
+    datasets = data.datasets or ["gpqa_diamond"]
     for ver_key in ["v1", "v2", "v3", "v4"]:
         ver_label, config_label, _ = VERSION_LABELS.get(ver_key, (ver_key.upper(), "-", ""))
-        gpqa = data.gpqa_versions.get(ver_key)
         lines.append("")
         lines.append(f"### {ver_label}")
         lines.append("| 数据集 | 评测条数 | 正确率(%) | 开启算子数 |")
         lines.append("|--------|---------|-----------|-----------|")
 
-        if gpqa:
-            score = gpqa.get("score", "-")
-            total = gpqa.get("total_questions", "-")
-            # 算子数：V1 无 FlagGems，V2 从 final_oplist，V3 从 v3 config，V4 减算子后
+        # 算子数是版本级（各数据集共享同一算子配置），每版本计算一次
+        op_count = "-"
+        if ver_key == "v1":
             op_count = "-"
-            if ver_key == "v1":
-                op_count = "-"
-                config_label = "-"
-            elif ver_key == "v2":
-                # 与「算子替换列表」段同源（去重后的白名单），保证两处算子数一致
-                _v2_wl = version_ops_data.get("v2", {}).get("whitelist", [])
-                if _v2_wl:
-                    op_count = str(len(_v2_wl))
-                elif publish_oplist:
-                    op_count = str(_count_ops_from_oplist(publish_oplist))
-            elif ver_key == "v3":
-                # 与「算子替换列表」段同源（去重后的白名单），保证两处一致
-                _v3_wl = version_ops_data.get("v3", {}).get("whitelist", [])
-                if data.op_config_v3:
-                    op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
-                elif _v3_wl:
-                    op_count = str(len(_v3_wl))
-                elif publish_oplist:
-                    op_count = str(_count_ops_from_oplist(publish_oplist))
-            elif ver_key == "v4":
-                if data.op_config_v4:
-                    v4_ops = (
-                        data.op_config_v4.get("current_enabled_ops")
-                        or data.op_config_v4.get("kept_ops")
-                        or []
-                    )
-                    op_count = str(len(v4_ops)) if v4_ops else "-"
-            lines.append(f"| GPQA_Diamond | {total} | {score} | {op_count} |")
-        else:
-            lines.append(f"| GPQA_Diamond | - | - | - |")
+            config_label = "-"
+        elif ver_key == "v2":
+            # 与「算子替换列表」段同源（去重后的白名单），保证两处算子数一致
+            _v2_wl = version_ops_data.get("v2", {}).get("whitelist", [])
+            if _v2_wl:
+                op_count = str(len(_v2_wl))
+            elif publish_oplist:
+                op_count = str(_count_ops_from_oplist(publish_oplist))
+        elif ver_key == "v3":
+            # 与「算子替换列表」段同源（去重后的白名单），保证两处一致
+            _v3_wl = version_ops_data.get("v3", {}).get("whitelist", [])
+            if data.op_config_v3:
+                op_count = str(len(data.op_config_v3.get("enabled_ops", [])))
+            elif _v3_wl:
+                op_count = str(len(_v3_wl))
+            elif publish_oplist:
+                op_count = str(_count_ops_from_oplist(publish_oplist))
+        elif ver_key == "v4":
+            if data.op_config_v4:
+                v4_ops = (
+                    data.op_config_v4.get("current_enabled_ops")
+                    or data.op_config_v4.get("kept_ops")
+                    or []
+                )
+                op_count = str(len(v4_ops)) if v4_ops else "-"
+
+        # 每个数据集一行（单数据集时即原单行）
+        for ds in datasets:
+            ds_label = dataset_display_name(ds)
+            eval_json = data.acc_by_dataset.get(ds, {}).get(ver_key)
+            if eval_json:
+                score = eval_json.get("score", "-")
+                total = eval_json.get("total_questions", "-")
+                lines.append(f"| {ds_label} | {total} | {score} | {op_count} |")
+            else:
+                lines.append(f"| {ds_label} | - | - | - |")
 
     # 精度结果对比
     lines.append("")
     lines.append("### 结果对比")
     lines.append("| 对比项 | 结果 |")
     lines.append("|--------|------|")
-    v1_gpqa = data.gpqa_versions.get("v1")
-    v1_score = v1_gpqa.get("score", 0) if v1_gpqa else (eval_sec.get("v1_score") or 0)
-    # 权威对比来源：accuracy_compare.py 产出（含 NV 基线回退、噪声容忍、rel_drop）
-    _compare_by_ver = {"v2": data.acc_compare_v2, "v3": data.acc_compare_v3}
-    for cmp_ver in ["v2", "v3", "v4"]:
-        cmp_gpqa = data.gpqa_versions.get(cmp_ver)
-        ver_label = VERSION_LABELS[cmp_ver][0]
-        # 优先用权威对比文件（能覆盖 V1 无独立分、走 NV 基线的场景）
-        _tq = cmp_gpqa.get("total_questions") if cmp_gpqa else None
-        cell = _fmt_acc_compare(_compare_by_ver.get(cmp_ver), _tq)
-        if cell:
-            lines.append(f"| V1 VS {ver_label} | {cell} |")
-        elif not cmp_gpqa:
-            lines.append(f"| V1 VS {ver_label} | - |")
-        else:
-            cmp_score = cmp_gpqa.get("score", 0)
-            if v1_score and cmp_score:
-                diff = abs(float(v1_score) - float(cmp_score))
-                lines.append(f"| V1 VS {ver_label} | 精度偏差 {diff:.1f}% |")
+    eval_v1_score = eval_sec.get("v1_score") or 0
+    multi_ds = len(datasets) > 1
+    # 单数据集(仅 gpqa)时对比项不带数据集后缀，保持旧报告格式逐字节不变
+    for ds in datasets:
+        ds_label = dataset_display_name(ds)
+        suffix = f"（{ds_label}）" if multi_ds else ""
+        ds_evals = data.acc_by_dataset.get(ds, {})
+        ds_compare = data.acc_compare_by_dataset.get(ds, {})
+        v1_eval = ds_evals.get("v1")
+        v1_score = v1_eval.get("score", 0) if v1_eval else eval_v1_score
+        # 权威对比来源：accuracy_compare.py 产出（含 NV 基线回退、噪声容忍、rel_drop）
+        for cmp_ver in ["v2", "v3", "v4"]:
+            cmp_eval = ds_evals.get(cmp_ver)
+            ver_label = VERSION_LABELS[cmp_ver][0]
+            # 优先用权威对比文件（能覆盖 V1 无独立分、走 NV 基线的场景）
+            _tq = cmp_eval.get("total_questions") if cmp_eval else None
+            cell = _fmt_acc_compare(ds_compare.get(cmp_ver), _tq)
+            if cell:
+                lines.append(f"| V1 VS {ver_label}{suffix} | {cell} |")
+            elif not cmp_eval:
+                lines.append(f"| V1 VS {ver_label}{suffix} | - |")
             else:
-                lines.append(f"| V1 VS {ver_label} | - |")
-    # V2 VS V3
-    v2_gpqa = data.gpqa_versions.get("v2")
-    v3_gpqa = data.gpqa_versions.get("v3")
-    if v2_gpqa and v3_gpqa:
-        diff = abs(float(v2_gpqa.get("score", 0)) - float(v3_gpqa.get("score", 0)))
-        lines.append(f"| V2 VS V3 | 精度偏差 {diff:.1f}% |")
-    else:
-        lines.append(f"| V2 VS V3 | - |")
+                cmp_score = cmp_eval.get("score", 0)
+                if v1_score and cmp_score:
+                    diff = abs(float(v1_score) - float(cmp_score))
+                    lines.append(f"| V1 VS {ver_label}{suffix} | 精度偏差 {diff:.1f}% |")
+                else:
+                    lines.append(f"| V1 VS {ver_label}{suffix} | - |")
+        # V2 VS V3
+        v2_eval = ds_evals.get("v2")
+        v3_eval = ds_evals.get("v3")
+        if v2_eval and v3_eval:
+            diff = abs(float(v2_eval.get("score", 0)) - float(v3_eval.get("score", 0)))
+            lines.append(f"| V2 VS V3{suffix} | 精度偏差 {diff:.1f}% |")
+        else:
+            lines.append(f"| V2 VS V3{suffix} | - |")
 
     # ═══════════════════════════════════════════════
     # 评测结果 — 性能评测

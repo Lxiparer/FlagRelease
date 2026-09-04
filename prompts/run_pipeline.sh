@@ -6,7 +6,7 @@
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
-# 数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定
+# 数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500/mm_star[多模态]），默认 gpqa_diamond；每个数据集独立评测与判定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
@@ -101,7 +101,7 @@ else
         echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--datasets ds1,ds2,...] [--verbose] [--proxy proxy1,proxy2,...] [--flagrelease-token <token>] [--feishu-webhook URL]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
-        echo "数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500），默认 gpqa_diamond；每个数据集独立评测与判定"
+        echo "数据集：--datasets 逗号分隔（gpqa_diamond/mmlu/math_500/mm_star[多模态]），默认 gpqa_diamond；每个数据集独立评测与判定"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
@@ -137,7 +137,7 @@ else
                 ;;
             --datasets)
                 if [ -z "${2:-}" ]; then
-                    echo "错误: --datasets 需要指定数据集（逗号分隔，可选 gpqa_diamond/mmlu/math_500）"
+                    echo "错误: --datasets 需要指定数据集（逗号分隔，可选 gpqa_diamond/mmlu/math_500/mm_star）"
                     exit 1
                 fi
                 DATASETS_CSV="$2"
@@ -176,15 +176,23 @@ if [ -z "$DATASET_LIST" ]; then
     echo "错误: --datasets 为空，请指定至少一个数据集（gpqa_diamond/mmlu/math_500）"
     exit 1
 fi
+HAS_MULTIMODAL=false
 for _ds in $DATASET_LIST; do
     case "$_ds" in
         gpqa_diamond|mmlu|math_500) ;;
+        mm_star) HAS_MULTIMODAL=true ;;
         *)
-            echo "错误: 未知数据集 '$_ds'（可选: gpqa_diamond/mmlu/math_500）"
+            echo "错误: 未知数据集 '$_ds'（可选: gpqa_diamond/mmlu/math_500/mm_star）"
             exit 1
             ;;
     esac
 done
+# 多模态门控提示：mm_star 为 VLM 视觉必答任务，仅对多模态模型有意义，
+# 且 vLLM 须以支持图像输入的方式起服务（见 fast_gpqa.py DATASET_CONFIG['mm_star'] 注释）。
+# 这里只做显式提示，不自动改服务启动参数（起服务在编排段处理）。
+if $HAS_MULTIMODAL; then
+    echo "[pre-flight] ⚠ 检测到多模态数据集 mm_star：需确保模型为多模态(VLM)且 vLLM 以支持图像输入方式启动，否则纯文本模型收到图片会报错/胡答。"
+fi
 PRIMARY_DATASET=$(echo "$DATASET_LIST" | awk '{print $1}')
 DATASET_COUNT=$(echo "$DATASET_LIST" | wc -w)
 # 数据集 → 结果文件前缀：gpqa_diamond 沿用历史短名 gpqa（gpqa_native.json 等），
