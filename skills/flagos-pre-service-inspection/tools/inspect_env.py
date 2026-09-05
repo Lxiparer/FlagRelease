@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import importlib
 import inspect
 import json
@@ -35,6 +36,34 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def _quiet_stdout():
+    """采集阶段静默 stdout：文件描述符级重定向 fd1 → fd2。
+
+    探测 flaggems/vllm_fl 时会 `import vllm`，vLLM 的 fl platform plugin 被激活后
+    会往 stdout 打 INFO 日志（"Available plugins..."、"Platform plugin fl is
+    activated"、"已注入环境变量驱动代码..."）。这些日志是 C 层/root logger 直接写
+    fd 1，仅重定向 Python 的 sys.stdout 拦不住。因此用 os.dup2 在采集期间把 fd 1
+    指向 fd 2（stderr），采集完恢复，保证后续 print(json.dumps(...)) 的 stdout
+    是纯净 JSON。诊断信息不丢，落到 stderr。
+    """
+    sys.stdout.flush()
+    saved_fd = os.dup(1)          # 备份真实 stdout
+    try:
+        os.dup2(2, 1)             # fd1 → fd2，采集期日志全部转 stderr
+        # 同步 Python 层 sys.stdout，避免缓冲错乱
+        old_py_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            yield
+        finally:
+            sys.stdout.flush()
+            sys.stdout = old_py_stdout
+    finally:
+        os.dup2(saved_fd, 1)      # 恢复真实 stdout
+        os.close(saved_fd)
 
 
 def find_best_python():
@@ -932,7 +961,15 @@ def _write_control_env_vars(env_type, caps):
 
 
 def check_flagtree():
-    """检测 FlagTree 安装状态"""
+    """检测 FlagTree 安装状态。
+
+    检测优先级：先用 importlib.metadata 查分发包元数据（与 cwd/sys.path[0] 无关，
+    最可靠），再退回 `import flagtree`。FlagTree 常以 editable/namespace 方式安装
+    （`__file__=None`、包目录挂在 /vllm-workspace 等工程根），只有当 cwd 恰为该根
+    时裸 `import flagtree` 才成功；而 inspect_env.py 以绝对路径运行时
+    sys.path[0]=脚本目录，裸 import 会误报 ModuleNotFoundError → 误判"未安装" →
+    准入校验错误拒绝。metadata 查询不受此影响，故作为权威判据。
+    """
     result = {
         "installed": False,
         "version": "",
@@ -945,14 +982,30 @@ def check_flagtree():
     except ImportError:
         return result
 
+    # 权威判据：分发包元数据（cwd 无关）
+    try:
+        import importlib.metadata as _md
+        result["version"] = _md.version("flagtree")
+        result["installed"] = True
+    except Exception:
+        # metadata 查不到再退回 import（覆盖极少数无 dist-info 的手工部署）
+        pass
+
+    # 次要确认 + 补充运行时属性（backend / __version__）；import 失败不推翻 metadata 结论
     try:
         import flagtree
         result["installed"] = True
-        result["version"] = getattr(flagtree, "__version__", "unknown")
+        _ver = getattr(flagtree, "__version__", "")
+        if _ver and (not result["version"] or result["version"] == "unknown"):
+            result["version"] = _ver
         result["backend"] = getattr(flagtree, "backend", "")
     except ImportError:
-        # triton 存在但非 FlagTree
-        pass
+        # triton 存在；若 metadata 已确认安装则保持 installed=True（cwd 敏感的 import 失败不算数）
+        if not result["installed"]:
+            pass
+
+    if result["installed"] and not result["version"]:
+        result["version"] = "unknown"
 
     return result
 
@@ -1210,13 +1263,16 @@ def main():
     parser.add_argument("--model-path", default="", help="模型路径，用于检测权重数制 (torch_dtype)")
     args = parser.parse_args()
 
-    data = collect_all()
+    # 采集阶段静默 stdout：探测 flaggems/vllm_fl 会 import vllm，触发 fl plugin
+    # 往 stdout 打日志，污染 --output-json 的纯净 JSON 输出（见 _quiet_stdout）。
+    with _quiet_stdout():
+        data = collect_all()
 
-    # 追加模型权重数制检测
-    if args.model_path:
-        dtype = detect_model_dtype(args.model_path)
-        if dtype:
-            data["model_dtype"] = dtype
+        # 追加模型权重数制检测
+        if args.model_path:
+            dtype = detect_model_dtype(args.model_path)
+            if dtype:
+                data["model_dtype"] = dtype
 
     if args.output_json:
         output_json(data)
