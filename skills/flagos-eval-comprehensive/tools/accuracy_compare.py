@@ -2,33 +2,35 @@
 """
 精度对比工具 — GPQA Diamond / MMLU / MATH-500 精度达标判定
 
-支持两种基线模式：
-  1. 本地 V1 基线（向后兼容）：--v1 <json> --v2 <json>
-     判据：rel_drop = (v1_score - v2_score) / v1_score <= threshold
-     即当前精度相对 V1 的退化不超过 threshold（默认 5%，相对口径）
+**新契约（plugin-only 工作流默认）：外部 NV 参考 vs 候选**
+  --candidate <json> --reference <模型名> [--metric <数据集>]
+     判据：rel_drop = (reference_score - candidate_score) / reference_score <= tolerance
+     即候选精度相对 NV 参考的退化不超过 tolerance（默认 5%，相对口径）
+     参考分数从 shared/nv_baseline.yaml 按模型名查表获得。
+     plugin-only 无本地 V1，NV 参考是唯一精度基线（缺参考 → 退出码 3，编排层兜底）。
 
-  2. NV 参考基线（新流程默认）：--v2 <json> --nv-baseline <模型名>
-     判据：(v2_score - nv_score) / nv_score >= -tolerance
-     即当前精度相对 NV 的退化不超过 tolerance（默认 5%）
-     NV 分数从 shared/nv_baseline.yaml 查表获得
-
-  两种模式均为「相对退化」口径，阈值单位统一为比例（0.05 = 5%）。
+支持的两种基线模式（内部统一「相对退化」口径，阈值单位为比例，0.05 = 5%）：
+  1. NV 参考基线（新契约 / 新流程默认）：
+       --candidate <json> --reference <模型名>        （推荐）
+       --v2 <json> --nv-baseline <模型名>             （旧名，等价保留）
+  2. 本地 V1 基线（旧流程，向后兼容，将在收尾轮移除）：
+       --v1 <json> --v2 <json>
+       判据：rel_drop = (v1_score - candidate_score) / v1_score <= threshold
 
 Usage:
-    # 本地 V1 基线（旧）
+    # NV 参考（新契约）
+    python accuracy_compare.py --candidate results/gpqa_flagos_optimized.json --reference Qwen3-8B --json
+    python accuracy_compare.py --candidate results/mmlu_flagos_optimized.json --reference AceInstruct-1.5B --metric mmlu \
+        --nv-baseline-file /flagos-workspace/shared/nv_baseline.yaml --output results/accuracy_compare_mmlu_v3.json
+
+    # NV 参考（旧名，等价）
+    python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B --json
+
+    # 本地 V1 基线（旧流程，向后兼容）
     python accuracy_compare.py --v1 results/gpqa_native.json --v2 results/gpqa_flagos.json
 
-    # NV 基线（新）
-    python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B --json
-    python accuracy_compare.py --v2 results/gpqa_flagos.json --nv-baseline Qwen3-8B \
-        --nv-baseline-file /flagos-workspace/shared/nv_baseline.yaml --output results/accuracy_compare.json
-
-    # 其他数据集：--metric 指定指标名（须与结果文件基准一致，如 mmlu / math_500）
-    python accuracy_compare.py --v2 results/mmlu_flagos.json --nv-baseline AceInstruct-1.5B --metric mmlu
-    python accuracy_compare.py --v2 results/math_500_flagos.json --nv-baseline AceInstruct-1.5B --metric math_500
-
 退出码: 0=达标（含小样本噪声容忍达标：绝对差异≤2题时虽 rel_drop 超阈值仍判达标）,
-        1=不达标, 2=参数/文件错误, 3=缺 NV 基线（需编排层兜底）
+        1=不达标, 2=参数/文件错误, 3=缺 NV 参考（需编排层兜底）
 """
 
 import argparse
@@ -410,34 +412,48 @@ def print_human(result: Dict[str, Any]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GPQA Diamond 精度达标判定（本地 V1 或 NV 基线）")
-    parser.add_argument("--v1", help="V1 (Native) 评测结果 JSON（本地 V1 基线模式）")
-    parser.add_argument("--v2", required=True, help="待判定的评测结果 JSON（V2/V3/V4/V5）")
+    parser = argparse.ArgumentParser(
+        description="精度达标判定（新契约：外部 NV 参考 vs 候选 --candidate/--reference；或旧本地 V1 基线）")
+    # 新契约（plugin-only 默认）：外部 NV 参考 vs 候选
+    parser.add_argument("--candidate", metavar="JSON",
+                        help="待判定评测结果 JSON（新契约，等价旧名 --v2）")
+    parser.add_argument("--reference", metavar="MODEL",
+                        help="NV 参考基线模型名（新契约，等价旧名 --nv-baseline，从 nv_baseline.yaml 查表）")
+    # 旧名（等价保留，将在收尾轮移除）
+    parser.add_argument("--v1", help="V1 (Native) 评测结果 JSON（旧本地 V1 基线模式，向后兼容）")
+    parser.add_argument("--v2", help="待判定的评测结果 JSON（旧名，等价 --candidate）")
+    parser.add_argument("--nv-baseline", metavar="MODEL",
+                        help="NV 参考基线模型名（旧名，等价 --reference）")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
                         help=f"本地 V1 模式：相对退化容差，比例值（默认 {DEFAULT_THRESHOLD} = {DEFAULT_THRESHOLD*100:.0f}%%）")
-    # NV 基线模式
-    parser.add_argument("--nv-baseline", metavar="MODEL",
-                        help="启用 NV 基线模式：按模型名查 nv_baseline.yaml")
     parser.add_argument("--nv-baseline-file",
                         help="nv_baseline.yaml 路径（默认自动查找 shared/）")
     parser.add_argument("--metric", default="gpqa_diamond",
-                        help="NV 基线模式：对比指标名（默认 gpqa_diamond）")
+                        help="NV 参考模式：对比指标名（默认 gpqa_diamond）")
     parser.add_argument("--nv-tolerance", type=float, default=None,
-                        help=f"NV 基线模式：相对退化容差（默认表内 default_tolerance 或 {DEFAULT_NV_TOLERANCE}）")
+                        help=f"NV 参考模式：相对退化容差（默认表内 default_tolerance 或 {DEFAULT_NV_TOLERANCE}）")
     parser.add_argument("--json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--output", help="结果输出文件路径（JSON）")
     args = parser.parse_args()
 
-    # 模式选择：--nv-baseline 优先（新流程默认）
-    if args.nv_baseline:
-        result = compare_nv(args.v2, args.nv_baseline, args.metric,
+    # 别名归一：新契约 --candidate/--reference 优先，回落旧名 --v2/--nv-baseline
+    candidate = args.candidate or args.v2
+    reference = args.reference or args.nv_baseline
+
+    if not candidate:
+        print("ERROR: 必须提供 --candidate（或旧名 --v2）待判定结果 JSON", file=sys.stderr)
+        sys.exit(2)
+
+    # 模式选择：给定 NV 参考 → NV 参考模式（新流程默认）；否则回落旧本地 V1 基线
+    if reference:
+        result = compare_nv(candidate, reference, args.metric,
                             args.nv_baseline_file, args.nv_tolerance)
     else:
         if not args.v1:
-            print("ERROR: 未指定 --nv-baseline 时必须提供 --v1（本地 V1 基线模式）",
+            print("ERROR: 未指定 --reference/--nv-baseline 时必须提供 --v1（旧本地 V1 基线模式）",
                   file=sys.stderr)
             sys.exit(2)
-        result = compare_v1(args.v1, args.v2, args.threshold, args.metric)
+        result = compare_v1(args.v1, candidate, args.threshold, args.metric)
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

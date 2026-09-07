@@ -661,8 +661,9 @@ def main():
     )
     parser.add_argument("--context-yaml", required=True,
                         help="context.yaml 路径，读取 V3 启用算子集")
-    parser.add_argument("--v1-perf", required=True,
-                        help="V1 性能结果 JSON (native_performance.json)")
+    parser.add_argument("--v1-perf", default="",
+                        help="V1 性能结果 JSON（可选，仅报告参考）。plugin-only 无本地 V1，"
+                             "留空则 v1_composite=0，报告相关字段显示 N/A")
     parser.add_argument("--v3-perf", required=True,
                         help="V3 性能结果 JSON (flagos_optimized.json)")
     parser.add_argument("--service-startup-cmd", required=True,
