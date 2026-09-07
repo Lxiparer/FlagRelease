@@ -1153,6 +1153,47 @@ echo ""
 # 段1末确定性兜底刷新报告
 regenerate_report "${SEG_CTR}"
 
+# ===== 段1末确定性回填：admission 字段兜底 =====
+# inspect_env.py 由段1 Claude 跑，admission 块可能未写入 context.yaml。
+# 直接在容器内重跑一次（无副作用），解析 JSON，用 update_context.py 补写。
+ADMISSION_NULL=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+print('null' if not ctx.get('admission') else 'ok')
+" 2>/dev/null) || ADMISSION_NULL="null"
+
+if [ "${ADMISSION_NULL}" = "null" ]; then
+    echo "  ⚠ context 中 admission 为空，重跑 inspect_env.py 补写..."
+    docker exec "${SEG_CTR}" bash -c \
+        "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json \
+         > /tmp/_inspect_admission_fallback.json 2>/dev/null" || true
+    INSPECT_OK=$(docker exec "${SEG_CTR}" bash -c \
+        "PATH=/opt/conda/bin:\$PATH python3 -c \
+         'import json; json.load(open(\"/tmp/_inspect_admission_fallback.json\")); print(\"ok\")' \
+         2>/dev/null") || INSPECT_OK=""
+    if [ "${INSPECT_OK}" = "ok" ]; then
+        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import json, subprocess, os
+data = json.load(open('/tmp/_inspect_admission_fallback.json'))
+adm   = data.get('admission', {})
+etype = (adm.get('entry_image_type') or
+         data.get('env_classification', {}).get('env_type', ''))
+env = {**os.environ, 'PATH': '/opt/conda/bin:' + os.environ.get('PATH', '')}
+cmd = ['python3', '/flagos-workspace/scripts/update_context.py',
+       '--json-set', 'admission=' + json.dumps(adm)]
+if etype:
+    cmd += ['--set', f'environment.entry_image_type={etype}']
+subprocess.run(cmd, env=env, check=False)
+\"" 2>/dev/null || true
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" \
+            "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || true
+        echo "  ✓ admission 字段已补写"
+    else
+        echo "  ✗ inspect_env.py 重跑失败或非 JSON，admission 回填跳过（准入校验将沿用现有值）"
+    fi
+fi
+
 # ===== 段1越界检测：如果段1【本次会话】执行了步骤4+的操作，回滚 context 中的越界状态 =====
 # 关键：按 finished_at 时间戳区分——只有 finished_at 晚于本次段1会话起始(seg1_start_ts)
 # 的 step≥4 才算真越界。断点续跑时上次遗留的历史产出(finished_at 更早)不判越界，
@@ -1360,6 +1401,15 @@ fi
 echo "══════════════════════════════════════════════════════════════"
 echo "  ✓ Plugin-only 准入验证通过"
 echo "══════════════════════════════════════════════════════════════"
+
+# 从环境类型推导 native 标志（供段2 PROMPT 追加 native 硬性约束用）。
+# SEG_ENV 来自 read_context（context 的 environment.env_type / env_classification）。
+# set -u 下裸引用未定义变量会 exit 1，故必须在 1646 行使用前赋值。
+if [ "${SEG_ENV}" = "native" ]; then
+    IS_NATIVE="true"
+else
+    IS_NATIVE="false"
+fi
 
 SKIP_SEG2=false
 if [ "${SERVICE_OK}" = "False" ]; then
