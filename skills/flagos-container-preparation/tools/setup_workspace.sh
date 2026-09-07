@@ -350,6 +350,17 @@ else
     fi
 fi
 
+# 3.6. 部署 NV 精度基线表到容器 shared/（accuracy_compare.py --nv-baseline 查表默认路径）
+# 无 V1 场景 / 分支B「精度基线统一用 NV」时，步骤4/11 精度判定依赖此表；
+# 每次流程启动无条件刷新，确保容器内基线与仓库同步，去除对 Agent 临时 docker cp 的隐式依赖
+NV_BASELINE_FILE="${PROJECT_ROOT}/shared/nv_baseline.yaml"
+if [ -f "${NV_BASELINE_FILE}" ]; then
+    docker cp "${NV_BASELINE_FILE}" "${CONTAINER}:/flagos-workspace/shared/nv_baseline.yaml"
+    echo "  ✓ shared/nv_baseline.yaml (NV 精度基线表)"
+else
+    echo "  ⚠ shared/nv_baseline.yaml 未找到 (${NV_BASELINE_FILE})，NV 基线模式将不可用"
+fi
+
 # 4. 安装脚本依赖（如需要）
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
