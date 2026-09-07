@@ -1462,9 +1462,10 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
     #                 上限 7200s——同上宽松原则
     # 多数据集：EVAL_MAX_TO 取各数据集最大值；--limit 全局语义（fast_gpqa 不支持
     # per-dataset limit）→ 多数据集一律不传 --limit（各数据集用默认题数）
-    EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500 及多数据集用各数据集默认题数）
+    EVAL_LIMIT=""                 # 空 = 评测命令不传 --limit（mmlu/math_500/mm_star 及多数据集用各数据集默认题数）
     EVAL_MAX_TO=7200
     for _ds in ${DATASET_LIST}; do
+        _ds_max=7200              # 默认兜底：未知数据集也有值，防 set -u unbound（case 无匹配时生效）
         case "${_ds}" in
             gpqa_diamond)
                 if [ "${IS_THINKING}" = "true" ]; then
@@ -1482,6 +1483,13 @@ print('true' if rt or re.search('${THINKING_PATTERNS}', mn) else 'false')
                 ;;
             math_500)
                 _ds_max=7200    # 200 题慢 10 倍 7min；上限宽松防国产慢卡误杀
+                ;;
+            mm_star)
+                _ds_max=28800   # 多模态全量 1500 题（default_limit=0，不传 --limit）；图像编码更重，
+                                # 上限 8h 宽松防国产慢卡误杀；MCQ 答案短，不设 EVAL_LIMIT（全量对比）
+                ;;
+            *)
+                _ds_max=7200    # 未知/未来新增数据集兜底（校验层已挡非法值，此处双保险）
                 ;;
         esac
         [ "${_ds_max}" -gt "${EVAL_MAX_TO}" ] && EVAL_MAX_TO="${_ds_max}"
