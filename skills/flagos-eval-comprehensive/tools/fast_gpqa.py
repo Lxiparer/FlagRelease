@@ -351,6 +351,25 @@ def _zlib_compress_ratio(text: str) -> float:
     return len(zlib.compress(raw, level=6)) / len(raw)
 
 
+def _content_to_text(content) -> str:
+    """归一化 message.content 为纯文本。
+
+    普通模型 content 为 str；reasoning 模型（Qwen3/MiMo/QwQ/DeepSeek-R1 等）
+    的 content 是结构化 block 列表，长推理链在 'reasoning' 键、最终答案在 'text' 键
+    （亦见 'content' 键）。runaway 复读主要发生在长推理链，故三键全部拼接，
+    避免只取答案漏检 CoT 复读。非 str/list 一律 str() 兜底，杜绝 .strip() 崩溃。
+    """
+    if isinstance(content, list):
+        parts = []
+        for blk in content:
+            if isinstance(blk, dict):
+                parts.append(str(blk.get("reasoning") or blk.get("text") or blk.get("content") or ""))
+            elif blk is not None:
+                parts.append(str(blk))
+        return " ".join(parts)
+    return str(content) if content is not None else ""
+
+
 def detect_runaway(text: str, finish_reason: str = "") -> Tuple[bool, Dict]:
     """判别回答是否为 runaway（垃圾复读死循环）。
 
@@ -367,7 +386,7 @@ def detect_runaway(text: str, finish_reason: str = "") -> Tuple[bool, Dict]:
         evidence = {"diversity": float, "compress_ratio": float, "text_len": int,
                     "finish_reason": str, "reason": str}
     """
-    text = (text or "").strip()
+    text = _content_to_text(text).strip()
     evidence = {
         "diversity": 1.0,
         "compress_ratio": 1.0,
