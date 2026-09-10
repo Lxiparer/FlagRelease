@@ -25,6 +25,7 @@
 
 import os
 import sys
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Literal, Callable
 from dataclasses import dataclass, field
@@ -36,10 +37,14 @@ from ..schemas.context_v2 import (
     RuntimeInfo,
     WorkflowStep,
     OperatorRevision,
+    Gate,
 )
 from ..artifacts.registry import ArtifactRegistry
 from ..gates.reducer import GateReducer
 from .state_store import YamlStateStore
+from .command_executor import CommandExecutor, SubprocessExecutor
+# 注：domain 类在 handler 内惰性导入，避免 engine<->domain 顶层循环导入
+# （domain 子模块会 import engine.* 子模块，顶层双向引用会因入口顺序触发 partial-init）
 
 
 # 15 步工作流定义
@@ -74,12 +79,19 @@ class StepResult:
 class WorkflowEngine:
     """确定性工作流引擎"""
 
-    def __init__(self, workspace_root: str = "/flagos-workspace"):
+    def __init__(self, workspace_root: str = "/flagos-workspace",
+                 executor: Optional[CommandExecutor] = None,
+                 datasets: Optional[List[str]] = None):
         self.workspace_root = Path(workspace_root)
         self.context_file = self.workspace_root / "shared" / "context.yaml"
 
         # 设置日志
         self.logger = logging.getLogger("workflow.engine")
+
+        # 命令执行后端（引擎注入给 domain 执行器；默认真实 subprocess，测试注入 Fake）
+        self.executor = executor or SubprocessExecutor()
+        # 评测数据集（默认 gpqa_diamond；每个独立判定，全部达标才 accuracy gate passed）
+        self.datasets = datasets or ["gpqa_diamond"]
 
         # 状态存储后端（引擎是 context 的唯一写入者，见 state_store.py）
         self.state_store = YamlStateStore(self.context_file)
@@ -91,7 +103,7 @@ class WorkflowEngine:
         # 加载或初始化 context
         self.context = self._load_or_initialize_context()
 
-        # 15 步执行器 dispatch 表（M0 为 stub，M1/M2 逐个替换为真实 domain 调用）
+        # 15 步执行器 dispatch 表（M1a：02/06 已接真实 domain，其余仍 stub）
         self.step_handlers: Dict[str, Callable[[], StepResult]] = self._build_step_handlers()
 
     def _load_or_initialize_context(self) -> ContextSchemaV2:
@@ -393,11 +405,11 @@ class WorkflowEngine:
     def _build_step_handlers(self) -> Dict[str, Callable[[], StepResult]]:
         return {
             "01_container_preparation": self._stub_step,
-            "02_admission": self._stub_step,
+            "02_admission": self._step_admission,
             "03_v3_discovery_startup": self._stub_discovery,
             "04_v3_discovered": self._stub_freeze_discovered,
             "05_v3_startup_tuning": self._stub_step,
-            "06_v3_accuracy": self._stub_step,
+            "06_v3_accuracy": self._step_v3_accuracy,
             "07_v3_accuracy_tuning": self._stub_step,
             "08_v3_performance": self._stub_step,
             "09_v3_final": self._stub_freeze_final,
@@ -445,3 +457,112 @@ class WorkflowEngine:
         """M0 占位：标记流程结束时间。"""
         self.context.runtime.finished_at = datetime.now().isoformat()
         return StepResult(status="success")
+
+    # ------------------------------------------------------------------
+    # M1a 真实 handler：步骤02 准入、步骤06 精度
+    # ------------------------------------------------------------------
+
+    # inspect_env / nv_baseline 容器内路径
+    INSPECT_ENV = "/flagos-workspace/scripts/inspect_env.py"
+    NV_BASELINE = "/flagos-workspace/shared/nv_baseline.yaml"
+
+    def _step_admission(self) -> StepResult:
+        """步骤02：跑 inspect_env → 映射 capabilities → Plugin-only 准入 → gate + runtime。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="admission: container_name 为空")
+
+        res = self.executor.docker_exec(container, f"python3 {self.INSPECT_ENV}")
+        if not res.ok:
+            return StepResult(
+                status="failed",
+                fail_reason=f"admission: inspect_env exit={res.returncode}: {res.stderr[:300]}",
+            )
+
+        try:
+            j = json.loads(res.stdout)
+        except Exception as e:
+            return StepResult(status="failed", fail_reason=f"admission: inspect_env 输出非 JSON: {e}")
+
+        capabilities = self._map_inspect_env_to_capabilities(j)
+        from ..domain import PluginOnlyAdmission  # 惰性导入，避免顶层循环
+        admission = PluginOnlyAdmission(str(self.workspace_root), self.artifact_registry)
+        result = admission.check_admission(capabilities)
+
+        # 回填 runtime + 置准入 gate
+        self.context.runtime.entry_image_type = (
+            "gems_tree_plugin" if result.admitted else "unknown"
+        )
+        self.context.gates["admission"] = Gate(
+            gate_id="admission",
+            status="passed" if result.admitted else "failed",
+            criteria="Plugin-only 全组件准入（vllm+flaggems+flagtree+vllm_plugin）",
+            evaluated_at=datetime.now().isoformat(),
+            reason=result.reason,
+        )
+        self._save_context()
+
+        if not result.admitted:
+            # fail-closed：准入不过 → 步骤失败 → run() 停在 02
+            return StepResult(
+                status="failed",
+                fail_reason=f"admission fail-closed: 缺组件 {result.missing_components}",
+            )
+        return StepResult(status="success")
+
+    def _step_v3_accuracy(self) -> StepResult:
+        """步骤06：真实评测 + accuracy_compare 退出码判定 → 精度 gate（判定权在脚本）。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="accuracy: container_name 为空")
+
+        revision = self.context.operator_revisions.get(self.context.current_revision_id)
+        if revision is None:
+            revision = OperatorRevision(revision_id=self.context.current_revision_id or "v3")
+
+        from ..domain import V3AccuracyEvaluation  # 惰性导入，避免顶层循环
+        evaluator = V3AccuracyEvaluation(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+        )
+        all_qualified, results = evaluator.evaluate_accuracy(
+            candidate="v3",
+            revision=revision,
+            datasets=self.datasets,
+            reference_model=self.context.runtime.model_name,
+            nv_baseline_file=self.NV_BASELINE,
+        )
+
+        # 逐数据集登记精度 artifact（含 reducer 所需 nv_reference_value/relative_drop/qualified）
+        for dataset, result in results.items():
+            file_path = f"results/accuracy_{dataset}_v3.json"
+            evaluator.register_accuracy_artifact("v3", dataset, result, file_path)
+
+        # 精度 gate：判定直接来自 accuracy_compare 聚合退出码（不走 reducer 重判）
+        self.context.gates["accuracy.v3.qualified"] = Gate(
+            gate_id="accuracy.v3.qualified",
+            status="passed" if all_qualified else "failed",
+            criteria="所有数据集 accuracy_compare 退出码=0（相对退化≤5%，含小样本噪声容忍）",
+            evaluated_at=datetime.now().isoformat(),
+            reason="; ".join(
+                f"{d}:exit={r.get('exit_code')}" for d, r in results.items()
+            ),
+        )
+        self._save_context()
+
+        # 精度不达标不停流程（调优是步骤07）；步骤本身算成功（评测+判定+落 gate 完成）
+        return StepResult(status="success")
+
+    @staticmethod
+    def _map_inspect_env_to_capabilities(j: Dict) -> Dict:
+        """把 inspect_env.py 的 JSON 输出映射成 PluginOnlyAdmission.check_admission 所需 capabilities。"""
+        return {
+            "flaggems_installed": j.get("flaggems_installed", False),
+            "flaggems_version": j.get("flaggems_version", ""),
+            "vllm_plugin_installed": j.get("vllm_plugin_installed", False),
+            "plugin_version": j.get("plugin_version", ""),
+            "vllm_version": j.get("vllm_version", ""),
+            "flagtree": j.get("flagtree", {}),
+        }

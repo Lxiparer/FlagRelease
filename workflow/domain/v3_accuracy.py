@@ -33,6 +33,19 @@ from datetime import datetime
 
 from ..artifacts.registry import ArtifactRegistry
 from ..schemas.context_v2 import OperatorRevision
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+
+
+# 评测脚本 / 判定脚本（容器内路径）
+EVAL_SCRIPT = "/flagos-workspace/skills/flagos-eval-comprehensive/tools/fast_gpqa.py"
+ACCURACY_COMPARE = "/flagos-workspace/skills/flagos-eval-comprehensive/tools/accuracy_compare.py"
+
+# 数据集评测预算（thinking 模型口径，见 CLAUDE.md）
+DATASET_BUDGET = {
+    "gpqa_diamond": {"limit": 30, "max_timeout": 22500},
+    "mmlu": {"limit": None, "max_timeout": 21600},
+    "math_500": {"limit": None, "max_timeout": 7200},
+}
 
 
 class V3AccuracyEvaluation:
@@ -43,10 +56,12 @@ class V3AccuracyEvaluation:
         workspace_root: str = "/flagos-workspace",
         container_name: str = "",
         artifact_registry: Optional[ArtifactRegistry] = None,
+        executor: Optional[CommandExecutor] = None,
     ):
         self.workspace_root = Path(workspace_root)
         self.container_name = container_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(str(workspace_root))
+        self.executor = executor or SubprocessExecutor()
         self.logger = logging.getLogger("workflow.domain.accuracy")
 
     def evaluate_accuracy(
@@ -54,14 +69,16 @@ class V3AccuracyEvaluation:
         candidate: str,
         revision: OperatorRevision,
         datasets: List[str],
+        reference_model: str = "",
         nv_baseline_file: str = "/flagos-workspace/shared/nv_baseline.yaml",
     ) -> Tuple[bool, Dict[str, Dict]]:
-        """评测精度并与外部 NV reference 比对
+        """评测精度并交由 accuracy_compare.py 判定（消费退出码，判定权在脚本）
 
         Args:
             candidate: v3 或 v4
             revision: 当前 operator revision
             datasets: 数据集列表（如 ["gpqa_diamond", "mmlu"]）
+            reference_model: NV 参考模型名（accuracy_compare --reference）
             nv_baseline_file: NV baseline 文件路径
 
         Returns:
@@ -77,11 +94,9 @@ class V3AccuracyEvaluation:
         for dataset in datasets:
             self.logger.info(f"=== Evaluating {dataset} ===")
 
-            # 1. 运行评测
-            success, accuracy, details = self._run_evaluation(
-                dataset,
-                candidate,
-                revision,
+            # 1. 运行评测（真实执行，产出候选结果 JSON）
+            success, candidate_json, accuracy, details = self._run_evaluation(
+                dataset, candidate, revision, reference_model,
             )
 
             if not success:
@@ -89,50 +104,35 @@ class V3AccuracyEvaluation:
                 all_qualified = False
                 results[dataset] = {
                     "success": False,
-                    "error": details.get("error", "Unknown error"),
-                }
-                continue
-
-            # 2. 加载 NV reference
-            nv_reference = self._load_nv_reference(dataset, nv_baseline_file)
-
-            if nv_reference is None:
-                # NV reference 缺失 - fail closed
-                self.logger.error(f"NV reference missing for {dataset} - fail closed")
-                all_qualified = False
-                results[dataset] = {
-                    "success": True,
-                    "accuracy": accuracy,
-                    "nv_reference": None,
-                    "relative_drop": None,
                     "qualified": False,
-                    "reason": "NV reference missing",
+                    "error": details.get("error", "evaluation failed"),
                 }
                 continue
 
-            # 3. 计算相对退化
-            relative_drop = (nv_reference - accuracy) / nv_reference
-
-            # 4. 判定是否达标（≤ 5%）
-            qualified = relative_drop <= 0.05
-
+            # 2. 判定：交给已固化的 accuracy_compare.py，消费退出码
+            #    0=达标 1=不达标 2=错误 3=缺 NV（fail-closed）。判定权在脚本，不内联重算。
+            verdict = self._judge_with_accuracy_compare(
+                dataset, candidate, candidate_json, reference_model, nv_baseline_file,
+            )
+            qualified = verdict["qualified"]
             if not qualified:
                 all_qualified = False
 
             results[dataset] = {
                 "success": True,
                 "accuracy": accuracy,
-                "nv_reference": nv_reference,
-                "relative_drop": relative_drop,
+                "nv_reference_value": verdict.get("nv_reference_value"),
+                "nv_reference_identity": f"{reference_model}:{dataset}",
+                "relative_drop": verdict.get("relative_drop"),
                 "qualified": qualified,
+                "exit_code": verdict["exit_code"],
+                "reason": verdict.get("reason", ""),
                 "details": details,
             }
 
             self.logger.info(
-                f"{dataset}: accuracy={accuracy:.2f}%, "
-                f"nv_reference={nv_reference:.2f}%, "
-                f"relative_drop={relative_drop*100:.2f}%, "
-                f"qualified={qualified}"
+                f"{dataset}: exit_code={verdict['exit_code']} qualified={qualified} "
+                f"rel_drop={verdict.get('relative_drop')}"
             )
 
         return all_qualified, results
@@ -142,89 +142,115 @@ class V3AccuracyEvaluation:
         dataset: str,
         candidate: str,
         revision: OperatorRevision,
-    ) -> Tuple[bool, Optional[float], Dict]:
-        """运行单个数据集的评测
-
-        Args:
-            dataset: 数据集名称
-            candidate: v3/v4
-            revision: Operator revision
+        reference_model: str,
+    ) -> Tuple[bool, str, Optional[float], Dict]:
+        """运行单个数据集的评测（真实执行，经注入的 executor）
 
         Returns:
-            (是否成功, 精度值, 详细信息)
+            (是否成功, 候选结果 JSON 路径, 精度值 or None, 详细信息)
         """
-        # 实际需要调用评测脚本（如 fast_gpqa.py）
-        # 这里简化实现
-
-        eval_script = "/flagos-workspace/skills/flagos-eval-comprehensive/tools/fast_gpqa.py"
-
-        # 根据数据集选择参数
-        if dataset == "gpqa_diamond":
-            limit = 30  # thinking 模型
-            max_timeout = 22500
-        elif dataset == "mmlu":
-            limit = None  # 不传 limit，用默认采样
-            max_timeout = 21600
-        elif dataset == "math_500":
-            limit = None
-            max_timeout = 7200
-        else:
+        budget = DATASET_BUDGET.get(dataset)
+        if budget is None:
             self.logger.error(f"Unknown dataset: {dataset}")
-            return False, None, {"error": f"Unknown dataset: {dataset}"}
+            return False, "", None, {"error": f"Unknown dataset: {dataset}"}
 
-        # 构造命令
-        cmd_parts = [
-            f"docker exec {self.container_name}",
-            "bash -c",
-            f"'cd /flagos-workspace && PATH=/opt/conda/bin:$PATH",
-            f"python3 {eval_script}",
-            f"--dataset {dataset}",
-        ]
+        # 候选结果落盘路径（容器内 = 挂载点；V3 标准命名 flagos_optimized）
+        candidate_json = f"/flagos-workspace/results/{dataset}_flagos_optimized.json"
 
-        if limit:
-            cmd_parts.append(f"--limit {limit}")
+        script = (
+            f"cd /flagos-workspace && python3 {EVAL_SCRIPT} "
+            f"--dataset {dataset} --output {candidate_json}"
+        )
+        if budget["limit"] is not None:
+            script += f" --limit {budget['limit']}"
+        script += f" --max-timeout {budget['max_timeout']}"
 
-        cmd_parts.append(f"--max-timeout {max_timeout}")
-        cmd_parts.append("'")
+        res = self.executor.docker_exec(
+            self.container_name, script, timeout=budget["max_timeout"] + 600
+        )
+        if not res.ok:
+            return False, candidate_json, None, {
+                "error": f"eval exit={res.returncode}: {res.stderr[:500]}",
+                "dataset": dataset,
+            }
 
-        cmd = " ".join(cmd_parts)
+        # 精度值仅用于报告富化（判定由 accuracy_compare 退出码给出）；best-effort 解析 stdout
+        accuracy = self._parse_accuracy_from_stdout(res.stdout)
+        return True, candidate_json, accuracy, {"dataset": dataset}
 
-        self.logger.info(f"Running evaluation command: {cmd}")
-
-        # 简化实现：返回模拟结果
-        # 实际需要真正执行命令并解析输出
-        accuracy = 65.2  # 模拟精度值
-
-        return True, accuracy, {
-            "total_questions": 30,
-            "correct": 20,
-            "dataset": dataset,
-        }
-
-    def _load_nv_reference(
+    def _judge_with_accuracy_compare(
         self,
         dataset: str,
+        candidate: str,
+        candidate_json: str,
+        reference_model: str,
         nv_baseline_file: str,
-    ) -> Optional[float]:
-        """加载外部 NV reference
+    ) -> Dict:
+        """交由已固化的 accuracy_compare.py 判定，消费退出码。
 
-        Args:
-            dataset: 数据集名称
-            nv_baseline_file: NV baseline 文件路径
-
-        Returns:
-            NV reference 精度值，缺失时返回 None
+        退出码语义（脚本 docstring）：0=达标 · 1=不达标 · 2=参数/文件错 · 3=缺 NV（fail-closed）。
+        判定权在脚本，本方法不内联重算 rel_drop。
         """
-        # 实际需要从 nv_baseline.yaml 读取
-        # 简化实现：返回模拟值
+        compare_out = f"/flagos-workspace/results/accuracy_compare_{dataset}_{candidate}.json"
+        script = (
+            f"cd /flagos-workspace && python3 {ACCURACY_COMPARE} "
+            f"--candidate {candidate_json} --reference {reference_model} --metric {dataset} "
+            f"--nv-baseline-file {nv_baseline_file} --output {compare_out} --json"
+        )
+        res = self.executor.docker_exec(self.container_name, script, timeout=600)
 
-        nv_references = {
-            "gpqa_diamond": 66.8,
-            "mmlu": 69.1,
-            "math_500": 72.5,
+        # 退出码是权威判定
+        qualified = res.returncode == 0
+        reason_map = {
+            0: "qualified (accuracy_compare exit 0)",
+            1: "not qualified (accuracy_compare exit 1)",
+            2: "accuracy_compare error (exit 2)",
+            3: "NV reference missing (exit 3, fail-closed)",
+        }
+        reason = reason_map.get(res.returncode, f"accuracy_compare exit {res.returncode}")
+
+        # best-effort 从 --json stdout 提取 nv 分数 / rel_drop 用于 artifact 富化
+        nv_value, rel_drop = None, None
+        parsed = self._safe_json(res.stdout)
+        if isinstance(parsed, dict):
+            nv_value = (parsed.get("nv") or {}).get("score")
+            rel_drop = parsed.get("rel_drop")
+
+        return {
+            "qualified": qualified,
+            "exit_code": res.returncode,
+            "nv_reference_value": nv_value,
+            "relative_drop": rel_drop,
+            "reason": reason,
         }
 
-        return nv_references.get(dataset)
+    @staticmethod
+    def _safe_json(text: str):
+        """从可能混杂日志的 stdout 中提取最后一个 JSON 对象（best-effort）"""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # 回退：取最后一个以 { 开头的行块
+        start = text.rfind("{")
+        if start >= 0:
+            try:
+                return json.loads(text[start:])
+            except Exception:
+                return None
+        return None
+
+    def _parse_accuracy_from_stdout(self, stdout: str) -> Optional[float]:
+        """从评测 stdout 尽力解析精度值（仅用于报告，不参与判定）"""
+        parsed = self._safe_json(stdout)
+        if isinstance(parsed, dict):
+            for k in ("score", "accuracy", "acc"):
+                if isinstance(parsed.get(k), (int, float)):
+                    return float(parsed[k])
+        return None
 
     def register_accuracy_artifact(
         self,

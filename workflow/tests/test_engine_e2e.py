@@ -24,6 +24,7 @@ import unittest
 import sys
 import tempfile
 import shutil
+import json
 from pathlib import Path
 
 import yaml
@@ -32,10 +33,36 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.state_store import YamlStateStore
+from workflow.engine.command_executor import FakeExecutor
 from workflow.schemas.context_v2 import (
     ContextSchemaV2,
     ContextValidationError,
 )
+
+
+FULL_CAPS = {
+    "flaggems_installed": True, "flaggems_version": "5.1.0",
+    "vllm_plugin_installed": True, "plugin_version": "0.1",
+    "vllm_version": "0.7.3", "flagtree": {"installed": True, "version": "0.5.0"},
+}
+
+
+def make_fake(admitted: bool = True, accuracy_exit: int = 0) -> FakeExecutor:
+    """构造脚本化 FakeExecutor：满足步骤02 准入 + 步骤06 精度。"""
+    fake = FakeExecutor()
+    caps = dict(FULL_CAPS)
+    if not admitted:
+        caps["vllm_plugin_installed"] = False
+    fake.when("inspect_env", stdout=json.dumps(caps))
+    fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
+    fake.when(
+        "accuracy_compare",
+        returncode=accuracy_exit,
+        stdout=json.dumps({"nv": {"score": 66.8}, "rel_drop": 0.02,
+                           "aligned": accuracy_exit == 0}),
+    )
+    return fake
+
 
 
 class TestEngineEndToEnd(unittest.TestCase):
@@ -47,9 +74,16 @@ class TestEngineEndToEnd(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def _engine(self, fake=None) -> WorkflowEngine:
+        """构造引擎并注入 fake executor + 容器/模型名（步骤02/06 需要）。"""
+        eng = WorkflowEngine(self.tmpdir, executor=fake or make_fake())
+        eng.context.runtime.container_name = "test_ctr"
+        eng.context.runtime.model_name = "TestModel"
+        return eng
+
     def test_run_all_15_steps(self):
-        """run() 应驱动全部 15 步成功、终点停在 15_finalize"""
-        engine = WorkflowEngine(self.tmpdir)
+        """run() 应驱动全部 15 步成功、终点停在 15_finalize（02/06 走真实 handler 对 fake）"""
+        engine = self._engine()
         ctx = engine.run()
 
         self.assertEqual(len(WORKFLOW_STEPS), 15)
@@ -64,10 +98,33 @@ class TestEngineEndToEnd(unittest.TestCase):
         self.assertTrue(ctx.operator_revisions["v3-final"].frozen)
         # finalize 应记录结束时间
         self.assertTrue(ctx.runtime.finished_at)
+        # 真实 handler 应落 gate
+        self.assertEqual(ctx.gates["admission"].status, "passed")
+        self.assertEqual(ctx.gates["accuracy.v3.qualified"].status, "passed")
+
+    def test_admission_fail_closed_stops_at_02(self):
+        """缺组件 → 准入 fail-closed → run() 停在 02_admission"""
+        engine = self._engine(make_fake(admitted=False))
+        ctx = engine.run()
+
+        self.assertEqual(ctx.current_step_id, "02_admission")
+        self.assertEqual(ctx.steps["02_admission"].status, "failed")
+        self.assertEqual(ctx.gates["admission"].status, "failed")
+        # 后续步骤未执行
+        self.assertEqual(ctx.steps["06_v3_accuracy"].status, "pending")
+
+    def test_accuracy_not_qualified_continues(self):
+        """精度不达标（accuracy_compare exit 1）→ gate failed 但流程继续（调优是步骤07）"""
+        engine = self._engine(make_fake(accuracy_exit=1))
+        ctx = engine.run()
+
+        self.assertEqual(ctx.current_step_id, "15_finalize")
+        self.assertEqual(ctx.steps["06_v3_accuracy"].status, "success")
+        self.assertEqual(ctx.gates["accuracy.v3.qualified"].status, "failed")
 
     def test_context_yaml_roundtrip(self):
         """状态应落进 context.yaml 并能等价重建"""
-        engine = WorkflowEngine(self.tmpdir)
+        engine = self._engine()
         engine.run()
 
         context_file = Path(self.tmpdir) / "shared" / "context.yaml"
@@ -82,7 +139,9 @@ class TestEngineEndToEnd(unittest.TestCase):
 
     def test_recovery_from_failed_step(self):
         """中断续跑：从失败步骤恢复，不从头重跑"""
-        engine = WorkflowEngine(self.tmpdir)
+        engine = WorkflowEngine(self.tmpdir, executor=make_fake())
+        engine.context.runtime.container_name = "test_ctr"
+        engine.context.runtime.model_name = "TestModel"
         # 模拟：01-04 成功、05 失败、其余 pending
         for sid in ["01_container_preparation", "02_admission",
                     "03_v3_discovery_startup", "04_v3_discovered"]:
@@ -92,7 +151,7 @@ class TestEngineEndToEnd(unittest.TestCase):
         engine._save_context()
 
         # 新引擎从磁盘加载并续跑
-        engine2 = WorkflowEngine(self.tmpdir)
+        engine2 = WorkflowEngine(self.tmpdir, executor=make_fake())
         self.assertEqual(engine2.detect_recovery_point(), "05_v3_startup_tuning")
         ctx = engine2.run()
 
