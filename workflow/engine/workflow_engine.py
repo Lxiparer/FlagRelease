@@ -26,7 +26,8 @@
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 
@@ -38,6 +39,7 @@ from ..schemas.context_v2 import (
 )
 from ..artifacts.registry import ArtifactRegistry
 from ..gates.reducer import GateReducer
+from .state_store import YamlStateStore
 
 
 # 15 步工作流定义
@@ -60,12 +62,27 @@ WORKFLOW_STEPS = [
 ]
 
 
+@dataclass
+class StepResult:
+    """单步执行结果（domain 执行器 / stub handler 的统一返回契约）"""
+    status: Literal["success", "failed", "skipped"] = "success"
+    output_artifacts: List[str] = field(default_factory=list)
+    fail_reason: str = ""
+    skip_reason: str = ""
+
+
 class WorkflowEngine:
     """确定性工作流引擎"""
 
     def __init__(self, workspace_root: str = "/flagos-workspace"):
         self.workspace_root = Path(workspace_root)
         self.context_file = self.workspace_root / "shared" / "context.yaml"
+
+        # 设置日志
+        self.logger = logging.getLogger("workflow.engine")
+
+        # 状态存储后端（引擎是 context 的唯一写入者，见 state_store.py）
+        self.state_store = YamlStateStore(self.context_file)
 
         # 初始化子系统
         self.artifact_registry = ArtifactRegistry(str(self.workspace_root))
@@ -74,34 +91,30 @@ class WorkflowEngine:
         # 加载或初始化 context
         self.context = self._load_or_initialize_context()
 
-        # 设置日志
-        self.logger = logging.getLogger("workflow.engine")
+        # 15 步执行器 dispatch 表（M0 为 stub，M1/M2 逐个替换为真实 domain 调用）
+        self.step_handlers: Dict[str, Callable[[], StepResult]] = self._build_step_handlers()
 
     def _load_or_initialize_context(self) -> ContextSchemaV2:
-        """加载已有 context 或初始化新的"""
-        if self.context_file.exists():
-            # 从 YAML 加载（需要实现 YAML 序列化）
-            # 简化版：假设 JSON 格式
-            import json
-            with open(self.context_file, 'r') as f:
-                data = json.load(f)
+        """加载已有 context 或初始化新的（经 StateStore，YAML 后端）"""
+        data = self.state_store.load()
+        if data is not None:
             return ContextSchemaV2.from_dict(data)
-        else:
-            # 初始化新 context
-            ctx = ContextSchemaV2()
-            ctx.runtime = RuntimeInfo(
-                workflow_run_id=self._generate_run_id(),
-                started_at=datetime.now().isoformat(),
+
+        # 初始化新 context
+        ctx = ContextSchemaV2()
+        ctx.runtime = RuntimeInfo(
+            workflow_run_id=self._generate_run_id(),
+            started_at=datetime.now().isoformat(),
+        )
+        # 初始化 15 个步骤
+        for step_id, step_name in WORKFLOW_STEPS:
+            ctx.steps[step_id] = WorkflowStep(
+                step_id=step_id,
+                step_name=step_name,
+                status="pending",
             )
-            # 初始化 15 个步骤
-            for step_id, step_name in WORKFLOW_STEPS:
-                ctx.steps[step_id] = WorkflowStep(
-                    step_id=step_id,
-                    step_name=step_name,
-                    status="pending",
-                )
-            ctx.current_step_id = "01_container_preparation"
-            return ctx
+        ctx.current_step_id = "01_container_preparation"
+        return ctx
 
     def _generate_run_id(self) -> str:
         """生成 workflow run ID"""
@@ -111,11 +124,8 @@ class WorkflowEngine:
         return f"wf-{timestamp}-{random_suffix}"
 
     def _save_context(self):
-        """保存 context 到磁盘"""
-        import json
-        self.context_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.context_file, 'w') as f:
-            json.dump(self.context.to_dict(), f, indent=2, ensure_ascii=False)
+        """保存 context 到磁盘（经 StateStore，写入前自动校验）"""
+        self.state_store.save(self.context.to_dict())
 
     def get_current_step(self) -> Optional[WorkflowStep]:
         """获取当前步骤"""
@@ -153,9 +163,8 @@ class WorkflowEngine:
 
         # 计算耗时
         if step.started_at:
-            from dateutil import parser
-            start = parser.isoparse(step.started_at)
-            end = parser.isoparse(step.finished_at)
+            start = datetime.fromisoformat(step.started_at)
+            end = datetime.fromisoformat(step.finished_at)
             step.duration_seconds = (end - start).total_seconds()
 
         if output_artifacts:
@@ -297,40 +306,142 @@ class WorkflowEngine:
         revision.frozen = True
         self._save_context()
 
-    def run(self):
-        """运行工作流"""
+    def execute_step(self, step_id: str) -> StepResult:
+        """执行单个步骤：置 running → 调 handler → complete_step 落状态"""
+        step = self.context.steps.get(step_id)
+        if not step:
+            raise ValueError(f"Unknown step: {step_id}")
+
+        # 置为 running（重试 failed 步骤时刷新 started_at）
+        if step.status != "running":
+            step.status = "running"
+            step.started_at = datetime.now().isoformat()
+            self._save_context()
+
+        handler = self.step_handlers.get(step_id)
+        if handler is None:
+            result = StepResult(status="failed", fail_reason=f"No handler for step {step_id}")
+        else:
+            self.logger.info(f"Executing step: {step_id} - {step.step_name}")
+            try:
+                result = handler()
+            except Exception as e:  # domain/stub 抛错 → 记为失败，不崩溃引擎
+                self.logger.exception(f"Step {step_id} raised")
+                result = StepResult(status="failed", fail_reason=f"{type(e).__name__}: {e}")
+
+        self.complete_step(
+            step_id,
+            status=result.status,
+            output_artifacts=result.output_artifacts,
+            fail_reason=result.fail_reason,
+            skip_reason=result.skip_reason,
+        )
+        return result
+
+    def run(self) -> ContextSchemaV2:
+        """运行工作流：从恢复点起，确定性驱动 15 步流转直到完成或失败"""
         self.logger.info(f"Starting workflow run: {self.context.runtime.workflow_run_id}")
 
-        # 检测恢复点
+        # 检测恢复点（首次运行返回 01，中断续跑返回中断步骤）
         recovery_step = self.detect_recovery_point()
-        if recovery_step:
+        if recovery_step and recovery_step != self.context.current_step_id:
             self.logger.info(f"Recovering from step: {recovery_step}")
             self.context.current_step_id = recovery_step
+            self._save_context()
 
         # 主循环
         while True:
             current_step_id = self.context.current_step_id
-            step = self.get_current_step()
+            step = self.context.steps.get(current_step_id)
 
-            if not step:
+            if step is None:
                 self.logger.info("Workflow completed")
                 break
 
-            if step.status == "success":
-                # 已完成，转到下一步
+            # 已完成 / 跳过 → 前进到下一步
+            if step.status in ("success", "skipped"):
                 next_step = self.get_next_step(current_step_id)
-                if next_step:
-                    self.transition_to_step(next_step)
-                else:
+                if next_step is None:
+                    self.logger.info("Workflow completed")
                     break
+                self.context.current_step_id = next_step
+                self._save_context()
                 continue
 
-            # 执行步骤
-            self.logger.info(f"Executing step: {step.step_id} - {step.step_name}")
-            self.transition_to_step(current_step_id)
+            # pending / running / failed → 执行
+            result = self.execute_step(current_step_id)
+            if result.status == "failed":
+                self.logger.error(f"Step {current_step_id} failed: {result.fail_reason}")
+                break
 
-            # 调用具体执行器（下一步实现）
-            # result = self.execute_step(current_step_id)
+            next_step = self.get_next_step(current_step_id)
+            if next_step is None:
+                self.logger.info("Workflow completed")
+                break
+            self.context.current_step_id = next_step
+            self._save_context()
 
-            # 暂时跳过实际执行，只是演示状态机
-            break
+        return self.context
+
+    # ------------------------------------------------------------------
+    # 15 步执行器 dispatch 表
+    # M0：全部为 stub（引擎↔domain 的接线点）。M1/M2 逐个替换为真实 domain
+    # 调用（见 plan §6 工作段 3-9 / dispatch 表）。此处刻意不 import domain，
+    # 保证 M0 引擎可脱离容器空跑、全程单测可回归。
+    # ------------------------------------------------------------------
+
+    def _build_step_handlers(self) -> Dict[str, Callable[[], StepResult]]:
+        return {
+            "01_container_preparation": self._stub_step,
+            "02_admission": self._stub_step,
+            "03_v3_discovery_startup": self._stub_discovery,
+            "04_v3_discovered": self._stub_freeze_discovered,
+            "05_v3_startup_tuning": self._stub_step,
+            "06_v3_accuracy": self._stub_step,
+            "07_v3_accuracy_tuning": self._stub_step,
+            "08_v3_performance": self._stub_step,
+            "09_v3_final": self._stub_freeze_final,
+            "10_v3_release": self._stub_step,
+            "11_v4_reduction": self._stub_step,
+            "12_v4_accuracy_check": self._stub_step,
+            "13_v4_release": self._stub_step,
+            "14_report": self._stub_step,
+            "15_finalize": self._stub_finalize,
+        }
+
+    def _stub_step(self) -> StepResult:
+        """M0 通用占位：直接成功。M1/M2 替换为真实 domain 执行器调用。"""
+        return StepResult(status="success")
+
+    def _stub_discovery(self) -> StepResult:
+        """M0 占位：创建 v3-discovered revision（练习 revision store 接线）。"""
+        if "v3-discovered" not in self.context.operator_revisions:
+            self.create_operator_revision(
+                revision_id="v3-discovered",
+                parent_revision_id=None,
+                enabled_ops=[],
+            )
+        return StepResult(status="success")
+
+    def _stub_freeze_discovered(self) -> StepResult:
+        """M0 占位：冻结 v3-discovered。"""
+        if "v3-discovered" in self.context.operator_revisions:
+            self.freeze_revision("v3-discovered")
+        return StepResult(status="success")
+
+    def _stub_freeze_final(self) -> StepResult:
+        """M0 占位：创建并冻结 v3-final（继承 v3-discovered）。"""
+        if "v3-final" not in self.context.operator_revisions:
+            parent = "v3-discovered" if "v3-discovered" in self.context.operator_revisions else None
+            self.create_operator_revision(
+                revision_id="v3-final",
+                parent_revision_id=parent,
+                enabled_ops=[],
+            )
+        self.freeze_revision("v3-final")
+        return StepResult(status="success")
+
+    def _stub_finalize(self) -> StepResult:
+        """M0 占位：标记流程结束时间。"""
+        self.context.runtime.finished_at = datetime.now().isoformat()
+        return StepResult(status="success")

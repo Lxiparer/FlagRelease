@@ -19,9 +19,14 @@
 所有业务事实必须引用已登记的 Artifact，不能是自由文本推断。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, fields
 from typing import List, Dict, Optional, Literal
 from datetime import datetime
+
+
+class ContextValidationError(Exception):
+    """Context 写入校验失败（字段越权 / 篡改不可变数据）"""
+    pass
 
 
 @dataclass
@@ -35,8 +40,8 @@ class ArtifactReference:
 @dataclass
 class RuntimeInfo:
     """运行时环境信息"""
-    workflow_run_id: str  # 格式: wf-<YYYYMMDD>-<HHMMSS>-<short-hash>
-    started_at: str  # ISO 8601
+    workflow_run_id: str = ""  # 格式: wf-<YYYYMMDD>-<HHMMSS>-<short-hash>
+    started_at: str = ""  # ISO 8601
     finished_at: Optional[str] = None
 
     # 容器和模型
@@ -169,26 +174,125 @@ class ContextSchemaV2:
     _meta: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """转换为字典，用于序列化"""
-        # 这里简化实现，实际需要递归处理所有 dataclass
-        return {
-            "schema_version": self.schema_version,
-            "runtime": self.runtime.__dict__,
-            "operator_revisions": {k: v.__dict__ for k, v in self.operator_revisions.items()},
-            "current_revision_id": self.current_revision_id,
-            "gates": {k: v.__dict__ for k, v in self.gates.items()},
-            "steps": {k: v.__dict__ for k, v in self.steps.items()},
-            "current_step_id": self.current_step_id,
-            "registered_artifacts": self.registered_artifacts,
-            "recovery": self.recovery,
-            "_meta": self._meta,
-        }
+        """转换为字典，用于序列化（递归处理所有嵌套 dataclass / Dict / List）"""
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ContextSchemaV2":
-        """从字典反序列化"""
-        # 简化实现，实际需要递归构造所有 dataclass
+        """从字典反序列化（递归重建所有嵌套 dataclass），保证与 to_dict 等价往返"""
         ctx = cls()
         ctx.schema_version = data.get("schema_version", "2.0")
-        # ... 完整实现需要处理所有嵌套结构
+        ctx.current_revision_id = data.get("current_revision_id", "")
+        ctx.current_step_id = data.get("current_step_id", "")
+        ctx.registered_artifacts = list(data.get("registered_artifacts", []))
+        ctx.recovery = dict(data.get("recovery", {}))
+        ctx._meta = dict(data.get("_meta", {}))
+
+        if data.get("runtime"):
+            ctx.runtime = _reconstruct_runtime(data["runtime"])
+
+        ctx.operator_revisions = {
+            rid: _reconstruct_revision(rd)
+            for rid, rd in (data.get("operator_revisions") or {}).items()
+        }
+        ctx.gates = {
+            gid: _reconstruct_gate(gd)
+            for gid, gd in (data.get("gates") or {}).items()
+        }
+        ctx.steps = {
+            sid: _reconstruct_step(sd)
+            for sid, sd in (data.get("steps") or {}).items()
+        }
         return ctx
+
+
+def _reconstruct_artifact_ref(d: Optional[dict]) -> Optional[ArtifactReference]:
+    """重建 Optional[ArtifactReference]"""
+    if not d:
+        return None
+    return ArtifactReference(**d)
+
+
+def _reconstruct_runtime(d: dict) -> RuntimeInfo:
+    """重建 RuntimeInfo（含嵌套 ArtifactReference 版本字段）"""
+    d = dict(d)
+    for k in ("flaggems_version", "flagtree_version", "plugin_version", "vllm_version"):
+        if k in d:
+            d[k] = _reconstruct_artifact_ref(d[k])
+    return RuntimeInfo(**d)
+
+
+def _reconstruct_revision(d: dict) -> OperatorRevision:
+    """重建 OperatorRevision（含嵌套 ArtifactReference）"""
+    d = dict(d)
+    d["source_artifact"] = _reconstruct_artifact_ref(d.get("source_artifact"))
+    d["verification_artifact"] = _reconstruct_artifact_ref(d.get("verification_artifact"))
+    return OperatorRevision(**d)
+
+
+def _reconstruct_gate(d: dict) -> Gate:
+    """重建 Gate（含嵌套 ArtifactReference）"""
+    d = dict(d)
+    d["decision_artifact"] = _reconstruct_artifact_ref(d.get("decision_artifact"))
+    return Gate(**d)
+
+
+def _reconstruct_step(d: dict) -> WorkflowStep:
+    """重建 WorkflowStep（字段均为基本类型 / List / Dict）"""
+    return WorkflowStep(**d)
+
+
+# 顶层字段白名单（用于写入校验，拒绝 schema 之外的字段）
+_TOPLEVEL_FIELDS = {f.name for f in fields(ContextSchemaV2)}
+# 已完成步骤不允许回退到的状态集合外的合法终态
+_TERMINAL_STEP_STATUSES = {"success"}
+
+
+def validate_context_dict(new: dict, old: Optional[dict] = None) -> None:
+    """写入前校验：字段越权 + 篡改不可变数据。不合法抛 ContextValidationError。
+
+    这是 YAML 阶段的「字段权限 / append-only」雏形——存储层无强制约束时，
+    由引擎在写入咽喉处校验（见 memory state-storage-decision）。
+
+    Args:
+        new: 即将写入的 context dict
+        old: 磁盘上已有的 context dict（首次写入为 None）
+    """
+    # --- 结构校验 ---
+    if not isinstance(new, dict):
+        raise ContextValidationError(f"context 必须是 dict，实际 {type(new).__name__}")
+
+    extra = set(new.keys()) - _TOPLEVEL_FIELDS
+    if extra:
+        raise ContextValidationError(f"禁止写入 schema 外的顶层字段: {sorted(extra)}")
+
+    if new.get("schema_version") != "2.0":
+        raise ContextValidationError(
+            f"schema_version 必须为 '2.0'，实际 {new.get('schema_version')!r}"
+        )
+
+    if old is None:
+        return
+
+    # --- 不可篡改：已冻结的 operator revision 内容不得变更 ---
+    old_revs = old.get("operator_revisions") or {}
+    new_revs = new.get("operator_revisions") or {}
+    for rid, orev in old_revs.items():
+        if orev.get("frozen"):
+            if rid not in new_revs:
+                raise ContextValidationError(f"禁止删除已冻结的 revision: {rid}")
+            if new_revs[rid] != orev:
+                raise ContextValidationError(f"禁止修改已冻结的 revision: {rid}")
+
+    # --- 不可篡改：已 success 的步骤不得回退状态 ---
+    old_steps = old.get("steps") or {}
+    new_steps = new.get("steps") or {}
+    for sid, ostep in old_steps.items():
+        if ostep.get("status") in _TERMINAL_STEP_STATUSES:
+            nstep = new_steps.get(sid)
+            if nstep is None:
+                raise ContextValidationError(f"禁止删除已完成的步骤: {sid}")
+            if nstep.get("status") not in _TERMINAL_STEP_STATUSES:
+                raise ContextValidationError(
+                    f"禁止将已完成步骤 {sid} 回退为 {nstep.get('status')!r}"
+                )
