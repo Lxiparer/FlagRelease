@@ -53,6 +53,10 @@ class ChipConfig:
     gems_version: str = ""
     cx: str = "none"
     date_tag: str = ""
+    # date_tag 的跨进程一致种子（原始 workflow_start 字符串，ISO8601）。
+    # 由 from_context 从 context 的 timing.workflow_start 读入，auto_fill_config
+    # 据此生成 date_tag，确保 push/README/upload 等多进程发布段拿到同一时间戳。
+    date_tag_seed: str = ""
     driver_version: str = ""
     sdk_version: str = ""
     torch_version: str = ""
@@ -254,6 +258,12 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     if flagtree_ver:
         config.chip.tree = flagtree_ver
 
+    # date_tag 跨进程一致种子：run-scoped 的 workflow_start（见 auto_fill_config /
+    # _tag_timestamp_from_seed）。发布分多进程执行（push/双tag/README/upload/一致性
+    # 重试），各进程各自 now() 会错开时间戳，导致 README 的 docker pull 指向 Harbor
+    # 上未推送的 tag。改由此稳定种子统一，缺失时 auto_fill 回退 now()。
+    config.chip.date_tag_seed = str((ctx.get('timing', {}) or {}).get('workflow_start', '') or '')
+
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
@@ -417,6 +427,25 @@ def _read_json_field(filepath: str, field: str):
         return None
 
 
+def _tag_timestamp_from_seed(seed: str) -> str:
+    """把 run-scoped 的 workflow_start(ISO8601) 转成 tag 时间戳 YYYYmmddHHMM。
+
+    发布分多进程执行（push / 双tag / README / upload / 一致性重试），若各进程各自
+    datetime.now() 生成 date_tag，时间戳会错开，导致 README 的 docker pull 指向
+    Harbor 上不存在的 tag。改用 context 里 run-scoped 的稳定 workflow_start 作种子，
+    各进程得到同一 tag。种子缺失/解析失败返回 ""，调用方回退 now()（不劣于旧行为）。
+    """
+    if not seed:
+        return ""
+    import datetime
+    # fromisoformat 在 <3.11 不接受结尾 'Z'，先剥除；带偏移量(+08:00)可直接解析
+    s = str(seed).strip().rstrip("Zz")
+    try:
+        return datetime.datetime.fromisoformat(s).strftime("%Y%m%d%H%M")
+    except (ValueError, TypeError):
+        return ""
+
+
 def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     """根据环境检测自动填充配置中的空字段"""
     import datetime
@@ -516,7 +545,8 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.chip.harbor_registry = "harbor.baai.ac.cn/flagrelease-project"
 
     if not config.chip.date_tag:
-        tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        # 优先用跨进程一致的 workflow_start 种子；缺失/解析失败才回退 now()（不劣于旧行为）
+        tag = _tag_timestamp_from_seed(config.chip.date_tag_seed) or datetime.datetime.now().strftime("%Y%m%d%H%M")
         # 根据 version_tag 决定后缀
         version_tag = getattr(config, 'version_tag', None)
         if version_tag:
