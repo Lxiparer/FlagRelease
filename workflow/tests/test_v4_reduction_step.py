@@ -16,12 +16,14 @@
 
 """V4 减算子竖片（步骤11/12/13，M1b）
 
-覆盖：阶段1 性能搜索（仅绝对提升才推进）→ 阶段2 精度回溯（判定走 accuracy_compare
-退出码）→ v4-final 建立/回退 → 条件发布（docker commit/push）。
-全部经 FakeExecutor，不碰容器。
+搜索策略对齐 CLAUDE.md / operator_reduction.py：每轮从 V3 算子集里**随机选 1~3 个
+算子只开这几个**，只测两轮，两轮都无性能提升 → 回退 V3。
+覆盖：随机子集 + 每轮重启 + 运行时 oplist 核验 → 精度回溯（accuracy_compare 退出码）
+→ v4-final 建立/回退 → 条件发布（docker commit/push）。全部经 FakeExecutor。
 """
 
 import json
+import random
 import shutil
 import sys
 import tempfile
@@ -32,8 +34,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.command_executor import FakeExecutor, ExecResult
+from workflow.domain.v4_reduction import pick_random_subset
 
 V4_OPS = ["op_a", "op_b", "op_c"]
+SEED = 0
 
 
 def _bench(throughput: float) -> str:
@@ -44,16 +48,34 @@ def _bench(throughput: float) -> str:
     })
 
 
-def make_v4_fake(throughputs, accuracy_exit: int = 0, commit_ok: bool = True) -> FakeExecutor:
-    """V4 场景 fake：benchmark 按调用次序返回递变吞吐；精度判定返回指定退出码。"""
+def expected_samples(pool, rounds=2, seed=SEED):
+    """复现引擎将要抽到的随机子集（同 seed 同序列）"""
+    rng = random.Random(seed)
+    return [pick_random_subset(list(pool), rng) for _ in range(rounds)]
+
+
+_WHITELIST_OK = json.dumps({
+    "success": True, "env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
+})
+
+
+def make_v4_fake(throughputs, accuracy_exit: int = 0, commit_ok: bool = True,
+                 whitelist_results=None) -> FakeExecutor:
+    """V4 场景 fake：benchmark 按调用次序返回递变吞吐（首次为基线测量）。
+
+    whitelist_results: 自定义每轮算子白名单下发结果（序列）；缺省全部成功。
+    """
     fake = FakeExecutor()
     fake.when_sequence("benchmark_runner", [ExecResult(0, _bench(t)) for t in throughputs])
+    if whitelist_results is not None:
+        fake.when_sequence("apply_op_config", list(whitelist_results))
+    else:
+        fake.when("apply_op_config", returncode=0, stdout=_WHITELIST_OK)
     fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
     fake.when(
         "accuracy_compare",
         returncode=accuracy_exit,
-        stdout=json.dumps({"nv": {"score": 66.8}, "rel_drop": 0.02,
-                           "aligned": accuracy_exit == 0}),
+        stdout=json.dumps({"nv": {"score": 66.8}, "rel_drop": 0.02}),
     )
     if commit_ok:
         fake.when("docker commit", returncode=0)
@@ -76,6 +98,10 @@ class V4TestBase(unittest.TestCase):
         eng = WorkflowEngine(self.tmpdir, executor=fake)
         eng.context.runtime.container_name = "test_ctr"
         eng.context.runtime.model_name = "TestModel"
+        eng.context.runtime.model_path = "/models/TestModel"
+        eng.startup_tuning_timeout = 0
+        eng.startup_tuning_poll_interval = 0
+        eng.v4_seed = SEED
         for sid, _ in WORKFLOW_STEPS[:10]:
             eng.context.steps[sid].status = "success"
         if v3_ops is not None:
@@ -95,46 +121,112 @@ class V4TestBase(unittest.TestCase):
     def _results(self, name):
         return Path(self.tmpdir) / "results" / name
 
+    def _applied_whitelists(self, fake) -> list:
+        """从 apply_op_config 调用中提取每轮实际下发的算子白名单"""
+        out = []
+        for call in fake.calls_containing("apply_op_config"):
+            joined = " ".join(call)
+            marker = "--flagos-whitelist '"
+            start = joined.find(marker)
+            if start >= 0:
+                out.append(joined[start + len(marker):].split("'")[0].split(","))
+        return out
+
 
 class TestV4Search(V4TestBase):
-    """步骤11：性能搜索"""
+    """步骤11：随机子集性能搜索（两轮）"""
 
-    def test_no_improvement_skips_and_falls_back(self):
-        """吞吐恒定 → 无合法提升 → 11/12/13 全 skipped，落回退记录，无 v4-final"""
-        fake = make_v4_fake([500.0])  # 序列末项重复：所有测量都返回 500
+    def test_two_rounds_no_improvement_falls_back(self):
+        """两轮都不超基线 → 无候选 → 11/12/13 全 skipped、回退 V3、不发 docker"""
+        # 首次是基线测量，之后两轮 trial 都不超
+        fake = make_v4_fake([500.0, 480.0, 490.0])
         engine = self._engine(fake, v3_ops=V4_OPS)
         ctx = engine.run()
 
         self.assertEqual(ctx.steps["11_v4_reduction"].status, "skipped")
-        self.assertIn("no_valid_improvement",
-                      ctx.steps["11_v4_reduction"].skip_reason)
+        self.assertIn("no_valid_improvement", ctx.steps["11_v4_reduction"].skip_reason)
         self.assertEqual(ctx.gates["v4.established"].status, "failed")
         self.assertNotIn("v4-final", ctx.operator_revisions)
-        # 回退记录：不产出 V4，V3 为最终交付版
+        search = self._art(engine, "v4-search-result")
+        self.assertEqual(search["rounds_probed"], 2)  # 只测两轮
+        self.assertEqual(search["max_rounds"], 2)
+        self.assertEqual(search["candidate_count"], 0)
+        self.assertEqual(search["baseline_source"], "measured")
+        self.assertEqual(search["seed"], SEED)  # 随机带种子，可复现
+        # 回退记录
         fallback = json.loads(self._results("v4_fallback_record.json").read_text())
         self.assertTrue(fallback["fallback_to_v3"])
-        self.assertFalse(fallback["established"])
-        # 未发 docker commit/push
         self.assertFalse(fake.calls_containing("docker commit"))
 
-    def test_only_absolute_improvement_advances_baseline(self):
-        """基线动态推进：仅当试禁用后吞吐 > 当前最优才产生候选"""
-        # call1 基线 500 → t1 600（提交）→ t2 600（不提）→ t3 600（不提）
-        fake = make_v4_fake([500.0, 600.0, 600.0, 600.0])
+    def test_only_sampled_subset_is_enabled(self):
+        """V4 采样：每轮只开 1~3 个算子（其余全关），且白名单真的是采样子集"""
+        fake = make_v4_fake([500.0, 600.0, 600.0])
         engine = self._engine(fake, v3_ops=V4_OPS)
         engine.execute_step("11_v4_reduction")
 
         search = self._art(engine, "v4-search-result")
+        samples = [t["sampled_ops"] for t in search["trials"]]
+        self.assertEqual(samples, expected_samples(V4_OPS))  # 同 seed → 同序列
+        for s in samples:
+            self.assertTrue(1 <= len(s) <= 3)
+            self.assertTrue(set(s).issubset(set(V4_OPS)))
+
+        # 每轮 trial revision：enabled 只有采样集，其余进 disabled 且归 v4_performance
+        for t in search["trials"]:
+            rev = engine.context.operator_revisions[t["revision_id"]]
+            self.assertEqual(list(rev.enabled_ops), t["sampled_ops"])
+            self.assertEqual(set(rev.disabled_ops), set(V4_OPS) - set(t["sampled_ops"]))
+            self.assertEqual(
+                set(rev.disable_reason_categories["v4_performance"]),
+                set(V4_OPS) - set(t["sampled_ops"]),
+            )
+
+        # 下发到容器的白名单 = 采样集（基线测量 + 2 轮）
+        whitelists = self._applied_whitelists(fake)
+        self.assertEqual(whitelists, [V4_OPS] + samples)
+
+    def test_restart_and_oplist_verified_each_round(self):
+        """每轮都要重启服务（清缓存）并核验运行时 oplist（约束27）"""
+        fake = make_v4_fake([500.0, 600.0, 600.0])
+        fake.when("flaggems_enable_oplist", stdout="op_a")  # 运行时权威来源
+        engine = self._engine(fake, v3_ops=V4_OPS)
+        engine.execute_step("11_v4_reduction")
+
+        # 基线 + 2 轮 = 3 次重启（每次清缓存）
+        self.assertEqual(len(fake.calls_containing("rm -rf /root/.triton/cache/")), 3)
+        self.assertEqual(len(self._applied_whitelists(fake)), 3)
+        # 核验真的读了运行时 txt
+        self.assertTrue(fake.calls_containing("flaggems_enable_oplist"))
+
+    def test_improved_rounds_become_ranked_candidates(self):
+        """超基线的轮次成为候选，按吞吐降序；两轮都提升则两个候选"""
+        fake = make_v4_fake([500.0, 600.0, 650.0])
+        engine = self._engine(fake, v3_ops=V4_OPS)
+        engine.execute_step("11_v4_reduction")
+
+        search = self._art(engine, "v4-search-result")
+        self.assertEqual(search["candidate_count"], 2)
+        self.assertEqual([c["throughput"] for c in search["candidates"]], [650.0, 600.0])
         self.assertEqual(search["baseline_throughput"], 500.0)
-        self.assertEqual(search["trials"], 3)
+        self.assertEqual([c["outcome"] for c in search["trials"]], ["improved", "improved"])
+        # 候选 revision 已由引擎写入 context，且未冻结（尚未验证）
+        for c in search["candidates"]:
+            self.assertIn(c["revision_id"], engine.context.operator_revisions)
+            self.assertFalse(engine.context.operator_revisions[c["revision_id"]].frozen)
+
+    def test_service_fail_round_is_discarded(self):
+        """某轮服务起不来 → 该轮作废（不计候选），不影响其他轮"""
+        fake = make_v4_fake([500.0, 600.0, 600.0], whitelist_results=[
+            ExecResult(0, _WHITELIST_OK),   # 基线重启 ok
+            ExecResult(0, _WHITELIST_OK),   # 第1轮 ok
+            ExecResult(2, "", "bad whitelist"),  # 第2轮起不来
+        ])
+        engine = self._engine(fake, v3_ops=V4_OPS)
+        engine.execute_step("11_v4_reduction")
+
+        search = self._art(engine, "v4-search-result")
+        self.assertEqual([t["outcome"] for t in search["trials"]][1], "service_fail")
         self.assertEqual(search["candidate_count"], 1)
-        cand = search["candidates"][0]
-        self.assertEqual(cand["throughput"], 600.0)
-        self.assertEqual(cand["enabled_ops"], ["op_b", "op_c"])
-        self.assertEqual(cand["disabled_ops"], {"op_a": cand["disabled_ops"]["op_a"]})
-        # 候选 revision 已由引擎写入 context（唯一写入者），且未冻结
-        self.assertIn(cand["revision_id"], engine.context.operator_revisions)
-        self.assertFalse(engine.context.operator_revisions[cand["revision_id"]].frozen)
 
     def test_missing_v3_final_skips(self):
         """v3-final 未建立 → V4 三连 skipped，gate 原因指向 v3-final"""
@@ -152,7 +244,7 @@ class TestV4AccuracyBacktrack(V4TestBase):
 
     def test_qualified_candidate_establishes_v4_final(self):
         """精度达标 → v4-final 冻结、双 gate passed、终检走 accuracy_compare"""
-        fake = make_v4_fake([500.0, 600.0, 600.0, 600.0], accuracy_exit=0)
+        fake = make_v4_fake([500.0, 600.0, 600.0], accuracy_exit=0)
         engine = self._engine(fake, v3_ops=V4_OPS)
         engine.run()
 
@@ -162,18 +254,22 @@ class TestV4AccuracyBacktrack(V4TestBase):
         self.assertTrue(ctx.operator_revisions["v4-final"].frozen)
         self.assertEqual(ctx.gates["accuracy.v4.qualified"].status, "passed")
         self.assertEqual(ctx.gates["v4.established"].status, "passed")
-        # 终检真的跑了精度评测与判定脚本
+        # v4-final 继承选中候选的算子集（只开采样到的算子）
+        search = self._art(engine, "v4-search-result")
+        self.assertEqual(
+            ctx.operator_revisions["v4-final"].enabled_ops,
+            search["candidates"][0]["enabled_ops"],
+        )
+        # 终检前重启了服务并跑了评测与判定脚本
         self.assertTrue(fake.calls_containing("fast_gpqa"))
         self.assertTrue(fake.calls_containing("accuracy_compare"))
-        # 精度证据以 candidate=v4 登记
-        v4_acc = engine.artifact_registry.query_artifacts(
+        self.assertTrue(engine.artifact_registry.query_artifacts(
             artifact_type="accuracy-result", tags={"candidate": "v4"},
-        )
-        self.assertTrue(v4_acc)
+        ))
 
     def test_all_candidates_fail_accuracy_falls_back(self):
         """候选全部精度不达标 → 不建立 v4-final、gate failed、回退记录"""
-        fake = make_v4_fake([500.0, 600.0, 600.0, 600.0], accuracy_exit=1)
+        fake = make_v4_fake([500.0, 600.0, 650.0], accuracy_exit=1)
         engine = self._engine(fake, v3_ops=V4_OPS)
         ctx = engine.run()
 
@@ -184,6 +280,7 @@ class TestV4AccuracyBacktrack(V4TestBase):
         self.assertEqual(ctx.gates["v4.established"].status, "failed")
         report = self._art(engine, "v4-optimization-report")
         self.assertEqual(report["reason"], "accuracy_not_met")
+        self.assertEqual(report["phase2_tested"], 2)  # 两个候选都试过
         self.assertTrue(self._results("v4_fallback_record.json").exists())
         self.assertFalse(fake.calls_containing("docker commit"))
 
@@ -193,7 +290,7 @@ class TestV4Release(V4TestBase):
 
     def test_publishes_v4_when_established(self):
         """V4 成立 → docker commit/push 到 flagrelease-public，发布记录落盘"""
-        fake = make_v4_fake([500.0, 600.0, 600.0, 600.0], accuracy_exit=0)
+        fake = make_v4_fake([500.0, 600.0, 600.0], accuracy_exit=0)
         engine = self._engine(fake, v3_ops=V4_OPS)
         ctx = engine.run()
 
@@ -206,15 +303,13 @@ class TestV4Release(V4TestBase):
         self.assertTrue(record["gates"]["v4_established"]["passed"])
         self.assertIn("harbor.baai.ac.cn/flagrelease-public",
                       record["artifacts"]["published_to"])
-        self.assertEqual(record["operator_count"], len(V4_OPS) - 1)
-        # 发布决策登记 artifact
         self.assertTrue(engine.artifact_registry.query_artifacts(
             artifact_type="v4-release-decision",
         ))
 
     def test_commit_failure_blocks_step(self):
         """docker commit 失败 → 步骤13 失败（真实失败，非回退）"""
-        fake = make_v4_fake([500.0, 600.0, 600.0, 600.0], accuracy_exit=0, commit_ok=False)
+        fake = make_v4_fake([500.0, 600.0, 600.0], accuracy_exit=0, commit_ok=False)
         engine = self._engine(fake, v3_ops=V4_OPS)
         ctx = engine.run()
 

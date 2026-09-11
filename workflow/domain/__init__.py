@@ -8,6 +8,7 @@ from .admission import (
 )
 from .v3_startup import V3DiscoveryStartup
 from .v3_startup_tuning import V3StartupTuning
+from .v3_accuracy_tuning import V3AccuracyTuning
 from .v3_accuracy import V3AccuracyEvaluation
 from .v3_performance import V3PerformanceMeasurement
 from .v3_release import V3ReleaseManager
@@ -21,6 +22,7 @@ __all__ = [
     'FIXED_RUNTIME_ENV',
     'V3DiscoveryStartup',
     'V3StartupTuning',
+    'V3AccuracyTuning',
     'V3AccuracyEvaluation',
     'V3PerformanceMeasurement',
     'V3ReleaseManager',

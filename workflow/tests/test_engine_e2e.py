@@ -73,6 +73,11 @@ def make_fake(admitted: bool = True, accuracy_exit: int = 0) -> FakeExecutor:
     )
     fake.when("docker commit", returncode=0)  # 步骤10 打包
     fake.when("docker push", returncode=0)    # 步骤10 上传
+    # 步骤05 启动调优：plugin 白名单生成（curl /health 走默认 ok → 一次就绪）
+    fake.when("apply_op_config", returncode=0, stdout=json.dumps({
+        "success": True, "mode": "custom",
+        "env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
+    }))
     return fake
 
 
@@ -91,6 +96,8 @@ class TestEngineEndToEnd(unittest.TestCase):
         eng = WorkflowEngine(self.tmpdir, executor=fake or make_fake())
         eng.context.runtime.container_name = "test_ctr"
         eng.context.runtime.model_name = "TestModel"
+        # V4 只测两轮（默认值）；e2e 的 fake 吞吐恒定 → 无提升 → 回退 V3
+        eng.v4_max_rounds = 2
         return eng
 
     def test_run_all_15_steps(self):
@@ -173,6 +180,11 @@ class TestEngineEndToEnd(unittest.TestCase):
         for sid in ["01_container_preparation", "02_admission",
                     "03_v3_discovery_startup", "04_v3_discovered"]:
             engine.context.steps[sid].status = "success"
+        # 步骤03 已发现算子集（步骤05 启动调优的起点）
+        engine.create_operator_revision(
+            "v3-discovered", parent_revision_id=None,
+            enabled_ops=["op_a", "op_b", "op_c"],
+        )
         engine.context.steps["05_v3_startup_tuning"].status = "failed"
         engine.context.current_step_id = "05_v3_startup_tuning"
         engine._save_context()

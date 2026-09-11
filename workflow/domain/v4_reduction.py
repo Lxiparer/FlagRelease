@@ -14,62 +14,75 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""V4 Operator Reduction - V4 减算子性能优化
+"""V4 Operator Reduction - V4 减算子性能优化（Flag-express）
 
-设计原则：
-- 从 V3 基线出发，逐个减算子以提升性能
-- 追求性能绝对值最大化，达标基准是超越 V3（不与 V1 比较）
-- 精度相对退化 ≤ 5% 是 V4 成立前提（硬约束）
-- 保底至少保留 1 个算子（即使是 plugin）
-- 两阶段策略：阶段1 性能搜索（不测精度），阶段2 精度回溯
+搜索策略（对齐 CLAUDE.md 既有流程与 `operator_reduction.py` 的 `_pick_random_subset`）：
+- 每轮从 V3 算子集里**随机选 1~3 个算子，只开启这几个**（其余全关）启动服务
+- 性能 > 优化基线（V3 实测吞吐）→ 进精度校验；精度达标即采纳为 v4-final
+- **只测两轮**（max_rounds=2）；两轮都拿不到"性能提升"→ 回退 V3，不产出 V4
+- 保底：随机选取下限为 1，V4 至少保留 1 个算子
 
-阶段1 - 性能搜索（从 V3 基线开始）：
-1. 从 V3 达标算子集出发
-2. 逐个试禁用算子，仅当禁用后吞吐 > 当前最优才提交
-3. 基线动态推进（每次提交后更新基线为新的更高吞吐）
-4. 全程不测精度，只追求性能
-5. 产出：按吞吐从高到低排序的候选组合列表
+两阶段（plan §7/§「V4」；与引擎步骤11/12 对齐）：
+- 阶段1 性能搜索（`performance_search`，不测精度）→ 候选（按吞吐降序）
+- 阶段2 精度回溯（`accuracy_backtrack`）→ 首个全数据集达标的候选即 v4-final
 
-阶段2 - 精度回溯：
-1. 从性能最优组合开始，按吞吐降序逐个测精度
-2. 第一个精度达标的组合即为 v4-final
-3. 若全部不达标，回退到 V3 等价（继承 V3 精度结论，不重复终检）
-4. V4 成立条件：超越 V3 + 保留≥1算子 + 精度达标
-
-与旧 operator_reduction.py 的区别：
-- 新工作流无本地 V1，V4 不与 V1 比较
-- 性能基准是 V3，不是 V1
-- 精度基准是外部 NV reference（通过 v3_accuracy.py）
+随机性可复现：`random.Random(seed)`，seed 由引擎传入并记入 artifact（引擎要确定性，
+所以随机必须带种子，否则同一输入两次跑出的 V4 不一样）。
 
 架构约定（M1b，见 memory engine-takeover-direction）：
-- 本模块只做**算法 + 测量**，经注入的 executor 执行命令；不直接持有 context。
-- revision 的创建由 Engine 注入的 `revision_factory` 完成（Engine 是 context 唯一写入者）。
-- 阶段1 与阶段2 可能跨进程（步骤11 / 步骤12 分步执行），候选以**可序列化 dict**
-  在 artifact 中传递，阶段2 用同一 factory 按 revision_id 取回/重建 revision。
+- 命令经注入的 executor；**每轮重启并核验运行时 oplist**（plan §V4 实施 3，约束27），
+  否则测的还是上一轮在跑的服务，试验全部无效
+- revision 创建由 Engine 注入的 `revision_factory` 完成（Engine 是 context 唯一写入者）
 """
 
 import json
 import logging
 import os
+import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 from ..schemas.context_v2 import OperatorRevision
 from ..artifacts.registry import ArtifactRegistry
 from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from .v3_startup_tuning import V3StartupTuning
 
-# 候选 revision 的创建回调：由 Engine 注入（Engine 是 context 唯一写入者）。
-# 签名：(revision_id, parent_revision_id, enabled_ops, disabled_ops_map, note) -> OperatorRevision
-# 要求**幂等**：revision_id 已存在时直接返回既有 revision（阶段2 跨进程取回）。
+# 候选 revision 的创建回调（由 Engine 注入；幂等，跨进程按 revision_id 取回）
 RevisionFactory = Callable[
     [str, Optional[str], List[str], Dict[str, str], str], OperatorRevision
 ]
 
-# 禁用原因前缀（含 "performance" 以便归类到 disable_reason_categories.v4_performance）
+# 随机子集规模（对齐 operator_reduction.py：随机选 1~3 个算子只开这几个）
+SUBSET_LO = 1
+SUBSET_HI = 3
+
+# 禁用原因前缀（含 "performance"/"v4" 以便归类到 disable_reason_categories.v4_performance）
 DISABLE_REASON_PREFIX = "v4 performance"
+
+# 运行时 oplist 候选路径（约束27：以运行时 txt 为唯一权威来源）
+RUNTIME_OPLIST_CANDIDATES = [
+    "/tmp/flaggems_enable_oplist.txt",
+    "/tmp/gems.txt",
+    "/root/gems.txt",
+]
+
+
+def pick_random_subset(
+    pool: List[str],
+    rng: random.Random,
+    lo: int = SUBSET_LO,
+    hi: int = SUBSET_HI,
+) -> List[str]:
+    """从 pool 里随机选 lo~hi 个算子（V4 只开这几个）。pool 少于 lo 个时全取。
+
+    与 operator_reduction.py 的同名实现语义一致（含排序，保证可复现）。
+    """
+    k = min(len(pool), rng.randint(lo, min(hi, len(pool))))
+    k = max(k, min(1, len(pool)))
+    return sorted(rng.sample(pool, k))
 
 
 class V4OperatorReduction:
-    """V4 减算子性能优化"""
+    """V4 减算子性能优化（随机子集 + 两轮上限）"""
 
     def __init__(
         self,
@@ -78,124 +91,179 @@ class V4OperatorReduction:
         artifact_registry: Optional[ArtifactRegistry] = None,
         executor: Optional[CommandExecutor] = None,
         revision_factory: Optional[RevisionFactory] = None,
+        startup: Optional[V3StartupTuning] = None,
         reference_model: str = "",
         nv_baseline_file: str = "/flagos-workspace/shared/nv_baseline.yaml",
+        plugin_mode: bool = True,
     ):
         self.workspace_root = workspace_root
         self.container_name = container_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(workspace_root)
         self.executor = executor or SubprocessExecutor()
         self.revision_factory = revision_factory or self._local_revision_factory
+        # 复用启动调优的服务重启能力（清缓存 → 下发白名单 → 起服务 → 等就绪）
+        self.startup = startup or V3StartupTuning(
+            workspace_root=workspace_root,
+            container_name=container_name,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+            revision_factory=self.revision_factory,
+            plugin_mode=plugin_mode,
+        )
         self.reference_model = reference_model
         self.nv_baseline_file = nv_baseline_file
         self.logger = logging.getLogger("workflow.domain.v4_reduction")
 
     # ------------------------------------------------------------------
-    # 阶段1：性能搜索（不测精度）
+    # 阶段1：性能搜索（随机子集，不测精度）
     # ------------------------------------------------------------------
 
     def performance_search(
         self,
         v4_r0: OperatorRevision,
-        max_trials: Optional[int] = None,
+        baseline_throughput: Optional[float] = None,
+        seed: int = 0,
+        max_rounds: int = 2,
     ) -> Dict:
-        """阶段1：性能搜索（不测精度）
+        """阶段1：随机子集性能搜索（不测精度）
 
         Args:
-            v4_r0: v4-r0（v3-final 的不可变克隆），搜索起点与性能基线
-            max_trials: 最多试禁用的算子数（None = 不限；用于预算封顶）
+            v4_r0: v4-r0（v3-final 的不可变克隆），随机采样的算子池
+            baseline_throughput: 优化基线（V3 实测吞吐，通常取自步骤08 性能 artifact）。
+                为 None 时重启 v4-r0 实测一轮作为基线。
+            seed: 随机种子（可复现；记入 artifact）
+            max_rounds: 搜索轮数上限（默认 2，对齐 operator_reduction.py）
 
         Returns:
             **可序列化**的阶段1 报告（直接作为 artifact 内容跨步传递）：
             {
-              execution_success, baseline_throughput, trials,
-              candidate_count, candidates: [...], reason,
+              execution_success, baseline_throughput, baseline_source, seed,
+              max_rounds, rounds_probed, candidate_count, candidates: [...], reason
             }
             candidates 按吞吐降序，每项：
-            {revision_id, parent_revision_id, throughput, enabled_ops,
-             disabled_ops, enabled_count, disabled_count, performance_artifact, note}
-            无任何合法提升时 candidates=[] 且 reason=no_valid_improvement
+            {revision_id, parent_revision_id, throughput, gain_pct, enabled_ops,
+             disabled_count, performance_artifact, round, sampled_ops, note}
+            两轮都无提升 → candidates=[] 且 reason=no_valid_improvement
             （→ V4 不成立，回退 V3）
         """
-        self.logger.info("Phase 1: Performance search (no accuracy testing)")
+        self.logger.info(
+            f"Phase 1: Random-subset performance search "
+            f"(max {max_rounds} rounds, subset {SUBSET_LO}~{SUBSET_HI} ops, seed={seed})"
+        )
 
-        baseline_ok, v3_throughput, _ = self._measure_throughput(v4_r0)
+        # 1. 优化基线：优先用已登记的 V3 实测吞吐（步骤08），避免重复测量同一配置
+        baseline_ok = baseline_throughput is not None and baseline_throughput > 0
+        baseline_source = "provided" if baseline_ok else ""
         if not baseline_ok:
-            self.logger.error("V4-r0 baseline throughput measurement failed")
+            baseline_ok, baseline_throughput, _ = self._measure_throughput(
+                v4_r0, output_name="v4_baseline",
+            )
+            baseline_source = "measured"
+        if not baseline_ok:
+            self.logger.error("V4 baseline throughput unavailable")
             return {
                 "execution_success": False,
                 "baseline_revision_id": v4_r0.revision_id,
                 "baseline_throughput": 0.0,
-                "trials": 0,
+                "baseline_source": "",
+                "seed": seed,
+                "max_rounds": max_rounds,
+                "rounds_probed": 0,
                 "candidate_count": 0,
                 "candidates": [],
                 "reason": "baseline_measurement_failed",
             }
-        self.logger.info(f"V4-r0 baseline throughput: {v3_throughput:.1f} tokens/s")
+        self.logger.info(
+            f"V4 baseline throughput: {baseline_throughput:.1f} tokens/s ({baseline_source})"
+        )
 
-        current_baseline = v3_throughput
-        current_revision = v4_r0
+        # 2. 随机子集搜索（种子可复现）
+        rng = random.Random(seed)
         candidates: List[Dict] = []
-        trials = 0
+        trials: List[Dict] = []
+        pool = list(v4_r0.enabled_ops)
 
-        # 逐个试禁用算子（遍历起点算子集，保证顺序确定）
-        for op_name in v4_r0.enabled_ops:
-            if max_trials is not None and trials >= max_trials:
-                self.logger.info(f"Reached max_trials ({max_trials}), stopping search")
+        for round_num in range(1, max_rounds + 1):
+            sampled = pick_random_subset(pool, rng)
+            if len(sampled) < 1:
+                self.logger.warning("Empty sample, stopping search")
                 break
-
-            # 保底至少保留 1 个算子（plugin 也不例外）
-            if len(current_revision.enabled_ops) <= 1:
-                self.logger.info("Reached minimum operator count (1), stopping search")
-                break
-
-            enabled = [op for op in current_revision.enabled_ops if op != op_name]
-            note = f"{DISABLE_REASON_PREFIX}: disable {op_name} (phase1 trial)"
-            trial_revision = self.revision_factory(
-                f"v4-t{trials + 1}",
-                current_revision.revision_id,
-                enabled,
-                {op_name: note},
-                note,
+            self.logger.info(
+                f"[Round {round_num}/{max_rounds}] 随机只开 {len(sampled)} 个算子: {sampled}"
             )
-            trials += 1
 
-            ok, trial_throughput, perf_artifact = self._measure_throughput(trial_revision)
+            note = f"{DISABLE_REASON_PREFIX}: round {round_num} sampled subset"
+            # V4 = 只开采样到的这几个算子，其余全关
+            disabled_map = {
+                op: f"{note} (only enable {','.join(sampled)})"
+                for op in pool if op not in sampled
+            }
+            trial = self.revision_factory(
+                f"v4-r{round_num}", v4_r0.revision_id, sampled, disabled_map, note,
+            )
+
+            ok, throughput, perf_artifact, err, verify = self._restart_and_measure(
+                trial, output_name=f"v4_probe_round{round_num}",
+            )
+            record = {
+                "round": round_num,
+                "revision_id": trial.revision_id,
+                "sampled_ops": sampled,
+                "enabled_count": len(sampled),
+                "service_ok": ok,
+                "error": err,
+                "throughput": throughput,
+                "oplist_mismatch": bool(verify.get("mismatch")),
+                "runtime_op_count": (len(verify["runtime_ops"])
+                                     if verify.get("runtime_ops") is not None else None),
+            }
             if not ok:
-                # 测量失败不提交（不把失败当提升）
-                self.logger.warning(f"Trial disable {op_name}: measurement failed, skip")
+                self.logger.warning(
+                    f"Round {round_num}: 服务无法启动 → 本轮作废（{err[:200]}）"
+                )
+                record["outcome"] = "service_fail"
+                trials.append(record)
                 continue
 
-            self.logger.info(
-                f"Trial disable {op_name}: throughput={trial_throughput:.1f} "
-                f"(baseline={current_baseline:.1f})"
+            improved = throughput > baseline_throughput
+            gain_pct = (
+                (throughput - baseline_throughput) / baseline_throughput * 100
+                if baseline_throughput > 0 else 0.0
             )
+            record["gain_pct"] = round(gain_pct, 2)
+            record["outcome"] = "improved" if improved else "no_gain"
+            self.logger.info(
+                f"Round {round_num}: {throughput:.1f} tok/s (相对基线 {gain_pct:+.2f}%) → "
+                f"{'性能提升，进精度校验' if improved else '未超基线'}"
+            )
+            trials.append(record)
 
-            # 仅当绝对性能优于当前最优才推进
-            if trial_throughput > current_baseline:
-                self.logger.info("Improvement found, advancing baseline")
-                current_baseline = trial_throughput
-                current_revision = trial_revision
+            if improved:
                 candidates.append({
-                    "revision_id": trial_revision.revision_id,
-                    "parent_revision_id": trial_revision.parent_revision_id,
-                    "throughput": trial_throughput,
-                    "enabled_ops": list(trial_revision.enabled_ops),
-                    "disabled_ops": dict(trial_revision.disabled_ops),
-                    "enabled_count": len(trial_revision.enabled_ops),
-                    "disabled_count": len(trial_revision.disabled_ops),
+                    "revision_id": trial.revision_id,
+                    "parent_revision_id": v4_r0.revision_id,
+                    "throughput": throughput,
+                    "gain_pct": round(gain_pct, 2),
+                    "enabled_ops": list(trial.enabled_ops),
+                    "disabled_count": len(trial.disabled_ops),
                     "performance_artifact": perf_artifact,
+                    "round": round_num,
+                    "sampled_ops": sampled,
                     "note": note,
                 })
 
-        # 按吞吐降序排序
         candidates.sort(key=lambda x: x["throughput"], reverse=True)
-
-        self.logger.info(f"Phase 1 complete: {len(candidates)} candidates ({trials} trials)")
+        self.logger.info(
+            f"Phase 1 complete: {len(candidates)} candidates / {len(trials)} rounds probed"
+        )
         return {
             "execution_success": True,
             "baseline_revision_id": v4_r0.revision_id,
-            "baseline_throughput": v3_throughput,
+            "baseline_throughput": baseline_throughput,
+            "baseline_source": baseline_source,
+            "seed": seed,
+            "max_rounds": max_rounds,
+            "rounds_probed": len(trials),
             "trials": trials,
             "candidate_count": len(candidates),
             "candidates": candidates,
@@ -215,8 +283,8 @@ class V4OperatorReduction:
         """阶段2：精度回溯
 
         按吞吐降序逐个测精度，第一个全数据集达标的组合即为 v4-final。
-        该组合的全数据集评测即**最终精度终检**（plan §8.6）——评测以小时计，
-        不在选中的候选上重复评测。
+        每轮先按候选算子集**重启服务并核验 oplist**（否则测的还是上一轮的配置），
+        再评测。该评测即最终精度终检（plan §V4 实施 6）——评测以小时计，不重复跑。
 
         Args:
             v4_r0: 搜索起点（用于回退说明，不参与评测）
@@ -254,7 +322,15 @@ class V4OperatorReduction:
                 f"ops={len(revision.enabled_ops)}"
             )
 
-            # 评测精度（每个数据集独立判定，判定权在 accuracy_compare 退出码）
+            # 1. 按候选算子集重启 + 核验运行时 oplist（约束27）
+            ok, err, _verify = self._restart_and_verify(revision)
+            if not ok:
+                self.logger.error(
+                    f"Candidate {idx + 1} 重启失败，跳过：{err[:200]}"
+                )
+                continue
+
+            # 2. 评测精度（每个数据集独立判定，判定权在 accuracy_compare 退出码）
             all_qualified, results = evaluator.evaluate_accuracy(
                 candidate="v4",
                 revision=revision,
@@ -262,7 +338,6 @@ class V4OperatorReduction:
                 reference_model=self.reference_model,
                 nv_baseline_file=self.nv_baseline_file,
             )
-
             last_results = results
 
             # 逐数据集登记精度 artifact（无论达标与否，证据不覆盖）
@@ -291,8 +366,8 @@ class V4OperatorReduction:
 
             self.logger.warning(f"Candidate {idx + 1} failed accuracy")
 
-        # 全部不达标，回退到 V3 等价
-        self.logger.warning("All candidates failed accuracy, V4 not established")
+        # 全部不达标（或全部重启失败），回退到 V3
+        self.logger.warning("All candidates failed accuracy/restart, V4 not established")
         return None, {
             "success": False,
             "phase1_candidates": len(candidates),
@@ -301,33 +376,33 @@ class V4OperatorReduction:
             "established": False,
             "fallback_to_v3": True,
             "reason": "accuracy_not_met",
-            # 末个候选的精度结果（失败原因落证；选中候选的即终检结果）
             "last_accuracy_results": last_results,
             "accuracy_results": {},
         }
 
     # ------------------------------------------------------------------
-    # 两阶段组合入口（同一进程内跑完，供 M4 收敛前 / 单测使用）
+    # 两阶段组合入口（同一进程内跑完，供单测使用）
     # ------------------------------------------------------------------
 
     def optimize_v4(
         self,
         v3_final: OperatorRevision,
         datasets: List[str],
+        baseline_throughput: Optional[float] = None,
+        seed: int = 0,
+        max_rounds: int = 2,
     ) -> Tuple[bool, Optional[OperatorRevision], Dict]:
         """V4 减算子优化（阶段1 + 阶段2 组合）
 
         Returns:
             (V4 是否成立, v4-final revision, 优化报告)
-
-        V4 成立条件：
-        1. 性能超越 V3（吞吐 > V3）
-        2. 至少保留 1 个算子
-        3. 精度相对退化 ≤ 5%（每个数据集独立判定）
         """
         self.logger.info(f"Starting V4 optimization from V3 baseline: {v3_final.revision_id}")
 
-        search = self.performance_search(v3_final)
+        search = self.performance_search(
+            v3_final, baseline_throughput=baseline_throughput,
+            seed=seed, max_rounds=max_rounds,
+        )
         candidates = search["candidates"]
         if not candidates:
             self.logger.warning("Phase 1 yielded no performance improvements")
@@ -340,6 +415,7 @@ class V4OperatorReduction:
                 "phase1_candidates": 0,
                 "phase2_tested": 0,
                 "accuracy_results": {},
+                "search": search,
             }
 
         v4_final, report = self.accuracy_backtrack(v3_final, candidates, datasets)
@@ -347,18 +423,70 @@ class V4OperatorReduction:
         return (v4_final is not None), v4_final, report
 
     # ------------------------------------------------------------------
-    # 内部
+    # 内部：重启 + 核验 + 测量
     # ------------------------------------------------------------------
 
-    def _measure_throughput(
-        self,
-        revision: OperatorRevision,
-    ) -> Tuple[bool, float, str]:
-        """测量吞吐（quick benchmark，经注入的 executor）
+    def _restart_and_verify(self, revision: OperatorRevision) -> Tuple[bool, str, Dict]:
+        """按 revision 的算子集重启服务并核验运行时 oplist（约束27）
 
         Returns:
-            (是否测量成功, throughput tokens/s, performance artifact id)
+            (是否成功, 错误信息, 核验信息)
+            核验信息 {"runtime_ops": [...], "effective_ops": [...], "mismatch": bool}
+
+        Note:
+            运行时 txt 与请求集不一致**属正常**（plugin 模式下 txt 含 FlagGems 全量注册
+            算子，实际过滤靠 VLLM_FL_FLAGOS_WHITELIST；已与用户确认）。故 mismatch 只作为
+            证据记录进 trial，**不阻塞流程、不判该轮无效**。
         """
+        ok, crash_info = self.startup.attempt_startup(revision)
+        if not ok:
+            return False, (crash_info or {}).get("error_message", "startup failed"), {}
+
+        runtime_ops = self._read_runtime_oplist()
+        if runtime_ops is None:
+            self.logger.warning("未找到运行时 oplist 文件，跳过核验")
+            return True, "", {"runtime_ops": None, "effective_ops": None, "mismatch": False}
+
+        requested = set(revision.enabled_ops)
+        effective = [op for op in runtime_ops if op in requested]
+        mismatch = set(runtime_ops) != requested
+        if mismatch:
+            # 正常现象（txt = FlagGems 全量注册算子），仅留痕不阻断
+            self.logger.info(
+                f"运行时 oplist 与请求不同：请求 {len(requested)} 个，运行时 {len(runtime_ops)} 个"
+                f"（交集 {len(effective)}）——以运行时为准，不影响本轮测量"
+            )
+        return True, "", {
+            "runtime_ops": runtime_ops, "effective_ops": effective, "mismatch": mismatch,
+        }
+
+    def _read_runtime_oplist(self) -> Optional[List[str]]:
+        """读运行时 oplist（约束27 的唯一权威来源）；无文件返回 None"""
+        for oplist_file in RUNTIME_OPLIST_CANDIDATES:
+            res = self.executor.docker_exec(
+                self.container_name, f"cat {oplist_file}", timeout=10,
+            )
+            if not res.ok:
+                continue
+            ops = [line.strip() for line in (res.stdout or "").split("\n") if line.strip()]
+            if ops:
+                return ops
+        return None
+
+    def _restart_and_measure(
+        self,
+        revision: OperatorRevision,
+        output_name: str,
+    ) -> Tuple[bool, float, str, str, Dict]:
+        """重启 → 核验 → quick benchmark
+
+        Returns:
+            (是否成功, throughput, performance artifact id, 错误信息, 核验信息)
+        """
+        ok, err, verify = self._restart_and_verify(revision)
+        if not ok:
+            return False, 0.0, "", err, verify
+
         from .v3_performance import V3PerformanceMeasurement
 
         measurer = V3PerformanceMeasurement(
@@ -367,22 +495,27 @@ class V4OperatorReduction:
             artifact_registry=self.artifact_registry,
             executor=self.executor,
         )
-
         success, perf_data = measurer.measure_performance(
-            candidate="v4",
-            revision=revision,
-            mode="quick",
+            candidate="v4", revision=revision, mode="quick", output_name=output_name,
         )
-
         if not success:
-            self.logger.error(f"Throughput measurement failed for {revision.revision_id}")
-            return False, 0.0, ""
-
+            return False, 0.0, "", "benchmark failed", verify
         return (
             True,
             perf_data.get("throughput_tokens_per_sec", 0.0),
             perf_data.get("artifact_id", ""),
+            "",
+            verify,
         )
+
+    def _measure_throughput(
+        self,
+        revision: OperatorRevision,
+        output_name: str,
+    ) -> Tuple[bool, float, str]:
+        """测量吞吐（重启 + quick benchmark）"""
+        ok, throughput, artifact_id, _, _ = self._restart_and_measure(revision, output_name)
+        return ok, throughput, artifact_id
 
     @staticmethod
     def _local_revision_factory(
@@ -392,10 +525,7 @@ class V4OperatorReduction:
         disabled_ops: Dict[str, str],
         note: str,
     ) -> OperatorRevision:
-        """默认 factory（未注入 Engine 时）：本地构造 OperatorRevision，不写 context。
-
-        生产路径由 Engine 注入 factory（Engine 是 context 唯一写入者）。
-        """
+        """默认 factory（未注入 Engine 时）：本地构造 OperatorRevision，不写 context"""
         from datetime import datetime
 
         return OperatorRevision(

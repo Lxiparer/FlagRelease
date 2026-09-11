@@ -96,6 +96,16 @@ class WorkflowEngine:
         # 状态存储后端（引擎是 context 的唯一写入者，见 state_store.py）
         self.state_store = YamlStateStore(self.context_file)
 
+        # 启动调优的服务就绪探测预算（步骤05；测试可覆写为 0 以只探一次）
+        self.startup_tuning_timeout = 300
+        self.startup_tuning_poll_interval = 5.0
+
+        # V4 随机子集搜索（步骤11）：每轮随机只开 1~3 个算子，只测 2 轮，
+        # 两轮都无性能提升 → 不产出 V4，回退 V3（对齐 CLAUDE.md 既有流程与
+        # operator_reduction.py）。随机必须带种子，引擎才能可复现。
+        self.v4_max_rounds = 2
+        self.v4_seed = 0
+
         # 初始化子系统
         self.artifact_registry = ArtifactRegistry(str(self.workspace_root))
         self.gate_reducer = GateReducer(self.artifact_registry)
@@ -248,6 +258,7 @@ class WorkflowEngine:
         enabled_ops: List[str],
         additional_disabled: Dict[str, str] = None,
         source_artifact: Optional[str] = None,
+        set_current: bool = True,
     ) -> OperatorRevision:
         """创建新的 operator revision（不可变）
 
@@ -257,6 +268,9 @@ class WorkflowEngine:
             enabled_ops: 启用的算子列表
             additional_disabled: 额外禁用的算子 {op_name: reason}
             source_artifact: 来源 Artifact ID
+            set_current: 是否把 current_revision_id 推进到新 revision。
+                派生**候选**（调优试探/减算子搜索）应传 False——候选未经实测
+                验证前不得成为当前 revision，指针由 handler 显式推进。
 
         Returns:
             OperatorRevision 对象
@@ -304,7 +318,8 @@ class WorkflowEngine:
 
         # 保存到 context
         self.context.operator_revisions[revision_id] = revision
-        self.context.current_revision_id = revision_id
+        if set_current:
+            self.context.current_revision_id = revision_id
         self._save_context()
 
         return revision
@@ -408,11 +423,11 @@ class WorkflowEngine:
             "02_admission": self._step_admission,
             "03_v3_discovery_startup": self._step_v3_discovery,
             "04_v3_discovered": self._stub_freeze_discovered,
-            "05_v3_startup_tuning": self._stub_step,
+            "05_v3_startup_tuning": self._step_v3_startup_tuning,
             "06_v3_accuracy": self._step_v3_accuracy,
-            "07_v3_accuracy_tuning": self._stub_step,
+            "07_v3_accuracy_tuning": self._step_v3_accuracy_tuning,
             "08_v3_performance": self._step_v3_performance,
-            "09_v3_final": self._stub_freeze_final,
+            "09_v3_final": self._step_v3_final,
             "10_v3_release": self._step_v3_release,
             "11_v4_reduction": self._step_v4_reduction,
             "12_v4_accuracy_check": self._step_v4_accuracy_check,
@@ -441,15 +456,22 @@ class WorkflowEngine:
             self.freeze_revision("v3-discovered")
         return StepResult(status="success")
 
-    def _stub_freeze_final(self) -> StepResult:
-        """M0 占位：创建并冻结 v3-final（继承 v3-discovered）。"""
-        if "v3-final" not in self.context.operator_revisions:
-            parent = "v3-discovered" if "v3-discovered" in self.context.operator_revisions else None
-            self.create_operator_revision(
-                revision_id="v3-final",
-                parent_revision_id=parent,
-                enabled_ops=[],
+    def _step_v3_final(self) -> StepResult:
+        """步骤09：冻结 v3-final（继承当前达标 revision 的算子集 + 累计禁用清单）。
+
+        注意：v3-final 的算子集必须来自调优链的终点（v3-startup-stable / v3-accuracy-rN），
+        不能凭空构造——否则发布出去的是"全量开启"而非调优后的集合。
+        """
+        current_id = self.context.current_revision_id
+        current = self.context.operator_revisions.get(current_id)
+        if current is None:
+            return StepResult(
+                status="failed", fail_reason=f"v3-final: 当前 revision {current_id} 缺失",
             )
+
+        self._ensure_revision(
+            "v3-final", parent_revision_id=current_id, enabled_ops=list(current.enabled_ops),
+        )
         self.freeze_revision("v3-final")
         return StepResult(status="success")
 
@@ -504,6 +526,42 @@ class WorkflowEngine:
                 source_artifact=oplist_art,
             )
         return StepResult(status="success", output_artifacts=[oplist_art])
+
+    def _step_v3_startup_tuning(self) -> StepResult:
+        """步骤05：启动兼容性调优（确定性诊断优先）→ 冻结 v3-startup-stable。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="startup tuning: container_name 为空")
+
+        discovered = self.context.operator_revisions.get("v3-discovered")
+        if discovered is None:
+            return StepResult(status="failed", fail_reason="startup tuning: v3-discovered 缺失")
+
+        tuning = self._make_startup_tuning()
+        stable, final_rev, report = tuning.tune_startup_compatibility(discovered, max_rounds=5)
+
+        art = self._register_json_artifact(
+            "startup-tuning-result", "results/startup-tuning-result.json", report,
+            "v3_startup_tuning_1.0", tags={"reason": report.get("reason", "")},
+        )
+        if not stable:
+            # 启动无法稳定。约束18 例外（service_ok=false → 跳过 06-09 直奔私有发布）
+            # 属于流程路由，待 M4 与 shell 路由一并接；此刻按失败停流程。
+            return StepResult(
+                status="failed",
+                fail_reason=f"startup tuning failed: {report.get('reason')}",
+                output_artifacts=[art],
+            )
+
+        # 冻结启动稳定集合（后续精度/性能调优的起点）
+        self._ensure_revision(
+            "v3-startup-stable", parent_revision_id=final_rev.revision_id,
+            enabled_ops=list(final_rev.enabled_ops),
+        )
+        self.freeze_revision("v3-startup-stable")
+        self.context.current_revision_id = "v3-startup-stable"
+        self._save_context()
+        return StepResult(status="success", output_artifacts=[art])
 
     def _step_admission(self) -> StepResult:
         """步骤02：跑 inspect_env → 映射 capabilities → Plugin-only 准入 → gate + runtime。"""
@@ -594,6 +652,67 @@ class WorkflowEngine:
         # 精度不达标不停流程（调优是步骤07）；步骤本身算成功（评测+判定+落 gate 完成）
         return StepResult(status="success")
 
+    def _step_v3_accuracy_tuning(self) -> StepResult:
+        """步骤07：精度不达标时的确定性分组调优（最多3轮）→ 达标集合回写 current_revision。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="accuracy tuning: container_name 为空")
+
+        # 只有精度不达标才调优（达标则跳过，plan §7：可 skipped 但须写明原因）
+        acc_gate = self.context.gates.get("accuracy.v3.qualified")
+        if acc_gate is not None and acc_gate.status == "passed":
+            return StepResult(
+                status="skipped",
+                skip_reason="V3 精度已达标（accuracy.v3.qualified passed），无需调优",
+            )
+
+        revision = self.context.operator_revisions.get(self.context.current_revision_id)
+        if revision is None:
+            return StepResult(
+                status="failed",
+                fail_reason=f"accuracy tuning: revision {self.context.current_revision_id} 缺失",
+            )
+
+        from ..domain import V3AccuracyTuning  # 惰性导入，避免顶层循环
+        startup = self._make_startup_tuning()
+        tuning = V3AccuracyTuning(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            workflow_run_id=self.context.runtime.workflow_run_id,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+            revision_factory=self._revision_factory,
+            startup=startup,
+            plugin_mode=True,
+        )
+        qualified, final_rev, report = tuning.tune_accuracy(
+            revision, self.datasets, max_rounds=3,
+        )
+
+        art = self._register_json_artifact(
+            "accuracy-tuning-result", "results/accuracy-tuning-result.json", report,
+            "v3_accuracy_tuning_1.0", tags={"reason": report.get("reason", "")},
+        )
+
+        if qualified:
+            # 达标集合成为当前 revision（后续性能测量/发布基于它）
+            self.context.current_revision_id = final_rev.revision_id
+            self.context.gates["accuracy.v3.qualified"] = Gate(
+                gate_id="accuracy.v3.qualified",
+                status="passed",
+                criteria="所有数据集 accuracy_compare 退出码=0（相对退化≤5%，含小样本噪声容忍）",
+                evaluated_at=datetime.now().isoformat(),
+                reason=f"调优达标（{report.get('reason')}，{final_rev.revision_id}）",
+            )
+            self._save_context()
+            return StepResult(status="success", output_artifacts=[art])
+
+        # 调优未达标：精度是硬闸门但不终止流程（发布走 private-only，plan/CLAUDE.md 约束18）
+        return StepResult(
+            status="success",
+            output_artifacts=[art],
+        )
+
     def _step_v3_performance(self) -> StepResult:
         """步骤08：V3 性能纯测量（跑 benchmark→登记 artifact，无 gate、不阻断）。"""
         container = self.context.runtime.container_name
@@ -676,9 +795,14 @@ class WorkflowEngine:
             )
 
         # v4-r0 = v3-final 的不可变克隆（搜索起点 + 性能基线，plan §8.1）
+        # 搜索起点是候选，不推进 current_revision（V4 未成立时 V3 仍是当前版本）
         v4_r0 = self._ensure_revision(
-            "v4-r0", parent_revision_id="v3-final", enabled_ops=list(v3_final.enabled_ops),
+            "v4-r0", parent_revision_id="v3-final",
+            enabled_ops=list(v3_final.enabled_ops), set_current=False,
         )
+
+        # 优化基线 = V3 实测吞吐（步骤08 登记的性能 artifact），不重复测量同一配置
+        baseline = self._latest_performance_throughput(candidate="v3")
 
         from ..domain import V4OperatorReduction  # 惰性导入，避免顶层循环
         reduction = V4OperatorReduction(
@@ -686,15 +810,20 @@ class WorkflowEngine:
             container_name=container,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
-            revision_factory=self._v4_revision_factory,
+            revision_factory=self._revision_factory,
+            startup=self._make_startup_tuning(),
             reference_model=self.context.runtime.model_name,
             nv_baseline_file=self.NV_BASELINE,
         )
-        report = reduction.performance_search(v4_r0)
+        report = reduction.performance_search(
+            v4_r0, baseline_throughput=baseline,
+            seed=self.v4_seed, max_rounds=self.v4_max_rounds,
+        )
         report["phase"] = "performance_search"
         report["_meta"] = {
             "candidates": "按吞吐降序的候选组合（阶段2 精度回溯的输入）",
-            "reason": "no_valid_improvement = 无合法性能提升 → V4 不成立",
+            "baseline_source": "provided = 取步骤08 的 V3 实测吞吐；measured = 本轮重启实测",
+            "reason": "no_valid_improvement = 两轮随机子集都没有性能提升 → V4 不成立",
         }
 
         art = self._register_json_artifact(
@@ -741,7 +870,8 @@ class WorkflowEngine:
             container_name=container,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
-            revision_factory=self._v4_revision_factory,
+            revision_factory=self._revision_factory,
+            startup=self._make_startup_tuning(),
             reference_model=self.context.runtime.model_name,
             nv_baseline_file=self.NV_BASELINE,
         )
@@ -842,6 +972,7 @@ class WorkflowEngine:
         parent_revision_id: Optional[str],
         enabled_ops: List[str],
         additional_disabled: Optional[Dict[str, str]] = None,
+        set_current: bool = True,
     ) -> OperatorRevision:
         """取回已存在的 revision，否则创建（幂等——跨步/跨进程重建同一 revision）"""
         existing = self.context.operator_revisions.get(revision_id)
@@ -852,9 +983,10 @@ class WorkflowEngine:
             parent_revision_id=parent_revision_id,
             enabled_ops=enabled_ops,
             additional_disabled=additional_disabled,
+            set_current=set_current,
         )
 
-    def _v4_revision_factory(
+    def _revision_factory(
         self,
         revision_id: str,
         parent_revision_id: Optional[str],
@@ -862,13 +994,58 @@ class WorkflowEngine:
         disabled_ops_map: Dict[str, str],
         note: str,
     ) -> OperatorRevision:
-        """注入给 V4OperatorReduction 的 revision 工厂（Engine 是 context 唯一写入者）"""
+        """注入给调优/减算子 domain 的 revision 工厂（Engine 是 context 唯一写入者）
+
+        派生的是**候选** revision：未经实测验证前不推进 current_revision_id
+        （由 handler 在确认达标后再显式推进）。
+        """
         return self._ensure_revision(
             revision_id=revision_id,
             parent_revision_id=parent_revision_id,
             enabled_ops=enabled_ops,
             additional_disabled=dict(disabled_ops_map) or None,
+            set_current=False,
         )
+
+    def _make_startup_tuning(self):
+        """构造配置好的启动调优器（步骤05/07/11/12 共用）
+
+        服务重启（清缓存 → 下发算子白名单 → 起服务 → 等就绪）是调优/减算子的共同前置，
+        统一从这里取，保证重启语义与就绪预算一致。
+        """
+        from ..domain import V3StartupTuning  # 惰性导入，避免顶层循环
+        return V3StartupTuning(
+            workspace_root=str(self.workspace_root),
+            container_name=self.context.runtime.container_name,
+            workflow_run_id=self.context.runtime.workflow_run_id,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+            revision_factory=self._revision_factory,
+            model_path=self.context.runtime.model_path,
+            # 本工作流为 plugin-only（见 plan）；启动即 plugin 白名单路径
+            plugin_mode=True,
+            startup_timeout=self.startup_tuning_timeout,
+            poll_interval=self.startup_tuning_poll_interval,
+        )
+
+    def _latest_performance_throughput(self, candidate: str) -> Optional[float]:
+        """取最新一条性能 artifact 的吞吐（用作 V4 的优化基线）；无证据返回 None
+
+        优先读 registry 里已记录的内容摘要（registry 只存摘要，不存全文），
+        摘要缺失时才回落到读 artifact 文件。
+        """
+        art_id = self.artifact_registry.get_latest_artifact(
+            "performance-result", tags={"candidate": candidate},
+        )
+        if not art_id:
+            return None
+
+        entry = self.artifact_registry.get_artifact(art_id) or {}
+        value = (entry.get("content_summary") or {}).get("throughput_tokens_per_sec")
+        if not isinstance(value, (int, float)) or value <= 0:
+            content = self.artifact_registry.load_artifact_content(art_id)
+            value = (content or {}).get("throughput_tokens_per_sec") if isinstance(content, dict) else None
+        return float(value) if isinstance(value, (int, float)) and value > 0 else None
 
     def _register_json_artifact(
         self,

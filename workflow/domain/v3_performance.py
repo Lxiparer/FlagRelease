@@ -63,6 +63,7 @@ class V3PerformanceMeasurement:
         candidate: str,
         revision: OperatorRevision,
         mode: str = "quick",
+        output_name: str = "flagos_optimized",
     ) -> Tuple[bool, Dict]:
         """测量 V3 性能（纯测量，只记录绝对值）
 
@@ -70,6 +71,8 @@ class V3PerformanceMeasurement:
             candidate: 版本标识（v3）
             revision: 当前算子 revision
             mode: benchmark 模式（quick / comprehensive）
+            output_name: benchmark 输出命名。V3 固定 flagos_optimized（约束22）；
+                V4 试禁用探针用 v4_probe_roundN（对齐 operator_reduction.py）
 
         Returns:
             (是否测量成功, 性能结果字典)
@@ -83,9 +86,9 @@ class V3PerformanceMeasurement:
             f"mode={mode}, revision={revision.revision_id})"
         )
 
-        # 执行 benchmark（output-name 标准命名 flagos_optimized）
+        # 执行 benchmark（V3 标准命名 flagos_optimized，见约束22）
         success, perf_data = self._run_benchmark(
-            output_name="flagos_optimized",
+            output_name=output_name,
             mode=mode,
         )
 
@@ -106,6 +109,7 @@ class V3PerformanceMeasurement:
             revision,
             perf_data,
             mode,
+            output_name=output_name,
         )
         perf_data["artifact_id"] = artifact_id
 
@@ -175,6 +179,7 @@ class V3PerformanceMeasurement:
         revision: OperatorRevision,
         perf_data: Dict,
         mode: str,
+        output_name: str = "flagos_optimized",
     ) -> str:
         """注册性能结果 Artifact
 
@@ -183,6 +188,7 @@ class V3PerformanceMeasurement:
             revision: 算子 revision
             perf_data: 性能数据
             mode: benchmark 模式
+            output_name: benchmark 输出命名（决定结果文件路径）
 
         Returns:
             artifact_id
@@ -201,7 +207,7 @@ class V3PerformanceMeasurement:
             "_meta": {"measurement_only": "true"},
         }
 
-        file_path = os.path.join("results", "flagos_optimized.json")
+        file_path = os.path.join("results", f"{output_name}.json")
 
         artifact_id = self.artifact_registry.register_artifact(
             artifact_type="performance-result",

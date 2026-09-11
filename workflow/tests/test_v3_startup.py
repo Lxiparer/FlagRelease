@@ -146,17 +146,13 @@ class TestV3StartupTuning(unittest.TestCase):
         self.assertEqual(child_id, "v3-startup-r2")
 
     def test_create_child_revision_with_disabled(self):
-        """测试创建禁用算子的 child revision"""
-        # 先创建父 revision
+        """测试创建禁用算子的 child revision（经注入的 revision_factory）"""
         parent = OperatorRevision(
             revision_id="v3-discovered",
             enabled_ops=["op_a", "op_b", "op_c", "op_d"],
             disabled_ops={},
             disable_reason_categories={"startup": [], "accuracy": [], "v4_performance": []},
         )
-
-        # 注册到 revision_store
-        self.tuning.revision_store.revisions["v3-discovered"] = parent
 
         child = self.tuning._create_child_revision_with_disabled(
             parent,
