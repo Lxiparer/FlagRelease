@@ -35,11 +35,14 @@ from typing import Dict, List, Optional, Tuple
 
 from ..schemas.context_v2 import OperatorRevision
 from ..artifacts.registry import ArtifactRegistry
-from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor, parse_json_output
 
 
 # benchmark_runner.py 容器内路径（唯一性能测量入口）
 BENCHMARK_RUNNER = "/flagos-workspace/scripts/benchmark_runner.py"
+
+# --mode 是测试模式**标记**（native/flagos_initial/flagos_optimized），与 output-name 口径一致
+BENCHMARK_MODE_LABEL = "flagos_optimized"
 
 
 class V3PerformanceMeasurement:
@@ -119,6 +122,7 @@ class V3PerformanceMeasurement:
         self,
         output_name: str,
         mode: str,
+        mode_label: str = BENCHMARK_MODE_LABEL,
     ) -> Tuple[bool, Dict]:
         """执行 benchmark_runner.py（唯一性能测量入口，经注入的 executor）
 
@@ -129,8 +133,11 @@ class V3PerformanceMeasurement:
         Returns:
             (是否成功, 性能数据)
         """
+        # --strategy 选 quick/comprehensive；--mode 是**标记**（native/flagos_initial/
+        # flagos_optimized），不是策略——早前误写成 `--mode quick`（argparse 不报错但标签错）。
         script = (
-            f"python3 {BENCHMARK_RUNNER} --mode {mode} --output-name {output_name}"
+            f"python3 {BENCHMARK_RUNNER} --strategy {mode} "
+            f"--mode {mode_label} --output-name {output_name}"
         )
         res = self.executor.docker_exec(self.container_name, script, timeout=3600)
         if not res.ok:
@@ -158,20 +165,8 @@ class V3PerformanceMeasurement:
 
     @staticmethod
     def _safe_json(text: str):
-        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort）"""
-        text = (text or "").strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            start = text.rfind("{")
-            if start >= 0:
-                try:
-                    return json.loads(text[start:])
-                except Exception:
-                    return None
-            return None
+        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort，共享实现）"""
+        return parse_json_output(text)
 
     def register_performance_artifact(
         self,

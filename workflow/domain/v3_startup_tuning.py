@@ -42,7 +42,7 @@ from ..artifacts.registry import ArtifactRegistry
 from ..agent.protocol import StartupFailureRequest, AnalysisResult
 from ..agent.policy_validator import PolicyValidator
 from ..agent.session_manager import AgentSessionManager
-from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor, parse_json_output
 
 # 容器内工具/路径
 # 注意：`setup_workspace.sh` 只把工具投到 `/flagos-workspace/scripts/`（容器里没有 skills/ 目录）。
@@ -464,20 +464,8 @@ class V3StartupTuning:
 
     @staticmethod
     def _safe_json(text: str):
-        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort）"""
-        text = (text or "").strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            start = text.rfind("{")
-            if start >= 0:
-                try:
-                    return json.loads(text[start:])
-                except Exception:
-                    return None
-            return None
+        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort，共享实现）"""
+        return parse_json_output(text)
 
     # ------------------------------------------------------------------
     # revision 派生

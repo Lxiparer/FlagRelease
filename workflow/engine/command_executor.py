@@ -30,6 +30,7 @@ domain 从此调 self.executor.run(...) / .docker_exec(...)，不再内联 subpr
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+import json
 import subprocess
 
 
@@ -65,6 +66,28 @@ def build_docker_exec_argv(
     inner = f"PATH=/opt/conda/bin:$PATH && {script}"
     argv += [container, "bash", "-lc", inner]
     return argv
+
+
+def parse_json_output(text: str):
+    """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort）。
+
+    容器内脚本普遍会先打日志（vLLM plugin INFO、warning、`✓` 进度行）再打 JSON，
+    直接 json.loads(stdout) 会失败——这是实测确认过的行为（见 inspect_env --output-json）。
+    策略：先按整体解析，失败则从最后一个 `{` 起再试。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.rfind("{")
+        if start >= 0:
+            try:
+                return json.loads(text[start:])
+            except Exception:
+                return None
+        return None
 
 
 class CommandExecutor(ABC):

@@ -25,22 +25,27 @@
 """
 
 import json
-import subprocess
 import logging
+import os
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from ..artifacts.registry import ArtifactRegistry
 from ..schemas.context_v2 import OperatorRevision
-from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor, parse_json_output
 
 
 # 评测脚本 / 判定脚本（容器内路径）
 # 注意：`setup_workspace.sh` 的 SCRIPT_MAP 只把工具投到 `/flagos-workspace/scripts/`
 # （容器里**没有** `skills/` 目录），这里必须用实际部署路径，否则真跑即 file-not-found。
-EVAL_SCRIPT = "/flagos-workspace/scripts/fast_gpqa.py"
-ACCURACY_COMPARE = "/flagos-workspace/scripts/accuracy_compare.py"
+TOOLS_DIR = "/flagos-workspace/scripts"
+EVAL_WRAPPER = f"{TOOLS_DIR}/eval_wrapper.py"
+EVAL_SCRIPT = f"{TOOLS_DIR}/fast_gpqa.py"
+EVAL_CONFIG = "fast_gpqa_config.yaml"  # 相对 TOOLS_DIR（evals 的 cwd 即 scripts/）
+ACCURACY_COMPARE = f"{TOOLS_DIR}/accuracy_compare.py"
+SERVICE_LOG = "/flagos-workspace/logs/service.log"
 
 # 数据集评测预算（thinking 模型口径，见 CLAUDE.md）
 DATASET_BUDGET = {
@@ -159,20 +164,28 @@ class V3AccuracyEvaluation:
         # 候选结果落盘路径（容器内 = 挂载点；V3 标准命名 flagos_optimized）
         candidate_json = f"/flagos-workspace/results/{dataset}_flagos_optimized.json"
 
-        script = (
-            f"cd /flagos-workspace && python3 {EVAL_SCRIPT} "
-            f"--dataset {dataset} --output {candidate_json}"
-        )
+        # 评测必须经 eval_wrapper.py 执行（编排层硬性要求，不要直接调 fast_gpqa.py）：
+        # 它负责 stalled/进度停滞/总超时三层看门狗，超时语义在它身上（fast_gpqa 没有
+        # --max-timeout 参数）。
+        inner = f"python3 {os.path.basename(EVAL_SCRIPT)} --config {EVAL_CONFIG} --dataset {dataset}"
         if budget["limit"] is not None:
-            script += f" --limit {budget['limit']}"
-        script += f" --max-timeout {budget['max_timeout']}"
+            inner += f" --limit {budget['limit']}"
+        inner += f" --output {candidate_json}"
 
+        # 顺序：监督者选项在前、被包裹命令在最后（与 `timeout 300 cmd` 同构；
+        # 也让"外层参数 vs 内层参数"在命令行上一眼可辨）
+        script = (
+            f"cd {TOOLS_DIR} && python3 {os.path.basename(EVAL_WRAPPER)} "
+            f"--service-log {SERVICE_LOG} "
+            f"--stall-timeout 300 --max-timeout {budget['max_timeout']} "
+            f"--eval-cmd \"{inner}\""
+        )
         res = self.executor.docker_exec(
             self.container_name, script, timeout=budget["max_timeout"] + 600
         )
         if not res.ok:
             return False, candidate_json, None, {
-                "error": f"eval exit={res.returncode}: {res.stderr[:500]}",
+                "error": f"eval_wrapper exit={res.returncode}: {res.stderr[:500]}",
                 "dataset": dataset,
             }
 
@@ -228,22 +241,8 @@ class V3AccuracyEvaluation:
 
     @staticmethod
     def _safe_json(text: str):
-        """从可能混杂日志的 stdout 中提取最后一个 JSON 对象（best-effort）"""
-        text = (text or "").strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        # 回退：取最后一个以 { 开头的行块
-        start = text.rfind("{")
-        if start >= 0:
-            try:
-                return json.loads(text[start:])
-            except Exception:
-                return None
-        return None
+        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort，共享实现）"""
+        return parse_json_output(text)
 
     def _parse_accuracy_from_stdout(self, stdout: str) -> Optional[float]:
         """从评测 stdout 尽力解析精度值（仅用于报告，不参与判定）"""

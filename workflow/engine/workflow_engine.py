@@ -42,7 +42,7 @@ from ..schemas.context_v2 import (
 from ..artifacts.registry import ArtifactRegistry
 from ..gates.reducer import GateReducer
 from .state_store import YamlStateStore
-from .command_executor import CommandExecutor, SubprocessExecutor
+from .command_executor import CommandExecutor, SubprocessExecutor, parse_json_output
 # 注：domain 类在 handler 内惰性导入，避免 engine<->domain 顶层循环导入
 # （domain 子模块会 import engine.* 子模块，顶层双向引用会因入口顺序触发 partial-init）
 
@@ -695,17 +695,26 @@ class WorkflowEngine:
         if not container:
             return StepResult(status="failed", fail_reason="admission: container_name 为空")
 
-        res = self.executor.docker_exec(container, f"python3 {self.INSPECT_ENV}")
+        # `--output-json` 是必须的：默认输出是人类可读报告；且该工具的 stdout 前会混有
+        # vLLM plugin INFO / warning 等日志行，必须容错解析（不能 json.loads 整体）
+        script = f"python3 {self.INSPECT_ENV} --output-json"
+        model_path = self.context.runtime.model_path
+        if model_path:
+            script += f" --model-path {model_path}"
+        res = self.executor.docker_exec(container, script)
         if not res.ok:
             return StepResult(
                 status="failed",
                 fail_reason=f"admission: inspect_env exit={res.returncode}: {res.stderr[:300]}",
             )
 
-        try:
-            j = json.loads(res.stdout)
-        except Exception as e:
-            return StepResult(status="failed", fail_reason=f"admission: inspect_env 输出非 JSON: {e}")
+        j = parse_json_output(res.stdout)
+        if not isinstance(j, dict):
+            return StepResult(
+                status="failed",
+                fail_reason="admission: inspect_env 输出不含可解析 JSON"
+                            f"（stdout 前 200 字：{(res.stdout or '')[:200]!r}）",
+            )
 
         capabilities = self._map_inspect_env_to_capabilities(j)
         from ..domain import PluginOnlyAdmission  # 惰性导入，避免顶层循环
