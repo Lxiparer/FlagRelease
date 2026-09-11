@@ -28,6 +28,7 @@ from workflow.domain.v3_startup import V3DiscoveryStartup
 from workflow.domain.v3_startup_tuning import V3StartupTuning
 from workflow.schemas.context_v2 import OperatorRevision
 from workflow.artifacts.registry import ArtifactRegistry
+from workflow.engine.command_executor import FakeExecutor
 
 
 class TestV3DiscoveryStartup(unittest.TestCase):
@@ -42,33 +43,26 @@ class TestV3DiscoveryStartup(unittest.TestCase):
 
     def test_validate_freshness_fresh_oplist(self):
         """测试 freshness 校验 - 新鲜 oplist"""
-        # Mock 最近修改的文件
-        with patch('subprocess.run') as mock_run:
-            import time
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout=str(int(time.time())).encode()
-            )
+        import time
+        self.startup.executor = FakeExecutor().when(
+            "stat -c %Y", stdout=str(int(time.time()))
+        )
+        ok, reason = self.startup._validate_freshness("/tmp/oplist.txt")
 
-            ok, reason = self.startup._validate_freshness("/tmp/oplist.txt")
-
-            self.assertTrue(ok)
-            self.assertIn("fresh", reason.lower())
+        self.assertTrue(ok)
+        self.assertIn("fresh", reason.lower())
 
     def test_validate_freshness_stale_oplist(self):
         """测试 freshness 校验 - 陈旧 oplist"""
-        with patch('subprocess.run') as mock_run:
-            import time
-            # 1小时前的文件
-            mock_run.return_value = Mock(
-                returncode=0,
-                stdout=str(int(time.time() - 3600)).encode()
-            )
+        import time
+        # 1小时前的文件
+        self.startup.executor = FakeExecutor().when(
+            "stat -c %Y", stdout=str(int(time.time() - 3600))
+        )
+        ok, reason = self.startup._validate_freshness("/tmp/oplist.txt")
 
-            ok, reason = self.startup._validate_freshness("/tmp/oplist.txt")
-
-            self.assertFalse(ok)
-            self.assertIn("stale", reason.lower())
+        self.assertFalse(ok)
+        self.assertIn("stale", reason.lower())
 
     def test_validate_identity_valid_count(self):
         """测试 identity 校验 - 合理算子数量"""

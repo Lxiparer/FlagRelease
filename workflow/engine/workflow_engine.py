@@ -406,17 +406,17 @@ class WorkflowEngine:
         return {
             "01_container_preparation": self._stub_step,
             "02_admission": self._step_admission,
-            "03_v3_discovery_startup": self._stub_discovery,
+            "03_v3_discovery_startup": self._step_v3_discovery,
             "04_v3_discovered": self._stub_freeze_discovered,
             "05_v3_startup_tuning": self._stub_step,
             "06_v3_accuracy": self._step_v3_accuracy,
             "07_v3_accuracy_tuning": self._stub_step,
-            "08_v3_performance": self._stub_step,
+            "08_v3_performance": self._step_v3_performance,
             "09_v3_final": self._stub_freeze_final,
-            "10_v3_release": self._stub_step,
-            "11_v4_reduction": self._stub_step,
-            "12_v4_accuracy_check": self._stub_step,
-            "13_v4_release": self._stub_step,
+            "10_v3_release": self._step_v3_release,
+            "11_v4_reduction": self._step_v4_reduction,
+            "12_v4_accuracy_check": self._step_v4_accuracy_check,
+            "13_v4_release": self._step_v4_release,
             "14_report": self._stub_step,
             "15_finalize": self._stub_finalize,
         }
@@ -465,6 +465,45 @@ class WorkflowEngine:
     # inspect_env / nv_baseline 容器内路径
     INSPECT_ENV = "/flagos-workspace/scripts/inspect_env.py"
     NV_BASELINE = "/flagos-workspace/shared/nv_baseline.yaml"
+
+    def _step_v3_discovery(self) -> StepResult:
+        """步骤03：清缓存→起服务→等就绪→抽 oplist→校验→创建 v3-discovered revision。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="discovery: container_name 为空")
+
+        from ..domain import V3DiscoveryStartup  # 惰性导入，避免顶层循环
+        startup = V3DiscoveryStartup(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+        )
+        success, err, oplist = startup.start_service_and_discover(
+            model_path=self.context.runtime.model_path,
+            flaggems_version="",  # identity 仅提示、非阻断
+        )
+        if not success or not oplist:
+            # 起服务/发现失败 → 停在 03（启动调优是步骤05，M1b 尚未接）
+            return StepResult(status="failed", fail_reason=f"discovery failed: {err}")
+
+        # 登记 runtime-oplist artifact（provenance）+ 创建 v3-discovered revision
+        oplist_art = self.artifact_registry.register_artifact(
+            artifact_type="runtime-oplist",
+            content={"operators": oplist, "count": len(oplist)},
+            file_path="results/operator-configs/v3-discovered-oplist.txt",
+            generated_by="script",
+            generator_version="v3_discovery_1.0",
+            tags={"revision": "v3-discovered"},
+        )
+        if "v3-discovered" not in self.context.operator_revisions:
+            self.create_operator_revision(
+                revision_id="v3-discovered",
+                parent_revision_id=None,
+                enabled_ops=oplist,
+                source_artifact=oplist_art,
+            )
+        return StepResult(status="success", output_artifacts=[oplist_art])
 
     def _step_admission(self) -> StepResult:
         """步骤02：跑 inspect_env → 映射 capabilities → Plugin-only 准入 → gate + runtime。"""
@@ -554,6 +593,333 @@ class WorkflowEngine:
 
         # 精度不达标不停流程（调优是步骤07）；步骤本身算成功（评测+判定+落 gate 完成）
         return StepResult(status="success")
+
+    def _step_v3_performance(self) -> StepResult:
+        """步骤08：V3 性能纯测量（跑 benchmark→登记 artifact，无 gate、不阻断）。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="performance: container_name 为空")
+
+        revision = self.context.operator_revisions.get(self.context.current_revision_id)
+        if revision is None:
+            revision = OperatorRevision(revision_id=self.context.current_revision_id or "v3")
+
+        from ..domain import V3PerformanceMeasurement  # 惰性导入，避免顶层循环
+        measurer = V3PerformanceMeasurement(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+        )
+        success, perf = measurer.measure_performance("v3", revision, mode="quick")
+
+        # 纯测量、无 gate：性能不阻断流程（plan §7）。测量失败仅告警，步骤仍成功。
+        artifacts = [perf["artifact_id"]] if success and perf.get("artifact_id") else []
+        if not success:
+            self.logger.warning("V3 性能测量未产出有效结果（非阻断）")
+        return StepResult(status="success", output_artifacts=artifacts)
+
+    def _step_v3_release(self) -> StepResult:
+        """步骤10：V3 发布——引擎按 gate 真相定发布范围，domain 执行 docker commit/push。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="release: container_name 为空")
+
+        # 发布范围决策由引擎持有（不让 domain 重判 gate）
+        acc_gate = self.context.gates.get("accuracy.v3.qualified")
+        accuracy_passed = bool(acc_gate and acc_gate.status == "passed")
+        final_rev = self.context.operator_revisions.get("v3-final")
+        established_passed = bool(final_rev and final_rev.frozen)
+        if final_rev is None:
+            return StepResult(status="failed", fail_reason="release: v3-final revision 缺失")
+
+        from ..domain import V3ReleaseManager  # 惰性导入，避免顶层循环
+        manager = V3ReleaseManager(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            model_name=self.context.runtime.model_name,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+        )
+        success, report = manager.release_v3(final_rev, accuracy_passed, established_passed)
+        if not success:
+            # 打包/上传失败是真实失败（阻断）——与"精度不达标不阻断"不同
+            return StepResult(status="failed", fail_reason=f"release failed: {report.get('error')}")
+
+        # 登记发布决策 artifact
+        art = self.artifact_registry.register_artifact(
+            artifact_type="release-decision",
+            content=report,
+            file_path="results/v3_release_record.json",
+            generated_by="script",
+            generator_version="v3_release_1.0",
+            tags={"version": "v3", "scope": report.get("release_scope", "")},
+        )
+        return StepResult(status="success", output_artifacts=[art])
+
+    # ------------------------------------------------------------------
+    # M1b 真实 handler：步骤11/12/13 V4 减算子竖片
+    # 步骤11 = 性能搜索（阶段1）→ 候选；步骤12 = 精度回溯（阶段2）+ 终检 → v4-final；
+    # 步骤13 = 条件发布（未成立则回退 V3，步骤 skipped 且原因取自 v4.established Gate）。
+    # 跨步通道只有 artifact：候选（可序列化）经 results/v4-search-result.json 传递。
+    # ------------------------------------------------------------------
+
+    def _step_v4_reduction(self) -> StepResult:
+        """步骤11：V4 性能搜索（阶段1，不测精度）→ v4-search-result artifact。"""
+        container = self.context.runtime.container_name
+        v3_final = self.context.operator_revisions.get("v3-final")
+        if v3_final is None or not v3_final.frozen:
+            self._set_v4_established_gate(False, "v3-final 未建立（冻结），V4 不成立")
+            return StepResult(
+                status="skipped",
+                skip_reason="v4: v3-final 未建立（冻结），跳过 V4 减算子",
+            )
+
+        # v4-r0 = v3-final 的不可变克隆（搜索起点 + 性能基线，plan §8.1）
+        v4_r0 = self._ensure_revision(
+            "v4-r0", parent_revision_id="v3-final", enabled_ops=list(v3_final.enabled_ops),
+        )
+
+        from ..domain import V4OperatorReduction  # 惰性导入，避免顶层循环
+        reduction = V4OperatorReduction(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+            revision_factory=self._v4_revision_factory,
+            reference_model=self.context.runtime.model_name,
+            nv_baseline_file=self.NV_BASELINE,
+        )
+        report = reduction.performance_search(v4_r0)
+        report["phase"] = "performance_search"
+        report["_meta"] = {
+            "candidates": "按吞吐降序的候选组合（阶段2 精度回溯的输入）",
+            "reason": "no_valid_improvement = 无合法性能提升 → V4 不成立",
+        }
+
+        art = self._register_json_artifact(
+            "v4-search-result", "results/v4-search-result.json", report,
+            "v4_reduction_1.0", tags={"phase": "performance_search"},
+        )
+
+        if not report["candidates"]:
+            self._set_v4_established_gate(False, f"V4 无合法性能提升（{report['reason']}）")
+            return StepResult(
+                status="skipped",
+                skip_reason=f"V4 无合法性能提升（{report['reason']}）→ 回退 V3",
+                output_artifacts=[art],
+            )
+        return StepResult(status="success", output_artifacts=[art])
+
+    def _step_v4_accuracy_check(self) -> StepResult:
+        """步骤12：V4 精度回溯（阶段2）+ 选中候选全数据集终检 → v4-final 或回退。"""
+        container = self.context.runtime.container_name
+        v3_final = self.context.operator_revisions.get("v3-final")
+        if v3_final is None or not v3_final.frozen:
+            self._set_v4_established_gate(False, "v3-final 未建立（冻结），V4 不成立")
+            return StepResult(status="skipped", skip_reason="v4: v3-final 未建立，跳过 V4 精度回溯")
+
+        search_art = self.artifact_registry.get_latest_artifact("v4-search-result")
+        search = self.artifact_registry.load_artifact_content(search_art) if search_art else None
+        candidates = (search or {}).get("candidates", [])
+        if not candidates:
+            reason = (search or {}).get("reason", "no_search_evidence")
+            self._set_v4_established_gate(False, f"V4 无候选（{reason}）")
+            return StepResult(
+                status="skipped",
+                skip_reason=f"V4 无候选可回溯（{reason}）→ 回退 V3",
+            )
+
+        v4_r0 = self.context.operator_revisions.get("v4-r0")
+        if v4_r0 is None:
+            self._set_v4_established_gate(False, "v4-r0 缺失")
+            return StepResult(status="skipped", skip_reason="V4 搜索起点 v4-r0 缺失 → 回退 V3")
+
+        from ..domain import V4OperatorReduction  # 惰性导入，避免顶层循环
+        reduction = V4OperatorReduction(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+            revision_factory=self._v4_revision_factory,
+            reference_model=self.context.runtime.model_name,
+            nv_baseline_file=self.NV_BASELINE,
+        )
+        selected, report = reduction.accuracy_backtrack(v4_r0, candidates, self.datasets)
+
+        art = self._register_json_artifact(
+            "v4-optimization-report", "results/v4-optimization-report.json", report,
+            "v4_reduction_1.0", tags={"phase": "accuracy_backtrack"},
+        )
+
+        if selected is None:
+            # 候选全部精度不达标 → V4 不成立（流程不回退，步骤13 走 fallback 记录）
+            reason = report.get("reason", "accuracy_not_met")
+            self._set_v4_accuracy_gate(report.get("last_accuracy_results", {}), passed=False)
+            self._set_v4_established_gate(False, f"候选全部精度不达标（{reason}）")
+            return StepResult(
+                status="skipped",
+                skip_reason=f"V4 不成立：候选全部精度不达标 → 回退 V3",
+                output_artifacts=[art],
+            )
+
+        # V4 成立：终检结果落精度 gate（判定来自 accuracy_compare 退出码）
+        self._set_v4_accuracy_gate(report.get("accuracy_results", {}), passed=True)
+
+        # 建立 v4-final：克隆选中候选并冻结（冻结 = V4 establishment 成立的唯一标志）
+        self._ensure_revision(
+            "v4-final", parent_revision_id=selected.revision_id,
+            enabled_ops=list(selected.enabled_ops),
+        )
+        self.freeze_revision("v4-final")
+
+        reason = (
+            f"performance improved (v4_throughput={report.get('v4_throughput', 0.0):.1f} > "
+            f"v3 baseline), accuracy qualified, ops={report.get('v4_operator_count', 0)} >= 1"
+        )
+        self._set_v4_established_gate(True, reason)
+        return StepResult(status="success", output_artifacts=[art])
+
+    def _step_v4_release(self) -> StepResult:
+        """步骤13：V4 条件发布——成立则打包上传，不成立则落回退记录（步骤 skipped）。"""
+        container = self.context.runtime.container_name
+        if not container:
+            return StepResult(status="failed", fail_reason="v4 release: container_name 为空")
+
+        gate = self.context.gates.get("v4.established")
+        established = bool(gate and gate.status == "passed")
+        v4_final = self.context.operator_revisions.get("v4-final") if established else None
+        if established and (v4_final is None or not v4_final.frozen):
+            # gate 说成立但证据链不完整 → fail-closed
+            return StepResult(
+                status="failed",
+                fail_reason="v4 release: v4.established 通过但 v4-final 缺失/未冻结",
+            )
+
+        # 优化报告（步骤11/12 已落 artifact）——回退记录也要引用它说明原因
+        report_art = self.artifact_registry.get_latest_artifact("v4-optimization-report")
+        optimization_report = {}
+        if report_art:
+            optimization_report = self.artifact_registry.load_artifact_content(report_art) or {}
+        if not optimization_report:
+            search_art = self.artifact_registry.get_latest_artifact("v4-search-result")
+            optimization_report = (
+                self.artifact_registry.load_artifact_content(search_art) or {} if search_art else {}
+            )
+
+        from ..domain import V4ReleaseManager  # 惰性导入，避免顶层循环
+        manager = V4ReleaseManager(
+            workspace_root=str(self.workspace_root),
+            container_name=container,
+            model_name=self.context.runtime.model_name,
+            artifact_registry=self.artifact_registry,
+            executor=self.executor,
+        )
+        success, rel = manager.release_v4(
+            v4_final, optimization_report, established_passed=established,
+        )
+        if not success:
+            # 打包/上传失败是真实失败（阻断）——与"V4 未成立回退"不同
+            return StepResult(status="failed", fail_reason=f"v4 release failed: {rel.get('error')}")
+
+        rel_path = (
+            "results/v4_release_record.json" if established else "results/v4_fallback_record.json"
+        )
+        art = self._register_json_artifact(
+            "v4-release-decision", rel_path, rel, "v4_release_1.0",
+            tags={"version": "v4", "established": str(established)},
+            write=False,  # domain 已落盘
+        )
+
+        if not established:
+            skip_reason = gate.reason if gate else "V4 未成立 → 回退 V3"
+            return StepResult(status="skipped", skip_reason=skip_reason, output_artifacts=[art])
+        return StepResult(status="success", output_artifacts=[art])
+
+    def _ensure_revision(
+        self,
+        revision_id: str,
+        parent_revision_id: Optional[str],
+        enabled_ops: List[str],
+        additional_disabled: Optional[Dict[str, str]] = None,
+    ) -> OperatorRevision:
+        """取回已存在的 revision，否则创建（幂等——跨步/跨进程重建同一 revision）"""
+        existing = self.context.operator_revisions.get(revision_id)
+        if existing is not None:
+            return existing
+        return self.create_operator_revision(
+            revision_id=revision_id,
+            parent_revision_id=parent_revision_id,
+            enabled_ops=enabled_ops,
+            additional_disabled=additional_disabled,
+        )
+
+    def _v4_revision_factory(
+        self,
+        revision_id: str,
+        parent_revision_id: Optional[str],
+        enabled_ops: List[str],
+        disabled_ops_map: Dict[str, str],
+        note: str,
+    ) -> OperatorRevision:
+        """注入给 V4OperatorReduction 的 revision 工厂（Engine 是 context 唯一写入者）"""
+        return self._ensure_revision(
+            revision_id=revision_id,
+            parent_revision_id=parent_revision_id,
+            enabled_ops=enabled_ops,
+            additional_disabled=dict(disabled_ops_map) or None,
+        )
+
+    def _register_json_artifact(
+        self,
+        artifact_type: str,
+        rel_path: str,
+        content: Dict,
+        generator_version: str,
+        tags: Optional[Dict[str, str]] = None,
+        write: bool = True,
+    ) -> str:
+        """登记 JSON artifact（默认同时把 content 落盘，供跨步/跨进程读取）"""
+        if write:
+            full = self.workspace_root / rel_path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                json.dump(content, f, indent=2, ensure_ascii=False)
+        return self.artifact_registry.register_artifact(
+            artifact_type=artifact_type,
+            content=content,
+            file_path=rel_path,
+            generated_by="script",
+            generator_version=generator_version,
+            tags=tags or {},
+        )
+
+    def _set_v4_established_gate(self, passed: bool, reason: str):
+        """置 V4 establishment gate（Engine 持有判定，domain 不重判）"""
+        self.context.gates["v4.established"] = Gate(
+            gate_id="v4.established",
+            status="passed" if passed else "failed",
+            criteria=(
+                "search_execution_success AND performance_improved_over_v3 AND "
+                "accuracy_qualified_against_external_nv AND retained_operator_count >= 1"
+            ),
+            evaluated_at=datetime.now().isoformat(),
+            reason=reason,
+        )
+        self._save_context()
+
+    def _set_v4_accuracy_gate(self, results: Dict[str, Dict], passed: bool):
+        """置 V4 精度 gate（判定来自 accuracy_compare 退出码，不内联重算）"""
+        self.context.gates["accuracy.v4.qualified"] = Gate(
+            gate_id="accuracy.v4.qualified",
+            status="passed" if passed else "failed",
+            criteria="所有数据集 accuracy_compare 退出码=0（相对退化≤5%，含小样本噪声容忍）",
+            evaluated_at=datetime.now().isoformat(),
+            reason="; ".join(
+                f"{d}:exit={r.get('exit_code')}" for d, r in (results or {}).items()
+            ) or "no candidate result",
+        )
+        self._save_context()
 
     @staticmethod
     def _map_inspect_env_to_capabilities(j: Dict) -> Dict:

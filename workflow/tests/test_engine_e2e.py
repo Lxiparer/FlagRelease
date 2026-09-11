@@ -25,6 +25,7 @@ import sys
 import tempfile
 import shutil
 import json
+import time
 from pathlib import Path
 
 import yaml
@@ -54,6 +55,9 @@ def make_fake(admitted: bool = True, accuracy_exit: int = 0) -> FakeExecutor:
     if not admitted:
         caps["vllm_plugin_installed"] = False
     fake.when("inspect_env", stdout=json.dumps(caps))
+    fake.when("stat -c %Y", stdout=str(int(time.time())))  # freshness（须先于 oplist 规则）
+    fake.when("flaggems_enable_oplist",
+              stdout="\n".join(f"op_{i}" for i in range(80)))  # 步骤03 oplist 发现
     fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
     fake.when(
         "accuracy_compare",
@@ -61,6 +65,14 @@ def make_fake(admitted: bool = True, accuracy_exit: int = 0) -> FakeExecutor:
         stdout=json.dumps({"nv": {"score": 66.8}, "rel_drop": 0.02,
                            "aligned": accuracy_exit == 0}),
     )
+    fake.when(
+        "benchmark_runner",
+        returncode=0,
+        stdout=json.dumps({"throughput_tokens_per_sec": 1234.5, "ttft_ms": 42.0,
+                           "tpot_ms": 8.0}),
+    )
+    fake.when("docker commit", returncode=0)  # 步骤10 打包
+    fake.when("docker push", returncode=0)    # 步骤10 上传
     return fake
 
 
@@ -82,25 +94,40 @@ class TestEngineEndToEnd(unittest.TestCase):
         return eng
 
     def test_run_all_15_steps(self):
-        """run() 应驱动全部 15 步成功、终点停在 15_finalize（02/06 走真实 handler 对 fake）"""
+        """run() 应驱动全部 15 步走完、终点停在 15_finalize（02/03/06/08/10 真实 handler 对 fake）
+
+        V4 三连（11/12/13）在本 fake 下无性能提升（benchmark 恒定吞吐）→ skipped + 回退 V3，
+        这是正确结论而非失败。
+        """
         engine = self._engine()
         ctx = engine.run()
 
         self.assertEqual(len(WORKFLOW_STEPS), 15)
         for step_id, _ in WORKFLOW_STEPS:
-            self.assertEqual(
-                ctx.steps[step_id].status, "success",
-                f"step {step_id} 未成功: {ctx.steps[step_id].status}",
+            self.assertIn(
+                ctx.steps[step_id].status, ("success", "skipped"),
+                f"step {step_id} 未走完: {ctx.steps[step_id].status}",
             )
         self.assertEqual(ctx.current_step_id, "15_finalize")
+        # V4 无合法提升 → 三连 skipped，v4.established 失败，无 v4-final
+        for sid in ("11_v4_reduction", "12_v4_accuracy_check", "13_v4_release"):
+            self.assertEqual(ctx.steps[sid].status, "skipped", f"{sid} 应 skipped")
+        self.assertEqual(ctx.gates["v4.established"].status, "failed")
+        self.assertNotIn("v4-final", ctx.operator_revisions)
+        # 回退记录落盘
+        self.assertTrue((Path(self.tmpdir) / "results" / "v4_fallback_record.json").exists())
         # 冻结类步骤应产生冻结的 revision
         self.assertTrue(ctx.operator_revisions["v3-discovered"].frozen)
         self.assertTrue(ctx.operator_revisions["v3-final"].frozen)
+        # 步骤03 应把真实发现的 oplist（80 算子）灌入 v3-discovered
+        self.assertEqual(len(ctx.operator_revisions["v3-discovered"].enabled_ops), 80)
         # finalize 应记录结束时间
         self.assertTrue(ctx.runtime.finished_at)
         # 真实 handler 应落 gate
         self.assertEqual(ctx.gates["admission"].status, "passed")
         self.assertEqual(ctx.gates["accuracy.v3.qualified"].status, "passed")
+        # 步骤08 性能测量应登记 artifact（纯测量、无 gate）
+        self.assertTrue(ctx.steps["08_v3_performance"].output_artifacts)
 
     def test_admission_fail_closed_stops_at_02(self):
         """缺组件 → 准入 fail-closed → run() 停在 02_admission"""
@@ -156,7 +183,7 @@ class TestEngineEndToEnd(unittest.TestCase):
         ctx = engine2.run()
 
         for step_id, _ in WORKFLOW_STEPS:
-            self.assertEqual(ctx.steps[step_id].status, "success")
+            self.assertIn(ctx.steps[step_id].status, ("success", "skipped"))
         self.assertEqual(ctx.current_step_id, "15_finalize")
 
 

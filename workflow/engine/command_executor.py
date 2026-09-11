@@ -118,6 +118,16 @@ class SubprocessExecutor(CommandExecutor):
 class _FakeRule:
     match: str          # argv 拼接后需包含的子串
     result: ExecResult
+    sequence: Optional[List[ExecResult]] = None  # 非空时按调用次序依次返回（末项重复）
+    cursor: int = 0
+
+    def next_result(self) -> ExecResult:
+        """取本次应返回的结果（序列规则推进 cursor，末项用尽后重复）"""
+        if not self.sequence:
+            return self.result
+        idx = min(self.cursor, len(self.sequence) - 1)
+        self.cursor += 1
+        return self.sequence[idx]
 
 
 class FakeExecutor(CommandExecutor):
@@ -148,12 +158,27 @@ class FakeExecutor(CommandExecutor):
         self.rules.append(_FakeRule(match, ExecResult(returncode, stdout, stderr)))
         return self
 
+    def when_sequence(
+        self,
+        match: str,
+        results: List[ExecResult],
+    ) -> "FakeExecutor":
+        """注册一条**序列**规则（链式）：第 N 次命中返回 results[N]，末项重复。
+
+        用于「同一命令多次调用、输出需递变」的场景（如 V4 性能搜索逐算子试禁用，
+        每轮 benchmark 吞吐不同）。先注册的先匹配。
+        """
+        if not results:
+            raise ValueError("when_sequence 需要至少一个结果")
+        self.rules.append(_FakeRule(match, results[-1], sequence=list(results)))
+        return self
+
     def run(self, argv: List[str], timeout: Optional[int] = None) -> ExecResult:
         self.calls.append(list(argv))
         joined = " ".join(argv)
         for rule in self.rules:
             if rule.match in joined:
-                return rule.result
+                return rule.next_result()
         return self.default
 
     def calls_containing(self, substr: str) -> List[List[str]]:

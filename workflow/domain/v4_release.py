@@ -17,19 +17,25 @@
 """V4 Release - V4 发布管理
 
 职责：
-1. 评估 V4 established Gate
-2. 发布 V4（-v4 tag）
+1. 按 Engine 传入的 V4 establishment 判定决定发布或回退
+2. 发布 V4（-v4 tag，Harbor flagrelease-public）
 3. 处理回退场景（V4 不成立时不产出独立 V4，报告中说明回退到 V3）
+
+约定（与步骤10 V3 发布一致）：Gate 判定由引擎持有并传入，domain 不重判。
 """
 
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
-from ..schemas.context_v2 import OperatorRevision, Gate
+from ..schemas.context_v2 import OperatorRevision
 from ..artifacts.registry import ArtifactRegistry
-from ..gates.reducer import GateReducer
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+
+# V4 发布目标仓库（V1/V2/V4 → flagrelease-public；V3 单独走 flagrelease-project，见 CLAUDE.md）
+HARBOR_V4_PROJECT = "harbor.baai.ac.cn/flagrelease-public"
 
 
 class V4ReleaseManager:
@@ -41,51 +47,44 @@ class V4ReleaseManager:
         container_name: str = "",
         model_name: str = "",
         artifact_registry: Optional[ArtifactRegistry] = None,
-        gate_reducer: Optional[GateReducer] = None,
+        executor: Optional[CommandExecutor] = None,
     ):
         self.workspace_root = workspace_root
         self.container_name = container_name
         self.model_name = model_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(workspace_root)
-        self.gate_reducer = gate_reducer or GateReducer(self.artifact_registry)
+        self.executor = executor or SubprocessExecutor()
         self.logger = logging.getLogger("workflow.domain.v4_release")
 
     def release_v4(
         self,
         v4_final: Optional[OperatorRevision],
         optimization_report: Dict,
+        established_passed: bool = False,
     ) -> Tuple[bool, Dict]:
         """发布 V4 版本（或处理回退）
 
         Args:
             v4_final: v4-final revision（None 表示 V4 不成立）
-            optimization_report: V4 优化报告
+            optimization_report: V4 优化报告（阶段1/2 产出，经 artifact 传递）
+            established_passed: V4 establishment Gate 是否通过（引擎传入）
 
         Returns:
             (是否成功, 发布信息)
+
+        Note:
+            回退场景返回 (True, fallback_report)：不是执行错误，而是
+            「无合法提升 → 不产出 V4」的正常结论，由引擎记为 skipped。
         """
-        if v4_final is None:
+        if v4_final is None or not established_passed:
             # V4 不成立 - 回退到 V3
-            self.logger.info("V4 not established, fallback to V3")
+            self.logger.info(
+                f"V4 not established (revision={v4_final}, "
+                f"gate_passed={established_passed}), fallback to V3"
+            )
             return self._handle_v4_fallback(optimization_report)
 
-        # V4 成立 - 评估 Gate 并发布
         self.logger.info(f"V4 established (revision={v4_final.revision_id})")
-
-        # 评估 V4 established Gate
-        v4_gate = self.gate_reducer.evaluate_v4_established_gate()
-        self.logger.info(
-            f"V4 Established Gate: passed={v4_gate.passed}, "
-            f"reason={v4_gate.reason}"
-        )
-
-        if not v4_gate.passed:
-            self.logger.warning(f"V4 Gate failed: {v4_gate.reason}")
-            return False, {
-                "success": False,
-                "error": "v4_gate_failed",
-                "reason": v4_gate.reason,
-            }
 
         # 打包镜像（-v4 tag）
         image_success, image_tag = self._package_image(v4_final)
@@ -104,7 +103,7 @@ class V4ReleaseManager:
         # 生成发布报告
         report = self._generate_release_report(
             v4_final,
-            v4_gate,
+            established_passed,
             optimization_report,
             image_tag,
         )
@@ -126,6 +125,8 @@ class V4ReleaseManager:
         fallback_report = {
             "version": "v4",
             "success": False,
+            "execution_success": optimization_report.get("execution_success", True),
+            "established": False,
             "fallback_to_v3": True,
             "reason": optimization_report.get("reason", "unknown"),
             "optimization_attempted": True,
@@ -138,9 +139,9 @@ class V4ReleaseManager:
         }
 
         # 保存回退记录
-        record_file = os.path.join(
-            self.workspace_root, "results", "v4_fallback_record.json"
-        )
+        results_dir = os.path.join(self.workspace_root, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        record_file = os.path.join(results_dir, "v4_fallback_record.json")
 
         with open(record_file, "w") as f:
             json.dump(fallback_report, f, indent=2, ensure_ascii=False)
@@ -161,21 +162,21 @@ class V4ReleaseManager:
         Returns:
             (是否成功, image_tag)
         """
-        from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        # V4 发布到 flagrelease-project（plugin 镜像模式）
-        image_tag = f"harbor.baai.ac.cn/flagrelease-project/{self.model_name}-flagos:{timestamp}-v4"
+        image_tag = f"{HARBOR_V4_PROJECT}/{self.model_name}-flagos:{timestamp}-v4"
 
         self.logger.info(f"Packaging V4 image: {image_tag}")
 
-        # 实际执行 docker commit + docker tag
-        # success = self._execute_docker_commit(...)
-        success = True  # 占位
+        # docker commit 快照容器为镜像（宿主机 docker 命令，非容器内执行）
+        res = self.executor.run(["docker", "commit", self.container_name, image_tag], timeout=1800)
+        if not res.ok:
+            self.logger.error(f"docker commit failed: exit={res.returncode}: {res.stderr[:300]}")
+            return False, image_tag
 
-        return success, image_tag
+        return True, image_tag
 
     def _upload_image(self, image_tag: str) -> bool:
-        """上传 V4 镜像
+        """上传 V4 镜像（docker push 到 Harbor flagrelease-public）
 
         Args:
             image_tag: 镜像 tag
@@ -185,16 +186,17 @@ class V4ReleaseManager:
         """
         self.logger.info(f"Uploading V4 image: {image_tag}")
 
-        # V4 上传到 Harbor flagrelease-project
-        # success = self._execute_docker_push(image_tag)
-        success = True  # 占位
+        res = self.executor.run(["docker", "push", image_tag], timeout=3600)
+        if not res.ok:
+            self.logger.error(f"docker push failed: exit={res.returncode}: {res.stderr[:300]}")
+            return False
 
-        return success
+        return True
 
     def _generate_release_report(
         self,
         revision: OperatorRevision,
-        v4_gate: Gate,
+        established_passed: bool,
         optimization_report: Dict,
         image_tag: str,
     ) -> Dict:
@@ -217,15 +219,12 @@ class V4ReleaseManager:
                 "improvement_over_v3": True,
             },
             "gates": {
-                "v4_established": {
-                    "passed": v4_gate.passed,
-                    "reason": v4_gate.reason,
-                },
+                "v4_established": {"passed": established_passed},
             },
             "image_tag": image_tag,
             "artifacts": {
                 "image": image_tag,
-                "published_to": ["harbor.baai.ac.cn/flagrelease-project"],
+                "published_to": [HARBOR_V4_PROJECT],
             },
         }
 
@@ -237,9 +236,9 @@ class V4ReleaseManager:
         Args:
             report: 发布报告
         """
-        record_file = os.path.join(
-            self.workspace_root, "results", "v4_release_record.json"
-        )
+        results_dir = os.path.join(self.workspace_root, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        record_file = os.path.join(results_dir, "v4_release_record.json")
 
         with open(record_file, "w") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)

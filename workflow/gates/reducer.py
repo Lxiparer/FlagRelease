@@ -31,6 +31,11 @@ from ..artifacts.artifact_schema import AccuracyResultArtifact, PerformanceResul
 from ..schemas.context_v2 import Gate
 
 
+def _fmt(value) -> str:
+    """格式化可空数值（None → "n/a"），用于 gate reason 文案"""
+    return f"{value:.3f}" if isinstance(value, (int, float)) else "n/a"
+
+
 class GateReducer:
     """Gate 归约器 - 基于 Artifact 判定业务闸门"""
 
@@ -107,17 +112,21 @@ class GateReducer:
                 reasons.append(f"{dataset}: relative_drop not calculated")
                 continue
 
+            # 判定权在脚本：qualified 来自 accuracy_compare.py 退出码
+            # （已含小样本噪声容忍）。此处不得用 relative_drop 内联重算——
+            # 剧本容忍的边界样本会被二次判死（与 Engine 的 gate 结论冲突）。
             qualified = artifact_content.get('qualified', False)
-            if not qualified or relative_drop > threshold:
+            if not qualified:
                 all_passed = False
                 reasons.append(
-                    f"{dataset}: relative_drop={relative_drop:.3f} > threshold={threshold} "
-                    f"(candidate={artifact_content.get('accuracy', 0):.1f}%, "
-                    f"nv_reference={nv_reference:.1f}%)"
+                    f"{dataset}: not qualified (script verdict; "
+                    f"relative_drop={_fmt(relative_drop)}, "
+                    f"candidate={_fmt(artifact_content.get('accuracy'))}%, "
+                    f"nv_reference={_fmt(nv_reference)}%)"
                 )
             else:
                 reasons.append(
-                    f"{dataset}: qualified (relative_drop={relative_drop:.3f} <= {threshold})"
+                    f"{dataset}: qualified (script verdict; relative_drop={_fmt(relative_drop)})"
                 )
 
         # 判定
@@ -176,7 +185,12 @@ class GateReducer:
         v4_final_revision_id: str,
         v3_final_revision_id: str,
     ) -> Gate:
-        """评估 V4 是否成立
+        """评估 V4 是否成立（**artifact 侧的审计视图**）
+
+        Note:
+            正式判定由 Engine 步骤12 依据「搜索执行成功 + 性能超越 V3 + 精度退出码达标 +
+            保留≥1算子」直接置 `v4.established` gate（见 workflow_engine._step_v4_accuracy_check）。
+            本方法保留为「只看已登记 artifact」的独立复核视图，不作为流程判定依据。
 
         条件：
         1. 从 v3-final 派生

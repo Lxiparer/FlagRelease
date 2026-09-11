@@ -35,6 +35,11 @@ from typing import Dict, List, Optional, Tuple
 
 from ..schemas.context_v2 import OperatorRevision
 from ..artifacts.registry import ArtifactRegistry
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+
+
+# benchmark_runner.py 容器内路径（唯一性能测量入口）
+BENCHMARK_RUNNER = "/flagos-workspace/scripts/benchmark_runner.py"
 
 
 class V3PerformanceMeasurement:
@@ -45,10 +50,12 @@ class V3PerformanceMeasurement:
         workspace_root: str = "/flagos-workspace",
         container_name: str = "",
         artifact_registry: Optional[ArtifactRegistry] = None,
+        executor: Optional[CommandExecutor] = None,
     ):
         self.workspace_root = workspace_root
         self.container_name = container_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(workspace_root)
+        self.executor = executor or SubprocessExecutor()
         self.logger = logging.getLogger("workflow.domain.v3_performance")
 
     def measure_performance(
@@ -109,7 +116,7 @@ class V3PerformanceMeasurement:
         output_name: str,
         mode: str,
     ) -> Tuple[bool, Dict]:
-        """执行 benchmark_runner.py（唯一性能测量入口）
+        """执行 benchmark_runner.py（唯一性能测量入口，经注入的 executor）
 
         Args:
             output_name: 输出命名（flagos_optimized for V3）
@@ -118,28 +125,49 @@ class V3PerformanceMeasurement:
         Returns:
             (是否成功, 性能数据)
         """
-        cmd = (
-            f"PATH=/opt/conda/bin:$PATH python3 "
-            f"{self.workspace_root}/scripts/benchmark_runner.py "
-            f"--mode {mode} --output-name {output_name}"
+        script = (
+            f"python3 {BENCHMARK_RUNNER} --mode {mode} --output-name {output_name}"
         )
-
-        # 实际通过 docker exec 执行（此处为占位，由 Engine 注入执行器）
-        result_file = os.path.join(
-            self.workspace_root, "results", f"{output_name}.json"
-        )
-
-        try:
-            if os.path.exists(result_file):
-                with open(result_file, "r") as f:
-                    perf_data = json.load(f)
-                return True, perf_data
-            else:
-                self.logger.warning(f"Result file not found: {result_file}")
-                return False, {}
-        except (json.JSONDecodeError, IOError) as e:
-            self.logger.error(f"Failed to read benchmark result: {e}")
+        res = self.executor.docker_exec(self.container_name, script, timeout=3600)
+        if not res.ok:
+            self.logger.error(f"benchmark exit={res.returncode}: {res.stderr[:300]}")
             return False, {}
+
+        # 优先解析 stdout JSON（可单测）；回退读结果文件（真实运行 benchmark 落盘）
+        perf_data = self._safe_json(res.stdout)
+        if perf_data is None:
+            result_file = os.path.join(
+                self.workspace_root, "results", f"{output_name}.json"
+            )
+            if os.path.exists(result_file):
+                try:
+                    with open(result_file, "r") as f:
+                        perf_data = json.load(f)
+                except (json.JSONDecodeError, IOError) as e:
+                    self.logger.error(f"Failed to read benchmark result: {e}")
+                    return False, {}
+
+        if not isinstance(perf_data, dict):
+            self.logger.warning("benchmark 无有效结果（stdout 非 JSON 且无结果文件）")
+            return False, {}
+        return True, perf_data
+
+    @staticmethod
+    def _safe_json(text: str):
+        """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort）"""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            start = text.rfind("{")
+            if start >= 0:
+                try:
+                    return json.loads(text[start:])
+                except Exception:
+                    return None
+            return None
 
     def register_performance_artifact(
         self,

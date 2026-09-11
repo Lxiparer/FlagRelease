@@ -34,6 +34,7 @@ import logging
 
 from ..artifacts.registry import ArtifactRegistry
 from ..schemas.context_v2 import OperatorRevision, ArtifactReference
+from ..engine.command_executor import CommandExecutor, SubprocessExecutor
 
 
 class V3DiscoveryStartup:
@@ -44,10 +45,12 @@ class V3DiscoveryStartup:
         workspace_root: str = "/flagos-workspace",
         container_name: str = "",
         artifact_registry: Optional[ArtifactRegistry] = None,
+        executor: Optional[CommandExecutor] = None,
     ):
         self.workspace_root = Path(workspace_root)
         self.container_name = container_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(str(workspace_root))
+        self.executor = executor or SubprocessExecutor()
         self.logger = logging.getLogger("workflow.domain.v3_startup")
 
     def start_service_and_discover(
@@ -107,7 +110,7 @@ class V3DiscoveryStartup:
         return True, None, oplist
 
     def _clear_caches(self):
-        """清理 Triton/FlagGems 缓存"""
+        """清理 Triton/FlagGems 缓存（经注入的 executor）"""
         cache_dirs = [
             "/root/.triton/cache/",
             "/tmp/triton_cache/",
@@ -115,15 +118,14 @@ class V3DiscoveryStartup:
         ]
 
         for cache_dir in cache_dirs:
-            cmd = f"docker exec {self.container_name} rm -rf {cache_dir}"
-            try:
-                subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            res = self.executor.docker_exec(self.container_name, f"rm -rf {cache_dir}")
+            if res.ok:
                 self.logger.info(f"Cleared cache: {cache_dir}")
-            except subprocess.CalledProcessError as e:
-                self.logger.warning(f"Failed to clear cache {cache_dir}: {e}")
+            else:
+                self.logger.warning(f"Failed to clear cache {cache_dir}: {res.stderr[:200]}")
 
     def _start_service(self, model_path: str) -> Tuple[bool, Optional[str]]:
-        """启动服务
+        """启动服务（detached，经注入的 executor）
 
         Args:
             model_path: 模型路径
@@ -131,30 +133,22 @@ class V3DiscoveryStartup:
         Returns:
             (是否成功, 错误消息)
         """
-        # 调用 start_service.sh
-        # 这里简化实现，实际需要调用容器内的启动脚本
-
-        start_cmd = (
-            f"docker exec -d {self.container_name} bash -c "
-            f"'cd /flagos-workspace && "
+        script = (
+            f"cd /flagos-workspace && "
             f"VLLM_PLUGINS=fl USE_FLAGGEMS=1 "
             f"python3 -m vllm.entrypoints.openai.api_server "
-            f"--model {model_path} "
-            f"--port 8000 "
-            f"> logs/service.log 2>&1'"
+            f"--model {model_path} --port 8000 > logs/service.log 2>&1"
         )
-
-        try:
-            subprocess.run(start_cmd, shell=True, check=True, capture_output=True)
+        res = self.executor.docker_exec(self.container_name, script, detach=True)
+        if res.ok:
             self.logger.info("Service start command issued")
             return True, None
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Failed to start service: {e.stderr.decode()}"
-            self.logger.error(error_msg)
-            return False, error_msg
+        error_msg = f"Failed to start service: {res.stderr[:300]}"
+        self.logger.error(error_msg)
+        return False, error_msg
 
     def _wait_for_service_ready(self, timeout: int = 300) -> bool:
-        """等待服务就绪
+        """等待服务就绪（经注入的 executor）
 
         Args:
             timeout: 超时时间（秒）
@@ -165,27 +159,14 @@ class V3DiscoveryStartup:
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            # 检查健康端点
-            check_cmd = (
-                f"docker exec {self.container_name} "
-                f"curl -s http://localhost:8000/health"
+            res = self.executor.docker_exec(
+                self.container_name,
+                "curl -s http://localhost:8000/health",
+                timeout=10,
             )
-
-            try:
-                result = subprocess.run(
-                    check_cmd,
-                    shell=True,
-                    capture_output=True,
-                    timeout=10,
-                )
-
-                if result.returncode == 0:
-                    self.logger.info("Service is ready")
-                    return True
-
-            except subprocess.TimeoutExpired:
-                pass
-
+            if res.ok:
+                self.logger.info("Service is ready")
+                return True
             time.sleep(5)
 
         self.logger.error(f"Service not ready after {timeout}s")
@@ -207,35 +188,23 @@ class V3DiscoveryStartup:
         ]
 
         for oplist_file in oplist_candidates:
-            cmd = f"docker exec {self.container_name} cat {oplist_file}"
-
-            try:
-                result = subprocess.run(
-                    cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-
-                if result.returncode == 0:
-                    content = result.stdout.strip()
-                    operators = [line.strip() for line in content.split('\n') if line.strip()]
-
+            res = self.executor.docker_exec(
+                self.container_name, f"cat {oplist_file}", timeout=10
+            )
+            if res.ok:
+                content = res.stdout.strip()
+                operators = [line.strip() for line in content.split('\n') if line.strip()]
+                if operators:
                     self.logger.info(
                         f"Extracted {len(operators)} operators from {oplist_file}"
                     )
-
                     return operators, oplist_file
-
-            except Exception as e:
-                self.logger.debug(f"Could not read {oplist_file}: {e}")
 
         self.logger.error("No runtime oplist file found")
         return None, None
 
     def _validate_freshness(self, oplist_file: str) -> Tuple[bool, str]:
-        """校验 oplist freshness（文件修改时间 vs 服务启动时间）
+        """校验 oplist freshness（文件修改时间 vs 现在，经注入的 executor）
 
         Args:
             oplist_file: Oplist 文件路径
@@ -243,36 +212,21 @@ class V3DiscoveryStartup:
         Returns:
             (是否通过, 原因)
         """
-        # 获取服务启动时间（从日志或进程）
-        # 获取 oplist 文件修改时间
-        # 比对：oplist_mtime 应该接近或晚于 service_start_time
-
         # 简化实现：检查文件是否在最近 5 分钟内修改
-        cmd = f"docker exec {self.container_name} stat -c %Y {oplist_file}"
-
+        res = self.executor.docker_exec(
+            self.container_name, f"stat -c %Y {oplist_file}", timeout=10
+        )
+        if not res.ok:
+            return False, f"Failed to check freshness: exit={res.returncode}"
         try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            mtime = int(res.stdout.strip())
+        except (ValueError, AttributeError) as e:
+            return False, f"Failed to parse mtime: {e}"
 
-            if result.returncode == 0:
-                mtime = int(result.stdout.strip())
-                now = int(time.time())
-                age = now - mtime
-
-                if age <= 300:  # 5 分钟内
-                    return True, f"Oplist is fresh (age={age}s)"
-                else:
-                    return False, f"Oplist is stale (age={age}s)"
-
-        except Exception as e:
-            return False, f"Failed to check freshness: {e}"
-
-        return False, "Could not validate freshness"
+        age = int(time.time()) - mtime
+        if age <= 300:  # 5 分钟内
+            return True, f"Oplist is fresh (age={age}s)"
+        return False, f"Oplist is stale (age={age}s)"
 
     def _validate_identity(
         self,
