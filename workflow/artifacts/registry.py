@@ -45,10 +45,20 @@ from .artifact_schema import (
 class ArtifactRegistry:
     """Artifact 注册中心"""
 
-    def __init__(self, workspace_root: str = "/flagos-workspace"):
+    def __init__(self, workspace_root: str = "/flagos-workspace",
+                 registry_root: Optional[str] = None):
+        """
+        Args:
+            workspace_root: 业务产物根（artifact 的 file_path 相对此目录解析）
+            registry_root: registry.json 落点根目录。缺省与 workspace_root 相同（保持原行为）；
+                引擎模式下会指向**每轮归档目录**（`config/engine/artifacts/`），
+                避免上一轮的登记台账跨轮残留——否则 `get_latest_artifact` 会返回上一轮的
+                Artifact（例如 V4 基线读到陈旧吞吐），且 sequence 计数器跨轮累积。
+        """
         self.workspace_root = Path(workspace_root)
-        self.registry_file = self.workspace_root / "artifacts" / "registry.json"
-        self.artifacts_dir = self.workspace_root / "artifacts"
+        self.registry_root = Path(registry_root) if registry_root else self.workspace_root
+        self.registry_file = self.registry_root / "registry.json"
+        self.artifacts_dir = self.registry_root
 
         # 内存索引
         self.artifacts: Dict[str, Dict[str, Any]] = {}

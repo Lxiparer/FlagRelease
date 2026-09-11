@@ -206,11 +206,22 @@ class ContextSchemaV2:
         return ctx
 
 
+def _filter_known(d: dict, cls) -> dict:
+    """只保留 dataclass `cls` 认识的字段，丢弃其余。
+
+    容忍"混入非本 schema 字段"的输入：例如把它指向旧版 context.yaml（顶层/嵌套键都不同，
+    旧 runtime 段带 framework 等字段）时，反序列化应忽略多余字段而不是 TypeError 崩掉。
+    缺失字段交给 dataclass 默认值。
+    """
+    known = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in known}
+
+
 def _reconstruct_artifact_ref(d: Optional[dict]) -> Optional[ArtifactReference]:
     """重建 Optional[ArtifactReference]"""
     if not d:
         return None
-    return ArtifactReference(**d)
+    return ArtifactReference(**_filter_known(d, ArtifactReference))
 
 
 def _reconstruct_runtime(d: dict) -> RuntimeInfo:
@@ -219,7 +230,7 @@ def _reconstruct_runtime(d: dict) -> RuntimeInfo:
     for k in ("flaggems_version", "flagtree_version", "plugin_version", "vllm_version"):
         if k in d:
             d[k] = _reconstruct_artifact_ref(d[k])
-    return RuntimeInfo(**d)
+    return RuntimeInfo(**_filter_known(d, RuntimeInfo))
 
 
 def _reconstruct_revision(d: dict) -> OperatorRevision:
@@ -227,19 +238,19 @@ def _reconstruct_revision(d: dict) -> OperatorRevision:
     d = dict(d)
     d["source_artifact"] = _reconstruct_artifact_ref(d.get("source_artifact"))
     d["verification_artifact"] = _reconstruct_artifact_ref(d.get("verification_artifact"))
-    return OperatorRevision(**d)
+    return OperatorRevision(**_filter_known(d, OperatorRevision))
 
 
 def _reconstruct_gate(d: dict) -> Gate:
     """重建 Gate（含嵌套 ArtifactReference）"""
     d = dict(d)
     d["decision_artifact"] = _reconstruct_artifact_ref(d.get("decision_artifact"))
-    return Gate(**d)
+    return Gate(**_filter_known(d, Gate))
 
 
 def _reconstruct_step(d: dict) -> WorkflowStep:
     """重建 WorkflowStep（字段均为基本类型 / List / Dict）"""
-    return WorkflowStep(**d)
+    return WorkflowStep(**_filter_known(d, WorkflowStep))
 
 
 # 顶层字段白名单（用于写入校验，拒绝 schema 之外的字段）

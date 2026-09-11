@@ -81,9 +81,27 @@ class WorkflowEngine:
 
     def __init__(self, workspace_root: str = "/flagos-workspace",
                  executor: Optional[CommandExecutor] = None,
-                 datasets: Optional[List[str]] = None):
+                 datasets: Optional[List[str]] = None,
+                 state_file: Optional[str] = None,
+                 artifacts_root: Optional[str] = None):
         self.workspace_root = Path(workspace_root)
-        self.context_file = self.workspace_root / "shared" / "context.yaml"
+        # 引擎状态与 Artifact 台账的缺省落点：`<workspace>/config/engine/`。
+        #
+        # 两个硬约束决定了不能放 `shared/`：
+        # 1. 与 legacy `shared/context.yaml` 隔离——旧 schema 的消费者（run_batch.sh /
+        #    generate_report.py / update_context.py / release tools）还在读那个文件，
+        #    共用会被引擎覆写成 v2 schema 而写坏；
+        # 2. **每轮归档目录**——宿主编排每轮开头把 `results/traces/logs/config/reports/eval`
+        #    整体 mv 进 `archive/<ts>/`，但**不含 `shared/`**。放在 shared/ 会让第二轮
+        #    直接加载上一轮的已完成状态 → run() 无步可走、静默"成功"。
+        # `config/engine/` 每轮被归档 → 天然干净起步。
+        self.engine_dir = self.workspace_root / "config" / "engine"
+        self.context_file = (
+            Path(state_file) if state_file else self.engine_dir / "context.yaml"
+        )
+        self.artifacts_root = (
+            Path(artifacts_root) if artifacts_root else self.engine_dir / "artifacts"
+        )
 
         # 设置日志
         self.logger = logging.getLogger("workflow.engine")
@@ -106,8 +124,10 @@ class WorkflowEngine:
         self.v4_max_rounds = 2
         self.v4_seed = 0
 
-        # 初始化子系统
-        self.artifact_registry = ArtifactRegistry(str(self.workspace_root))
+        # 初始化子系统（台账落点与业务产物根分离，见上面 artifacts_root 说明）
+        self.artifact_registry = ArtifactRegistry(
+            str(self.workspace_root), registry_root=str(self.artifacts_root),
+        )
         self.gate_reducer = GateReducer(self.artifact_registry)
 
         # 加载或初始化 context
@@ -408,7 +428,18 @@ class WorkflowEngine:
             self.context.current_step_id = next_step
             self._save_context()
 
+        # 终态快照：在**所有步骤状态落定之后**写（含 15_finalize 的 success），
+        # 保证 context_final.yaml 是真正的终态而不是"正在跑 15"的中间态。
+        self._write_final_snapshot()
         return self.context
+
+    def _write_final_snapshot(self):
+        """回传 context_final.yaml（best-effort，失败不阻断）"""
+        try:
+            from ..report import write_context_final
+            write_context_final(self.workspace_root, self.context)
+        except Exception as e:
+            self.logger.warning(f"context_final 回传失败（非阻断）：{type(e).__name__}: {e}")
 
     # ------------------------------------------------------------------
     # 15 步执行器 dispatch 表
@@ -419,7 +450,7 @@ class WorkflowEngine:
 
     def _build_step_handlers(self) -> Dict[str, Callable[[], StepResult]]:
         return {
-            "01_container_preparation": self._stub_step,
+            "01_container_preparation": self._step_container_preparation,
             "02_admission": self._step_admission,
             "03_v3_discovery_startup": self._step_v3_discovery,
             "04_v3_discovered": self._stub_freeze_discovered,
@@ -432,7 +463,7 @@ class WorkflowEngine:
             "11_v4_reduction": self._step_v4_reduction,
             "12_v4_accuracy_check": self._step_v4_accuracy_check,
             "13_v4_release": self._step_v4_release,
-            "14_report": self._stub_step,
+            "14_report": self._step_report,
             "15_finalize": self._stub_finalize,
         }
 
@@ -476,7 +507,11 @@ class WorkflowEngine:
         return StepResult(status="success")
 
     def _stub_finalize(self) -> StepResult:
-        """M0 占位：标记流程结束时间。"""
+        """步骤15：标记流程结束时间并回传最终状态快照。
+
+        `context_final.yaml` 在步骤14 已写过一次（报告口径），这里在写入 finished_at 后
+        再刷一次，保证快照是真正的"终态"（plan §9 / 工作段10.10）。
+        """
         self.context.runtime.finished_at = datetime.now().isoformat()
         return StepResult(status="success")
 
@@ -526,6 +561,97 @@ class WorkflowEngine:
                 source_artifact=oplist_art,
             )
         return StepResult(status="success", output_artifacts=[oplist_art])
+
+    def _step_container_preparation(self) -> StepResult:
+        """步骤01：前置校验（fail-closed）——容器与工作区必须已就绪。
+
+        容器创建（docker run / 模型权重 / 挂载 / setup_workspace.sh）是宿主侧编排职责
+        （见 plan 已确认边界与 M4a 决策），引擎只校验不创建：缺什么就明确报什么并停在 01，
+        不做任何"顺带创建"的隐式行为。
+        """
+        problems: List[str] = []
+
+        # 1. 工作区目录结构（setup_workspace.sh 产出）
+        for sub in ("shared", "results", "logs"):
+            if not (self.workspace_root / sub).is_dir():
+                problems.append(f"工作区缺少 {sub}/ 目录")
+        if not os.access(self.workspace_root, os.W_OK):
+            problems.append(f"工作区不可写：{self.workspace_root}")
+
+        # 2. 容器可达
+        container = self.context.runtime.container_name
+        if not container:
+            problems.append("runtime.container_name 为空")
+        else:
+            res = self.executor.run(["docker", "inspect", "--type=container", container])
+            if not res.ok:
+                problems.append(f"容器不可达（docker inspect 失败）：{container}")
+
+        # 3. 模型权重路径
+        if not self.context.runtime.model_path:
+            problems.append("runtime.model_path 为空")
+
+        # 4. 挂载一致性（证据，不阻断）：引擎在宿主侧落盘 results/state，
+        #    容器内的 domain 命令按 /flagos-workspace 读写；两者必须是同一目录，
+        #    否则"引擎写的产物容器看不见"。mounted/symlink 都算一致，internal 不一致。
+        mount = self._inspect_workspace_mount(container) if container else None
+
+        if problems:
+            self.logger.error(f"前置校验未通过：{problems}")
+            return StepResult(
+                status="failed",
+                fail_reason="前置校验未通过：" + "；".join(problems),
+            )
+
+        # 校验通过 → 落证据（报告/审计可引用）
+        art = self._register_json_artifact(
+            "precondition-check", "results/preconditions.json",
+            {
+                "workspace_root": str(self.workspace_root),
+                "container_name": container,
+                "model_name": self.context.runtime.model_name,
+                "model_path": self.context.runtime.model_path,
+                "checked_dirs": ["shared", "results", "logs"],
+                "container_reachable": True,
+                "workspace_mount": mount or {"found": False},
+                "mount_consistent": (mount or {}).get("consistent"),
+                "_meta": {
+                    "note": "容器与工作区由宿主侧编排准备，引擎只校验（M4a 已确认边界）",
+                    "mount": "宿主 workspace 与容器 /flagos-workspace 的挂载关系；"
+                             "不一致时引擎在宿主落盘的产物容器内不可见（记录供排障）",
+                },
+            },
+            "container_preparation_1.0", tags={"check": "precondition"},
+        )
+        return StepResult(status="success", output_artifacts=[art])
+
+    def _inspect_workspace_mount(self, container: str) -> Optional[Dict]:
+        """查容器 /flagos-workspace 的挂载来源，判断与宿主 workspace 是否同一目录"""
+        res = self.executor.run(
+            ["docker", "inspect", "-f", "{{json .Mounts}}", container], timeout=60,
+        )
+        if not res.ok:
+            return None
+        try:
+            mounts = json.loads(res.stdout or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        target = str(self.workspace_root)
+        for m in mounts if isinstance(mounts, list) else []:
+            if m.get("Destination") != "/flagos-workspace":
+                continue
+            source = m.get("Source", "")
+            consistent = os.path.realpath(source) == os.path.realpath(target) if source else False
+            if not consistent:
+                self.logger.warning(
+                    f"挂载可能不一致：容器 /flagos-workspace ← {source}，"
+                    f"引擎 workspace={target}（symlink 模式下可能仍指向同一目录）"
+                )
+            return {"found": True, "source": source, "destination": "/flagos-workspace",
+                    "type": m.get("Type", ""), "consistent": consistent}
+        self.logger.warning("容器未报告 /flagos-workspace 挂载")
+        return {"found": False, "consistent": None}
 
     def _step_v3_startup_tuning(self) -> StepResult:
         """步骤05：启动兼容性调优（确定性诊断优先）→ 冻结 v3-startup-stable。"""
@@ -1027,6 +1153,34 @@ class WorkflowEngine:
             startup_timeout=self.startup_tuning_timeout,
             poll_interval=self.startup_tuning_poll_interval,
         )
+
+    def _step_report(self) -> StepResult:
+        """步骤14：报告汇总——report.md/json + context_final.yaml + artifact 索引。
+
+        数据来源只有 Context + ArtifactRegistry（plan §9），不含 V1/V2 性能比。
+        报告写失败不阻断收尾（步骤15 仍要跑），但记为步骤失败以便暴露问题。
+        """
+        from ..report import write_artifact_index, write_context_final, write_report
+
+        try:
+            md_path, json_path = write_report(self.workspace_root, self.context, self.artifact_registry)
+            final_path = write_context_final(self.workspace_root, self.context)
+            index_path = write_artifact_index(self.workspace_root, self.artifact_registry)
+        except Exception as e:
+            self.logger.exception("报告生成失败")
+            return StepResult(status="failed", fail_reason=f"报告生成失败：{type(e).__name__}: {e}")
+
+        # 登记报告产物（相对 workspace 的路径）
+        art = self.artifact_registry.register_artifact(
+            artifact_type="workflow-report",
+            content={"report_json": "results/report.json", "report_md": "results/report.md"},
+            file_path="results/report.json",
+            generated_by="script",
+            generator_version="workflow_report_1.0",
+            tags={"kind": "report"},
+        )
+        self.logger.info(f"报告产出：{md_path} / {json_path} / {final_path} / {index_path}")
+        return StepResult(status="success", output_artifacts=[art])
 
     def _latest_performance_throughput(self, candidate: str) -> Optional[float]:
         """取最新一条性能 artifact 的吞吐（用作 V4 的优化基线）；无证据返回 None

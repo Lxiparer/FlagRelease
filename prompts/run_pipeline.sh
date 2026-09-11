@@ -960,14 +960,23 @@ pipeline_on_exit() {
     # 或某段跑超时被 run_batch.sh 的 timeout --signal=TERM 杀掉，也能在拷回宿主机前补一份。
     # 必须在 upload_to_platform_on_exit（其内部 docker cp results/ 回宿主机）之前执行。
     # 容器解析与 upload_to_platform_on_exit 保持一致；全程 || true，不影响退出码。
-    regenerate_report "${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}" || true
+    if [ "${FLAGOS_ENGINE_MODE:-0}" = "1" ]; then
+        # 引擎模式：报告由引擎在宿主侧生成（requests/report.md|json），
+        # legacy 的 regenerate_report（容器内写）与平台上传（容器→宿主 docker cp results/）
+        # 都会把容器里的旧产物覆盖上去，故一并跳过；评测明细归档与 GPU 清理仍需执行。
+        echo "  [engine] 跳过 legacy 报告刷新与平台上传（产物由引擎在宿主侧生成）"
+        archive_eval_details_on_exit || true
+        # GPU 清理与通知走下面 if/else 之后的共同路径
+    else
+        regenerate_report "${DIAG_CONTAINER:-${SEG_CTR:-${CONTAINER:-}}}" || true
 
-    # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
-    upload_to_platform_on_exit || true
-    # 评测明细归档必须在 cleanup_gpu_services（可能停容器）之前，趁容器还活着 docker cp。
-    archive_eval_details_on_exit || true
-    # 发布一致性校验+自动重试：同样需容器活着（main.py 要 docker exec），放清理之前。
-    verify_and_retry_release || true
+        # 保留原有退出清理；平台上传失败不能覆盖主流程退出码。
+        upload_to_platform_on_exit || true
+        # 评测明细归档必须在 cleanup_gpu_services（可能停容器）之前，趁容器还活着 docker cp。
+        archive_eval_details_on_exit || true
+        # 发布一致性校验+自动重试：同样需容器活着（main.py 要 docker exec），放清理之前。
+        verify_and_retry_release || true
+    fi
     cleanup_gpu_services || true
 
     # 批量模式由 run_batch.sh 投递模型事件，避免重复通知。
@@ -1056,6 +1065,66 @@ except Exception as e:
     print(f"    (ledger 读取失败: {e})")
 PYEOF
 }
+
+# ===== 引擎模式（FLAGOS_ENGINE=1）：不拉起 Claude，交给确定性 Workflow Engine =====
+# 前置：容器必须已存在（由上一次 legacy 运行或人工 docker run + setup_workspace.sh 准备）。
+# 引擎在**宿主侧**运行、经 docker exec 操作容器，自带状态文件（config/engine/，每轮随
+# config/ 归档 → 干净起步）与发布流程。开关默认关闭；关闭时本块整段跳过、行为与既有一致。
+# 不做"容器缺失就回退旧路径"——那会让人以为在跑引擎、实际跑了 Claude。
+if [ "${FLAGOS_ENGINE:-0}" = "1" ]; then
+    echo ""
+    echo "══════════════════════════════════════════════════════════════"
+    echo "  引擎模式（FLAGOS_ENGINE=1）：不调用 Claude，交给 Workflow Engine"
+    echo "══════════════════════════════════════════════════════════════"
+
+    ENGINE_CONTAINER=""
+    if [ -f "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" ]; then
+        # 快照记录的容器名 = 上一次真实创建的那个（容器模式下 TARGET 即容器名）
+        ENGINE_CONTAINER="$(read_context "${MODEL}" 2>/dev/null | cut -d'|' -f1 || true)"
+        if [ -n "${ENGINE_CONTAINER}" ] \
+           && ! docker inspect --type=container "${ENGINE_CONTAINER}" &>/dev/null; then
+            echo "  ⚠ 快照记录的容器 ${ENGINE_CONTAINER} 已不存在，尝试其他候选"
+            ENGINE_CONTAINER=""
+        fi
+    fi
+    if [ -z "${ENGINE_CONTAINER}" ] && [ -n "${CONTAINER:-}" ] \
+       && docker inspect --type=container "${CONTAINER}" &>/dev/null; then
+        ENGINE_CONTAINER="${CONTAINER}"
+    fi
+    if [ -z "${ENGINE_CONTAINER}" ] && [ -n "${CONTAINER_NAME_PRE:-}" ] \
+       && docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+        ENGINE_CONTAINER="${CONTAINER_NAME_PRE}"
+    fi
+
+    if [ -z "${ENGINE_CONTAINER}" ]; then
+        echo "✗ 引擎模式要求容器已存在，但未找到可用容器。" >&2
+        echo "  请先准备容器（docker run 模板见 flagos-container-preparation SKILL，" >&2
+        echo "  随后 bash skills/flagos-container-preparation/tools/setup_workspace.sh <容器> <模型>），" >&2
+        echo "  再以 FLAGOS_ENGINE=1 重跑。此处不回退旧路径。" >&2
+        exit 2
+    fi
+
+    echo "  容器:   ${ENGINE_CONTAINER}"
+    echo "  工作区: ${HOST_BASE}"
+    echo "  模型:   ${MODEL}   数据集: ${DATASETS_CSV}"
+    echo "  状态:   ${HOST_BASE}/config/engine/context.yaml"
+    echo ""
+
+    # 供 EXIT trap 判定：跳过 legacy 报告刷新与平台上传（它们会把容器内旧产物
+    # 覆盖到宿主机，冲掉引擎刚生成的 report.md/json）
+    export FLAGOS_ENGINE_MODE=1
+
+    ENGINE_RC=0
+    python3 "${PROJECT_ROOT}/workflow/cli/main.py" \
+        --workspace "${HOST_BASE}" \
+        --container "${ENGINE_CONTAINER}" \
+        --model "${MODEL}" \
+        --model-path "${CONTAINER_MODEL_PATH:-}" \
+        --datasets "${DATASETS_CSV}" \
+        --v4-seed "${FLAGOS_V4_SEED:-0}" || ENGINE_RC=$?
+    echo "[engine] 退出码 = ${ENGINE_RC}"
+    exit "${ENGINE_RC}"
+fi
 
 # ===== 全流程计时 =====
 PIPELINE_START_TS=$(date +%s)

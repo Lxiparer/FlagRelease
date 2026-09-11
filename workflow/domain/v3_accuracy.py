@@ -37,8 +37,10 @@ from ..engine.command_executor import CommandExecutor, SubprocessExecutor
 
 
 # 评测脚本 / 判定脚本（容器内路径）
-EVAL_SCRIPT = "/flagos-workspace/skills/flagos-eval-comprehensive/tools/fast_gpqa.py"
-ACCURACY_COMPARE = "/flagos-workspace/skills/flagos-eval-comprehensive/tools/accuracy_compare.py"
+# 注意：`setup_workspace.sh` 的 SCRIPT_MAP 只把工具投到 `/flagos-workspace/scripts/`
+# （容器里**没有** `skills/` 目录），这里必须用实际部署路径，否则真跑即 file-not-found。
+EVAL_SCRIPT = "/flagos-workspace/scripts/fast_gpqa.py"
+ACCURACY_COMPARE = "/flagos-workspace/scripts/accuracy_compare.py"
 
 # 数据集评测预算（thinking 模型口径，见 CLAUDE.md）
 DATASET_BUDGET = {

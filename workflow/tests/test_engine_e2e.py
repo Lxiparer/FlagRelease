@@ -87,15 +87,19 @@ class TestEngineEndToEnd(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        # 步骤01 前置校验要求 setup_workspace.sh 产出的目录结构就位
+        for sub in ("shared", "results", "logs"):
+            (Path(self.tmpdir) / sub).mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _engine(self, fake=None) -> WorkflowEngine:
-        """构造引擎并注入 fake executor + 容器/模型名（步骤02/06 需要）。"""
+        """构造引擎并注入 fake executor + 容器/模型名（步骤01/02/06 需要）。"""
         eng = WorkflowEngine(self.tmpdir, executor=fake or make_fake())
         eng.context.runtime.container_name = "test_ctr"
         eng.context.runtime.model_name = "TestModel"
+        eng.context.runtime.model_path = "/models/TestModel"
         # V4 只测两轮（默认值）；e2e 的 fake 吞吐恒定 → 无提升 → 回退 V3
         eng.v4_max_rounds = 2
         return eng
@@ -157,12 +161,14 @@ class TestEngineEndToEnd(unittest.TestCase):
         self.assertEqual(ctx.gates["accuracy.v3.qualified"].status, "failed")
 
     def test_context_yaml_roundtrip(self):
-        """状态应落进 context.yaml 并能等价重建"""
+        """状态应落进引擎状态文件并能等价重建（不碰 legacy shared/context.yaml）"""
         engine = self._engine()
         engine.run()
 
-        context_file = Path(self.tmpdir) / "shared" / "context.yaml"
+        context_file = Path(self.tmpdir) / "config" / "engine" / "context.yaml"
         self.assertTrue(context_file.exists())
+        # legacy 状态文件绝不被引擎创建/覆写（迁移期隔离）
+        self.assertFalse((Path(self.tmpdir) / "shared" / "context.yaml").exists())
 
         with open(context_file, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)

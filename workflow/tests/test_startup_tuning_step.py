@@ -35,6 +35,10 @@ from workflow.engine.command_executor import FakeExecutor, ExecResult
 
 OPS = ["op_a", "op_b", "op_c", "op_d"]
 
+# 就绪探测命令（与「停服务」的端口探测 `curl -o /dev/null -w %{http_code}` 区分开，
+# 否则 when_sequence("curl", ...) 会连停服务探测一起吃掉）
+HEALTH_PROBE = "curl -s http://localhost:8000/health"
+
 
 def _health_fail() -> ExecResult:
     return ExecResult(returncode=7, stderr="connection refused")
@@ -103,7 +107,7 @@ class TestStartupTuning(StartupTuningBase):
     def test_crash_then_diagnose_then_stable(self):
         """第1轮崩溃 → 诊断出 op_b → 禁用重建 → 第2轮就绪 → 冻结 v3-startup-stable"""
         fake = FakeExecutor()
-        fake.when_sequence("curl", [_health_fail(), _health_ok()])
+        fake.when_sequence(HEALTH_PROBE, [_health_fail(), _health_ok()])
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
         fake.when("diagnose_ops", returncode=0, stdout=_diagnosis(crashed=["op_b"]))
         engine = self._engine(fake)
@@ -137,7 +141,7 @@ class TestStartupTuning(StartupTuningBase):
     def test_candidate_ops_fallback_when_no_crashed_ops(self):
         """约束18：crashed_ops 空时用 candidate_ops 兜底（低置信候选不能直接判无算子）"""
         fake = FakeExecutor()
-        fake.when_sequence("curl", [_health_fail(), _health_ok()])
+        fake.when_sequence(HEALTH_PROBE, [_health_fail(), _health_ok()])
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
         fake.when("diagnose_ops", returncode=1,  # crashed_ops 空 → 脚本 exit 1
                   stdout=_diagnosis(crashed=[], candidates=["op_c"]))
@@ -152,7 +156,7 @@ class TestStartupTuning(StartupTuningBase):
     def test_already_disabled_ops_are_filtered(self):
         """诊断结果里已禁用的算子不重复禁用（只保留当前启用集合内的）"""
         fake = FakeExecutor()
-        fake.when_sequence("curl", [_health_fail(), _health_ok()])
+        fake.when_sequence(HEALTH_PROBE, [_health_fail(), _health_ok()])
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
         # 诊断报告含已不在启用集的 op_zz
         fake.when("diagnose_ops", returncode=0,
@@ -166,7 +170,7 @@ class TestStartupTuning(StartupTuningBase):
     def test_diagnosis_exhausted_without_agent_stops(self):
         """诊断穷尽且未接 Agent（M3）→ 步骤失败并给出明确原因"""
         fake = FakeExecutor()
-        fake.when("curl", returncode=7, stderr="connection refused")
+        fake.when(HEALTH_PROBE, returncode=7, stderr="connection refused")
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
         fake.when("diagnose_ops", returncode=1, stdout=_diagnosis())  # 无任何算子
         engine = self._engine(fake)

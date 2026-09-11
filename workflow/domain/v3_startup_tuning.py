@@ -45,8 +45,11 @@ from ..agent.session_manager import AgentSessionManager
 from ..engine.command_executor import CommandExecutor, SubprocessExecutor
 
 # 容器内工具/路径
+# 注意：`setup_workspace.sh` 只把工具投到 `/flagos-workspace/scripts/`（容器里没有 skills/ 目录）。
+# apply_op_config.py 会 `import flagos_op_config`（同目录兄弟模块，SCRIPT_MAP 也投到 scripts/），
+# 所以必须在 scripts/ 目录下执行。
 DIAGNOSE_OPS = "/flagos-workspace/scripts/diagnose_ops.py"
-APPLY_OP_CONFIG_DIR = "/flagos-workspace/skills/flagos-operator-replacement/tools"
+APPLY_OP_CONFIG_DIR = "/flagos-workspace/scripts"
 APPLY_OP_CONFIG = f"{APPLY_OP_CONFIG_DIR}/apply_op_config.py"
 SERVICE_LOG = "/flagos-workspace/logs/service.log"
 OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
@@ -235,6 +238,10 @@ class V3StartupTuning:
         """
         self.logger.info(f"Attempting startup with revision {revision.revision_id}")
 
+        # 0. 先停旧服务（约束15：模式切换/重启前必须停服务释放 GPU）
+        #    调优轮次会反复重启，上一轮若留下半启动的 vLLM 会占住端口 → 本轮必然失败
+        self._stop_service()
+
         # 1. 清缓存（约束25）
         self._clear_caches()
 
@@ -269,6 +276,30 @@ class V3StartupTuning:
             "service_log": SERVICE_LOG,
             "log_tail": log_tail,
         }
+
+    def _stop_service(self):
+        """停掉容器内的 vLLM 服务并等端口释放（约束15）
+
+        只杀 vLLM 进程，不 `docker restart` 整个容器——容器里的模型缓存/环境不必重建，
+        重启容器留给编排层在段结束时做。
+        """
+        self.executor.docker_exec(
+            self.container_name, "pkill -f vllm 2>/dev/null; true", timeout=60,
+        )
+        # 等端口释放：curl 的 http_code 为 000/空 表示无人监听
+        for _ in range(6):
+            res = self.executor.docker_exec(
+                self.container_name,
+                f"curl -s -o /dev/null -w '%{{http_code}}' "
+                f"http://localhost:{SERVICE_PORT}/health || true",
+                timeout=10,
+            )
+            if (res.stdout or "").strip() in ("", "000"):
+                self.logger.info("旧服务已停止，端口已释放")
+                return
+            if self.poll_interval > 0:
+                time.sleep(self.poll_interval)
+        self.logger.warning("旧服务 30s 内未释放端口，继续启动（新服务可能失败）")
 
     def _clear_caches(self):
         """清理 Triton/FlagGems 编译缓存（约束25）"""
