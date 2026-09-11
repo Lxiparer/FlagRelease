@@ -55,7 +55,18 @@ class RuntimeInfo:
     gpu_model: str = ""
     gpu_count: int = 0
     gpu_devices: List[str] = field(default_factory=list)
-    gpu_count_locked: bool = False  # 首次启动后锁定卡数
+    gpu_count_locked: bool = False  # 首次启动后锁定卡数（约束14：卡数/TP 全流程不变）
+
+    # 服务启动参数（`start_service.sh` 需要的一组入参；由引擎派生后落状态）
+    # 早前 schema 里完全没有这些字段 → 引擎无法表达"用几张卡、多长上下文、是不是 thinking"，
+    # 只能内联拼一条残缺的启动命令（缺 TP/可见设备/max_model_len/reasoning-parser）。
+    service_port: int = 8000
+    tp_size: int = 0                       # 0 = 尚未决定（由模型大小与空闲卡派生）
+    max_model_len: int = 32768
+    thinking_model: bool = False           # thinking 模型要加 --reasoning-parser、评测预算也不同
+    cuda_visible_devices: str = ""         # 传给厂商对应的可见设备环境变量
+    visible_devices_env: str = "CUDA_VISIBLE_DEVICES"  # 该变量名**因厂商而异**（detect_gpu 提供）
+    framework: str = "vllm"
 
     # 组件版本（基于 Artifact）
     flaggems_version: Optional[ArtifactReference] = None

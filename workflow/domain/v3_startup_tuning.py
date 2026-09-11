@@ -43,6 +43,15 @@ from ..agent.protocol import StartupFailureRequest, AnalysisResult
 from ..agent.policy_validator import PolicyValidator
 from ..agent.session_manager import AgentSessionManager
 from ..engine.command_executor import CommandExecutor, SubprocessExecutor, parse_json_output
+from .service_control import (
+    SERVICE_LOG,
+    ServiceParams,
+    parse_env_inline,
+    start_service,
+    stop_service,
+    wait_for_service_ready,
+)
+from ..engine.long_task import LongTaskRunner
 
 # 容器内工具/路径
 # 注意：`setup_workspace.sh` 只把工具投到 `/flagos-workspace/scripts/`（容器里没有 skills/ 目录）。
@@ -83,9 +92,11 @@ class V3StartupTuning:
         policy_validator: Optional[PolicyValidator] = None,
         session_manager: Optional[AgentSessionManager] = None,
         model_path: str = "",
+        service_params: Optional[ServiceParams] = None,
         plugin_mode: bool = True,
         startup_timeout: int = 300,
         poll_interval: float = 5.0,
+        long_task_poll_interval: Optional[float] = None,
     ):
         self.workspace_root = Path(workspace_root)
         self.container_name = container_name
@@ -98,9 +109,13 @@ class V3StartupTuning:
         self.policy_validator = policy_validator or PolicyValidator()
         self.session_manager = session_manager
         self.model_path = model_path
+        # 起服务参数（引擎派生）；未注入时 attempt_startup 直接失败并说明（fail-closed）
+        self.service_params = service_params
         self.plugin_mode = plugin_mode
         self.startup_timeout = startup_timeout
         self.poll_interval = poll_interval
+        # 长任务（等就绪）轮询间隔：与"端口探测间隔"是两回事，分开配置
+        self.long_task_poll_interval = long_task_poll_interval
         self.logger = logging.getLogger("workflow.domain.startup_tuning")
 
     def tune_startup_compatibility(
@@ -231,43 +246,58 @@ class V3StartupTuning:
         self,
         revision: OperatorRevision,
     ) -> Tuple[bool, Optional[Dict]]:
-        """尝试启动服务并等待就绪
+        """按 revision 的算子集启动服务（经既有 start_service.sh / wait_for_service.sh）
 
         Returns:
             (是否成功, 崩溃信息)  —— 崩溃信息含 error_type/error_message/service_log/log_tail
         """
         self.logger.info(f"Attempting startup with revision {revision.revision_id}")
 
-        # 0. 先停旧服务（约束15：模式切换/重启前必须停服务释放 GPU）
-        #    调优轮次会反复重启，上一轮若留下半启动的 vLLM 会占住端口 → 本轮必然失败
-        self._stop_service()
+        if self.service_params is None:
+            return False, {
+                "error_type": "config",
+                "error_message": "缺少 ServiceParams（起服务参数由引擎派生后传入）",
+                "service_log": SERVICE_LOG,
+            }
 
-        # 1. 清缓存（约束25）
-        self._clear_caches()
+        # 0. 先停旧服务（约束15；docker restart 优先——pkill 清不掉 vllm 的僵尸 worker）
+        stop_service(
+            self.executor, self.container_name,
+            port=self.service_params.port, poll_interval=self.poll_interval, logger=self.logger,
+        )
 
-        # 2. 应用算子白名单（约束26：统一白名单，禁用 toggle_flaggems 全量重置）
+        # 1. 下发算子白名单（plugin 场景走 env_inline，经 docker exec -e 传给启动器）
         ok, err = self._apply_op_whitelist(revision.enabled_ops, revision.revision_id)
         if not ok:
-            return False, {
-                "error_type": "op_config",
-                "error_message": err,
-                "service_log": SERVICE_LOG,
-            }
+            return False, {"error_type": "op_config", "error_message": err,
+                           "service_log": SERVICE_LOG}
 
-        # 3. 启动服务（detached：起服务本身耗时长，不能前台阻塞）
-        ok, err = self._start_service()
-        if not ok:
-            return False, {
-                "error_type": "start_command",
-                "error_message": err,
-                "service_log": SERVICE_LOG,
-            }
+        # 2. 启动（TP/max_model_len/thinking/plugin 决策全在 start_service.sh 里）
+        p = self.service_params
+        if not start_service(
+            self.executor, self.container_name,
+            model_path=p.model_path, model_name=p.model_name, port=p.port,
+            tp_size=p.tp_size, max_model_len=p.max_model_len, thinking=p.thinking,
+            cuda_visible_devices=p.cuda_visible_devices, vllm_plugins=p.vllm_plugins,
+            env=parse_env_inline(getattr(self, "_env_inline", "")), logger=self.logger,
+        ):
+            return False, {"error_type": "start_command", "error_message": "start_service.sh 失败",
+                           "service_log": SERVICE_LOG}
 
-        # 4. 等就绪
-        if self._wait_for_service_ready():
+        # 3. 等就绪（日志活动感知：180s 无新输出 / 5760s 上限）
+        runner = LongTaskRunner(
+            self.executor, self.container_name,
+            poll_interval=(self.long_task_poll_interval
+                           if self.long_task_poll_interval is not None
+                           else self.poll_interval),
+        )
+        if wait_for_service_ready(
+            runner, self.container_name, p.port, p.model_name,
+            task_id=f"startup_{revision.revision_id}", logger=self.logger,
+        ):
             return True, None
 
-        # 5. 未就绪 → 读服务日志尾，供确定性诊断
+        # 未就绪 → 取日志尾供确定性诊断
         log_tail = self._read_service_log_tail()
         return False, {
             "error_type": "crash",
@@ -277,29 +307,12 @@ class V3StartupTuning:
             "log_tail": log_tail,
         }
 
-    def _stop_service(self):
-        """停掉容器内的 vLLM 服务并等端口释放（约束15）
-
-        只杀 vLLM 进程，不 `docker restart` 整个容器——容器里的模型缓存/环境不必重建，
-        重启容器留给编排层在段结束时做。
-        """
-        self.executor.docker_exec(
-            self.container_name, "pkill -f vllm 2>/dev/null; true", timeout=60,
+    def _stop_service(self) -> bool:
+        """停掉容器内旧服务并等端口释放（共享实现：docker restart + 端口确认）"""
+        return stop_service(
+            self.executor, self.container_name,
+            port=SERVICE_PORT, poll_interval=self.poll_interval, logger=self.logger,
         )
-        # 等端口释放：curl 的 http_code 为 000/空 表示无人监听
-        for _ in range(6):
-            res = self.executor.docker_exec(
-                self.container_name,
-                f"curl -s -o /dev/null -w '%{{http_code}}' "
-                f"http://localhost:{SERVICE_PORT}/health || true",
-                timeout=10,
-            )
-            if (res.stdout or "").strip() in ("", "000"):
-                self.logger.info("旧服务已停止，端口已释放")
-                return
-            if self.poll_interval > 0:
-                time.sleep(self.poll_interval)
-        self.logger.warning("旧服务 30s 内未释放端口，继续启动（新服务可能失败）")
 
     def _clear_caches(self):
         """清理 Triton/FlagGems 编译缓存（约束25）"""

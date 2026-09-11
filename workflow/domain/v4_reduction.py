@@ -95,6 +95,7 @@ class V4OperatorReduction:
         reference_model: str = "",
         nv_baseline_file: str = "/flagos-workspace/shared/nv_baseline.yaml",
         plugin_mode: bool = True,
+        poll_interval: Optional[float] = None,
     ):
         self.workspace_root = workspace_root
         self.container_name = container_name
@@ -112,6 +113,8 @@ class V4OperatorReduction:
         )
         self.reference_model = reference_model
         self.nv_baseline_file = nv_baseline_file
+        # 长任务（评测）轮询间隔；测试传 0 以免真的 sleep
+        self.poll_interval = poll_interval
         self.logger = logging.getLogger("workflow.domain.v4_reduction")
 
     # ------------------------------------------------------------------
@@ -303,6 +306,7 @@ class V4OperatorReduction:
             container_name=self.container_name,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
+            poll_interval=self.poll_interval,
         )
 
         last_results: Dict[str, Dict] = {}
@@ -343,10 +347,9 @@ class V4OperatorReduction:
             # 逐数据集登记精度 artifact（无论达标与否，证据不覆盖）
             for dataset, result in results.items():
                 evaluator.register_accuracy_artifact(
-                    "v4",
-                    dataset,
-                    result,
-                    f"results/accuracy/v4-{revision.revision_id}-{dataset}.json",
+                    "v4", dataset, result,
+                    (result.get("details") or {}).get(
+                        "evidence_file", f"results/{dataset}_flagos_optimized.json"),
                 )
 
             if all_qualified:

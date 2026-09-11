@@ -33,6 +33,7 @@ from typing import Dict, Optional, Tuple
 from ..schemas.context_v2 import OperatorRevision
 from ..artifacts.registry import ArtifactRegistry
 from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from .v3_release import harbor_login, normalize_model_name, push_image
 
 # V4 发布目标仓库（V1/V2/V4 → flagrelease-public；V3 单独走 flagrelease-project，见 CLAUDE.md）
 HARBOR_V4_PROJECT = "harbor.baai.ac.cn/flagrelease-public"
@@ -163,7 +164,8 @@ class V4ReleaseManager:
             (是否成功, image_tag)
         """
         timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        image_tag = f"{HARBOR_V4_PROJECT}/{self.model_name}-flagos:{timestamp}-v4"
+        image_tag = (f"{HARBOR_V4_PROJECT}/"
+                     f"{normalize_model_name(self.model_name)}-flagos:{timestamp}-v4")
 
         self.logger.info(f"Packaging V4 image: {image_tag}")
 
@@ -186,12 +188,8 @@ class V4ReleaseManager:
         """
         self.logger.info(f"Uploading V4 image: {image_tag}")
 
-        res = self.executor.run(["docker", "push", image_tag], timeout=3600)
-        if not res.ok:
-            self.logger.error(f"docker push failed: exit={res.returncode}: {res.stderr[:300]}")
-            return False
-
-        return True
+        harbor_login(self.executor, HARBOR_V4_PROJECT.split("/")[0], self.logger)
+        return push_image(self.executor, image_tag, self.logger)
 
     def _generate_release_report(
         self,

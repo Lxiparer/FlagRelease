@@ -1078,31 +1078,54 @@ if [ "${FLAGOS_ENGINE:-0}" = "1" ]; then
     echo "══════════════════════════════════════════════════════════════"
 
     ENGINE_CONTAINER=""
-    if [ -f "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" ]; then
-        # 快照记录的容器名 = 上一次真实创建的那个（容器模式下 TARGET 即容器名）
-        ENGINE_CONTAINER="$(read_context "${MODEL}" 2>/dev/null | cut -d'|' -f1 || true)"
-        if [ -n "${ENGINE_CONTAINER}" ] \
-           && ! docker inspect --type=container "${ENGINE_CONTAINER}" &>/dev/null; then
-            echo "  ⚠ 快照记录的容器 ${ENGINE_CONTAINER} 已不存在，尝试其他候选"
-            ENGINE_CONTAINER=""
+    if ! $IMAGE_MODE; then
+        # 容器模式：用户给的就是容器名，直接沿用（这不是"复用"——是本次任务的指定目标）
+        if [ -n "${CONTAINER:-}" ] \
+           && docker inspect --type=container "${CONTAINER}" &>/dev/null; then
+            ENGINE_CONTAINER="${CONTAINER}"
+            echo "  使用指定容器：${ENGINE_CONTAINER}"
+        else
+            echo "✗ 容器模式下容器 ${CONTAINER:-<空>} 不存在——不猜测、不复用其他容器" >&2
+            exit 2
         fi
-    fi
-    if [ -z "${ENGINE_CONTAINER}" ] && [ -n "${CONTAINER:-}" ] \
-       && docker inspect --type=container "${CONTAINER}" &>/dev/null; then
-        ENGINE_CONTAINER="${CONTAINER}"
-    fi
-    if [ -z "${ENGINE_CONTAINER}" ] && [ -n "${CONTAINER_NAME_PRE:-}" ] \
-       && docker inspect --type=container "${CONTAINER_NAME_PRE}" &>/dev/null; then
+    else
+        # 镜像模式：**必须新建容器**。SKILL.md 明令「镜像模式下禁止复用任何已存在的容器
+        # （复用旧容器=旧镜像跑新任务，产出错误归属，比失败更糟）」；早前从上次运行的
+        # 快照里解析容器名正是这种违规复用。
+        echo "  镜像模式：确定性创建新容器（厂商模板见 container_templates.yaml）"
+        if ! docker image inspect "${IMAGE}" &>/dev/null; then
+            echo "  ⚠ 本地无镜像 ${IMAGE}，尝试拉取…"
+            docker pull "${IMAGE}" || {
+                echo "✗ 镜像拉取失败——终止（docker run 失败不是复用旧容器的理由）" >&2
+                exit 2
+            }
+        fi
+        ENGINE_CREATE_JSON="$(python3 "${PROJECT_ROOT}/skills/flagos-container-preparation/tools/create_container.py" \
+            --image "${IMAGE}" --model-name "${MODEL}" \
+            --container-name "${CONTAINER_NAME_PRE}" \
+            --model-path "${MODEL_PATH}" \
+            --workspace "/data/flagos-workspace/${MODEL}" \
+            --json 2>&1)" || {
+            echo "✗ 确定性建容器失败：${ENGINE_CREATE_JSON}" >&2
+            echo "  若为不支持的厂商，请手工准备容器并以容器模式重跑（目标传容器名）。" >&2
+            exit 2
+        }
         ENGINE_CONTAINER="${CONTAINER_NAME_PRE}"
+        echo "  ✓ 已创建容器 ${ENGINE_CONTAINER}"
     fi
 
     if [ -z "${ENGINE_CONTAINER}" ]; then
-        echo "✗ 引擎模式要求容器已存在，但未找到可用容器。" >&2
-        echo "  请先准备容器（docker run 模板见 flagos-container-preparation SKILL，" >&2
-        echo "  随后 bash skills/flagos-container-preparation/tools/setup_workspace.sh <容器> <模型>），" >&2
-        echo "  再以 FLAGOS_ENGINE=1 重跑。此处不回退旧路径。" >&2
+        echo "✗ 引擎模式没有可用容器（不静默回退旧路径）。" >&2
         exit 2
     fi
+
+    # 容器工作目录与工具部署（步骤01 的前置条件；引擎只校验不创建）
+    echo "  部署工作区与工具（setup_workspace.sh）…"
+    bash "${PROJECT_ROOT}/skills/flagos-container-preparation/tools/setup_workspace.sh" \
+        "${ENGINE_CONTAINER}" "${MODEL}" --skip-archive || {
+        echo "✗ setup_workspace.sh 失败——引擎的前置条件不满足，终止" >&2
+        exit 2
+    }
 
     echo "  容器:   ${ENGINE_CONTAINER}"
     echo "  工作区: ${HOST_BASE}"
@@ -1113,6 +1136,18 @@ if [ "${FLAGOS_ENGINE:-0}" = "1" ]; then
     # 供 EXIT trap 判定：跳过 legacy 报告刷新与平台上传（它们会把容器内旧产物
     # 覆盖到宿主机，冲掉引擎刚生成的 report.md/json）
     export FLAGOS_ENGINE_MODE=1
+
+    # 计时 + 开始事件：**必须在引擎分支里补**，否则 EXIT trap 的 single-finish
+    # 因 `PIPELINE_START_TS` 未设而被守卫挡掉 → 引擎模式跑完一条通知都不发（静默）。
+    PIPELINE_START_TS=$(date +%s)
+    if [ "${FLAGOS_BATCH_MODE:-0}" != "1" ]; then
+        progress_emit_detached single-start \
+            --batch-id "${FLAGOS_PROGRESS_RUN_ID}" \
+            --workspace "${FLAGOS_WORKSPACE:-/data/flagos-workspace}" \
+            --target "${TARGET:-${IMAGE:-${ENGINE_CONTAINER}}}" \
+            --model "${MODEL}" \
+            --started-at "${PIPELINE_START_TS}" || :
+    fi
 
     ENGINE_RC=0
     python3 "${PROJECT_ROOT}/workflow/cli/main.py" \

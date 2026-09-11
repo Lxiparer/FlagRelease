@@ -72,8 +72,12 @@ def parse_json_output(text: str):
     """从可能混杂日志的 stdout 中提取 JSON 对象（best-effort）。
 
     容器内脚本普遍会先打日志（vLLM plugin INFO、warning、`✓` 进度行）再打 JSON，
-    直接 json.loads(stdout) 会失败——这是实测确认过的行为（见 inspect_env --output-json）。
-    策略：先按整体解析，失败则从最后一个 `{` 起再试。
+    直接 json.loads(stdout) 会失败——真机验证确认（inspect_env --output-json 前面就带
+    INFO 行，旧版部署甚至不做 stdout 静默）。
+
+    策略：先用 `raw_decode` 从**第一个能构成完整 JSON 文档的 `{`** 开始解析。
+    注意不能用 `text.rfind("{")`：从最后一个 `{` 起切出来的往往只是嵌套片段，
+    既可能解析失败、也可能"成功"解析出一个错误的子对象。
     """
     text = (text or "").strip()
     if not text:
@@ -81,21 +85,43 @@ def parse_json_output(text: str):
     try:
         return json.loads(text)
     except Exception:
-        start = text.rfind("{")
-        if start >= 0:
-            try:
-                return json.loads(text[start:])
-            except Exception:
-                return None
-        return None
+        pass
+
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx >= 0:
+        try:
+            obj, _ = decoder.raw_decode(text, idx)
+            return obj
+        except ValueError:
+            idx = text.find("{", idx + 1)
+    return None
 
 
 class CommandExecutor(ABC):
-    """命令执行后端抽象接口"""
+    """命令执行后端抽象接口
+
+    `default_env`：注入给**所有**容器内命令的环境变量（如 `http_proxy`/`https_proxy`）。
+    既有编排的硬性要求："所有需要外网的 docker exec 命令必须传入代理环境变量"——
+    容器内评测要下数据集（modelscope/huggingface），没有代理会直接失败。
+    单次调用的 `env` 优先于 default_env。
+    """
+
+    def __init__(self):
+        self.default_env: Dict[str, str] = {}
+
+    def set_default_env(self, env: Optional[Dict[str, str]]):
+        """设置注入给所有容器命令的默认环境变量（代理等）"""
+        self.default_env = dict(env or {})
 
     @abstractmethod
-    def run(self, argv: List[str], timeout: Optional[int] = None) -> ExecResult:
-        """执行 argv（列表形式，非 shell 字符串），返回 ExecResult"""
+    def run(self, argv: List[str], timeout: Optional[int] = None,
+            stdin: Optional[str] = None) -> ExecResult:
+        """执行 argv（列表形式，非 shell 字符串），返回 ExecResult
+
+        stdin: 可选标准输入（如 `docker login --password-stdin` 的密码）——
+               走 stdin 而不是 argv，避免凭证出现在进程列表里。
+        """
         raise NotImplementedError
 
     def docker_exec(
@@ -107,20 +133,26 @@ class CommandExecutor(ABC):
         timeout: Optional[int] = None,
     ) -> ExecResult:
         """在容器内执行 bash 脚本（便捷方法，统一 PATH 前缀）"""
-        argv = build_docker_exec_argv(container, script, detach=detach, env=env)
+        merged = {**self.default_env, **(env or {})}
+        argv = build_docker_exec_argv(container, script, detach=detach, env=merged or None)
         return self.run(argv, timeout=timeout)
 
 
 class SubprocessExecutor(CommandExecutor):
     """真实后端：subprocess.run（argv 列表，不用 shell）"""
 
-    def run(self, argv: List[str], timeout: Optional[int] = None) -> ExecResult:
+    def __init__(self):
+        super().__init__()
+
+    def run(self, argv: List[str], timeout: Optional[int] = None,
+            stdin: Optional[str] = None) -> ExecResult:
         try:
             proc = subprocess.run(
                 argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                input=stdin,
             )
             return ExecResult(
                 returncode=proc.returncode,
@@ -166,8 +198,10 @@ class FakeExecutor(CommandExecutor):
     """
 
     def __init__(self, default: Optional[ExecResult] = None):
+        super().__init__()
         self.rules: List[_FakeRule] = []
         self.calls: List[List[str]] = []
+        self.stdins: List[Optional[str]] = []
         self.default = default if default is not None else ExecResult(returncode=0)
 
     def when(
@@ -196,13 +230,26 @@ class FakeExecutor(CommandExecutor):
         self.rules.append(_FakeRule(match, results[-1], sequence=list(results)))
         return self
 
-    def run(self, argv: List[str], timeout: Optional[int] = None) -> ExecResult:
+    def run(self, argv: List[str], timeout: Optional[int] = None,
+            stdin: Optional[str] = None) -> ExecResult:
         self.calls.append(list(argv))
+        self.stdins.append(stdin)
         joined = " ".join(argv)
         for rule in self.rules:
             if rule.match in joined:
                 return rule.next_result()
         return self.default
+
+    def clear_rules(self, match: Optional[str] = None):
+        """清掉规则（可选只清匹配某子串的）
+
+        用于"覆盖默认脚本"：规则是**先注册先匹配**，测试在 make_fake 之后追加同 match
+        的规则不会生效，必须先清掉旧的。
+        """
+        if match is None:
+            self.rules = []
+        else:
+            self.rules = [r for r in self.rules if r.match != match]
 
     def calls_containing(self, substr: str) -> List[List[str]]:
         """便捷断言：返回所有含 substr 的调用"""

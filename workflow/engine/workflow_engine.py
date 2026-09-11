@@ -24,6 +24,7 @@
 """
 
 import os
+import re
 import sys
 import json
 from pathlib import Path
@@ -74,6 +75,10 @@ class StepResult:
     output_artifacts: List[str] = field(default_factory=list)
     fail_reason: str = ""
     skip_reason: str = ""
+    # 降级路由：本步失败/终止后需要标记为 skipped 的后续步骤（如启动不可恢复时跳过 06-09）
+    skip_steps: List[str] = field(default_factory=list)
+    # 失败但按既有约定继续（**只用于"允许降级"的场景**；基础设施故障仍应停流程）
+    continue_on_failure: bool = False
 
 
 class WorkflowEngine:
@@ -83,7 +88,8 @@ class WorkflowEngine:
                  executor: Optional[CommandExecutor] = None,
                  datasets: Optional[List[str]] = None,
                  state_file: Optional[str] = None,
-                 artifacts_root: Optional[str] = None):
+                 artifacts_root: Optional[str] = None,
+                 proxy: str = ""):
         self.workspace_root = Path(workspace_root)
         # 引擎状态与 Artifact 台账的缺省落点：`<workspace>/config/engine/`。
         #
@@ -117,6 +123,13 @@ class WorkflowEngine:
         # 启动调优的服务就绪探测预算（步骤05；测试可覆写为 0 以只探一次）
         self.startup_tuning_timeout = 300
         self.startup_tuning_poll_interval = 5.0
+
+        # 起服务参数缓存（本轮内只探测一次 GPU / 派生一次 TP；约束14：卡数/TP 全程不变）
+        self._service_params = None
+
+        # 长任务（评测）轮询间隔（秒）。评测走 detached + state 轮询，
+        # 引擎不是会被随时杀掉的会话，故比长任务协议的 8 分钟更密，尽早发现静默死亡。
+        self.long_task_poll_interval = 60.0
 
         # V4 随机子集搜索（步骤11）：每轮随机只开 1~3 个算子，只测 2 轮，
         # 两轮都无性能提升 → 不产出 V4，回退 V3（对齐 CLAUDE.md 既有流程与
@@ -417,9 +430,22 @@ class WorkflowEngine:
 
             # pending / running / failed → 执行
             result = self.execute_step(current_step_id)
+
+            # 降级路由：把依赖本步的后续步骤标记为 skipped（写清原因，不做静默跳过）
+            if result.skip_steps:
+                self._skip_steps(result.skip_steps, current_step_id,
+                                 result.skip_reason or result.fail_reason)
+
             if result.status == "failed":
-                self.logger.error(f"Step {current_step_id} failed: {result.fail_reason}")
-                break
+                if result.continue_on_failure:
+                    # 既定例外：如"启动无可归因算子 → service_ok=false → 直奔私有发布"
+                    self.logger.warning(
+                        f"Step {current_step_id} failed but flow continues by design: "
+                        f"{result.fail_reason}"
+                    )
+                else:
+                    self.logger.error(f"Step {current_step_id} failed: {result.fail_reason}")
+                    break
 
             next_step = self.get_next_step(current_step_id)
             if next_step is None:
@@ -428,18 +454,55 @@ class WorkflowEngine:
             self.context.current_step_id = next_step
             self._save_context()
 
-        # 终态快照：在**所有步骤状态落定之后**写（含 15_finalize 的 success），
-        # 保证 context_final.yaml 是真正的终态而不是"正在跑 15"的中间态。
-        self._write_final_snapshot()
+        # 终态收尾：在**所有步骤状态落定之后**写快照并重刷报告
+        self._finalize_run()
         return self.context
 
-    def _write_final_snapshot(self):
-        """回传 context_final.yaml（best-effort，失败不阻断）"""
+    def _skip_steps(self, step_ids: List[str], from_step: str, reason: str):
+        """把指定后续步骤标记为 skipped（降级路由用；原因必须写明）"""
+        for sid in step_ids:
+            step = self.context.steps.get(sid)
+            if step is None or step.status in ("success", "skipped"):
+                continue
+            step.status = "skipped"
+            step.finished_at = datetime.now().isoformat()
+            step.skip_reason = f"因 {from_step} 降级跳过：{reason[:200]}"
+            self.logger.warning(f"降级跳过 {sid}：{reason[:120]}")
+        self._save_context()
+
+    def _record_issue(self, category: str, summary: str, detail: str = "",
+                      action: str = "", result: str = "",
+                      extra_tool_args: Optional[Dict[str, str]] = None):
+        """记录 issue（确定性故障事实 → logs/issues_*.log + 既有 issue_reporter）"""
         try:
-            from ..report import write_context_final
-            write_context_final(self.workspace_root, self.context)
-        except Exception as e:
-            self.logger.warning(f"context_final 回传失败（非阻断）：{type(e).__name__}: {e}")
+            from ..domain.issue_writer import write_issue
+            write_issue(
+                str(self.workspace_root), category, summary,
+                detail=detail, action=action, result=result,
+                executor=self.executor, container=self.context.runtime.container_name,
+                model_name=self.context.runtime.model_name,
+                extra_tool_args=extra_tool_args, logger=self.logger,
+            )
+        except Exception as e:  # 记录 issue 失败不能影响主流程
+            self.logger.warning(f"写 issue 失败（非阻断）：{type(e).__name__}: {e}")
+
+    def _finalize_run(self):
+        """终态收尾：写 context_final.yaml + 重刷报告（best-effort，失败不阻断）
+
+        - 快照/报告必须在**所有步骤状态落定之后**写，否则 finished_at 恒空、
+          步骤15 恒为 running（报告早前只在步骤14 生成，就踩了这个）。
+        - **失败路径也要产出报告**：run() 因某步 failed 而 break 时步骤14 根本不会执行，
+          早前的结果是"跑失败 → 零产出"，排障时只能看退出码。
+        """
+        from ..report import write_context_final, write_report
+        for name, fn in (
+            ("context_final", lambda: write_context_final(self.workspace_root, self.context)),
+            ("report", lambda: write_report(self.workspace_root, self.context, self.artifact_registry)),
+        ):
+            try:
+                fn()
+            except Exception as e:
+                self.logger.warning(f"{name} 收尾写入失败（非阻断）：{type(e).__name__}: {e}")
 
     # ------------------------------------------------------------------
     # 15 步执行器 dispatch 表
@@ -529,16 +592,23 @@ class WorkflowEngine:
         if not container:
             return StepResult(status="failed", fail_reason="discovery: container_name 为空")
 
+        # 起服务参数：GPU 空闲探测 → TP 派生 → 锁定卡数（约束14/16/17）
+        params, perr = self._prepare_service_params()
+        if params is None:
+            return StepResult(status="failed", fail_reason=f"起服务参数派生失败：{perr}")
+
         from ..domain import V3DiscoveryStartup  # 惰性导入，避免顶层循环
         startup = V3DiscoveryStartup(
             workspace_root=str(self.workspace_root),
             container_name=container,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
+            poll_interval=self.long_task_poll_interval,
         )
         success, err, oplist = startup.start_service_and_discover(
             model_path=self.context.runtime.model_path,
             flaggems_version="",  # identity 仅提示、非阻断
+            params=params,
         )
         if not success or not oplist:
             # 起服务/发现失败 → 停在 03（启动调优是步骤05，M1b 尚未接）
@@ -671,12 +741,35 @@ class WorkflowEngine:
             "v3_startup_tuning_1.0", tags={"reason": report.get("reason", "")},
         )
         if not stable:
-            # 启动无法稳定。约束18 例外（service_ok=false → 跳过 06-09 直奔私有发布）
-            # 属于流程路由，待 M4 与 shell 路由一并接；此刻按失败停流程。
+            # 约束18 例外：诊断穷尽、无可归因算子 → service_ok=false →
+            # **跳过 06-09 直奔私有发布**（不切 native、不硬测）。若还有可归因算子，
+            # 上面的循环会继续禁用重试（不限轮次），到这里就意味着真的没辙了。
+            self.context.gates["service.available"] = Gate(
+                gate_id="service.available", status="failed",
+                criteria="V3 全组件服务可启动并稳定",
+                evaluated_at=datetime.now().isoformat(),
+                reason=f"启动调优未收敛：{report.get('reason')}",
+            )
+            reason = report.get("reason", "")
+            degradable = reason in ("diagnosis_exhausted_agent_unavailable",
+                                    "max_rounds_exhausted")
+            # 启动崩溃/不可恢复必须留痕（否则引擎模式下这类事件完全没有出口）
+            self._record_issue(
+                "startup", f"V3 服务启动未收敛（{reason}）",
+                detail=f"revision={final_rev.revision_id}，"
+                       f"轮次={report.get('rounds')}，禁用={report.get('disabled_by_round')}",
+                action="确定性诊断（diagnose_ops.py）+ 禁用问题算子重试",
+                result="未收敛" + ("（无可归因算子 → 降级私有发布）" if degradable else ""),
+            )
             return StepResult(
                 status="failed",
-                fail_reason=f"startup tuning failed: {report.get('reason')}",
+                fail_reason=f"startup tuning failed: {reason}",
                 output_artifacts=[art],
+                skip_steps=([] if not degradable else
+                            ["06_v3_accuracy", "07_v3_accuracy_tuning",
+                             "08_v3_performance", "09_v3_final"]),
+                continue_on_failure=degradable,
+                skip_reason=f"服务不可用（{reason}）→ 跳过评测与调优，直接私有发布",
             )
 
         # 冻结启动稳定集合（后续精度/性能调优的起点）
@@ -758,6 +851,7 @@ class WorkflowEngine:
             container_name=container,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
+            poll_interval=self.long_task_poll_interval,
         )
         all_qualified, results = evaluator.evaluate_accuracy(
             candidate="v3",
@@ -769,20 +863,36 @@ class WorkflowEngine:
 
         # 逐数据集登记精度 artifact（含 reducer 所需 nv_reference_value/relative_drop/qualified）
         for dataset, result in results.items():
-            file_path = f"results/accuracy_{dataset}_v3.json"
+            # 指向**本次评测的快照证据文件**（真实存在、且不会被下一个候选覆盖）
+            file_path = (result.get("details") or {}).get(
+                "evidence_file", f"results/{dataset}_flagos_optimized.json")
             evaluator.register_accuracy_artifact("v3", dataset, result, file_path)
 
-        # 精度 gate：判定直接来自 accuracy_compare 聚合退出码（不走 reducer 重判）
+        # 精度 gate：判定直接来自 accuracy_compare 聚合退出码（不走 reducer 重判）。
+        # 三态：passed / failed（真实退化，exit=1）/ **unresolved（无法评估，exit=2/3 或评测没跑成）**
+        # ——工具坏掉或缺 NV 基线不能伪装成"模型精度退化"。
+        all_assessed = all(r.get("assessed", True) for r in results.values())
+        gate_status = "passed" if all_qualified else ("failed" if all_assessed else "unresolved")
         self.context.gates["accuracy.v3.qualified"] = Gate(
             gate_id="accuracy.v3.qualified",
-            status="passed" if all_qualified else "failed",
+            status=gate_status,
             criteria="所有数据集 accuracy_compare 退出码=0（相对退化≤5%，含小样本噪声容忍）",
             evaluated_at=datetime.now().isoformat(),
             reason="; ".join(
-                f"{d}:exit={r.get('exit_code')}" for d, r in results.items()
+                self._dataset_verdict_text(d, r) for d, r in results.items()
             ),
         )
         self._save_context()
+
+        if not all_qualified:
+            self._record_issue(
+                "accuracy",
+                "V3 精度未达标（accuracy_compare 判定）" if all_assessed
+                else "V3 精度无法评估（工具错误或缺 NV 基线）",
+                detail="; ".join(self._dataset_verdict_text(d, r) for d, r in results.items()),
+                action="交由步骤07 确定性分组调优" if all_assessed else "需修复评测工具/补 NV 基线",
+                result="Gate=" + gate_status,
+            )
 
         # 精度不达标不停流程（调优是步骤07）；步骤本身算成功（评测+判定+落 gate 完成）
         return StepResult(status="success")
@@ -793,12 +903,21 @@ class WorkflowEngine:
         if not container:
             return StepResult(status="failed", fail_reason="accuracy tuning: container_name 为空")
 
-        # 只有精度不达标才调优（达标则跳过，plan §7：可 skipped 但须写明原因）
+        # 只对"真实不达标"做调优：
+        # - passed           → 无需调优
+        # - unresolved       → 评测本身没跑成/缺 NV 基线，调优没有意义（会白烧几小时 GPU），
+        #                      应当修工具或补基线后重跑，而不是当作精度问题去关算子
         acc_gate = self.context.gates.get("accuracy.v3.qualified")
         if acc_gate is not None and acc_gate.status == "passed":
             return StepResult(
                 status="skipped",
                 skip_reason="V3 精度已达标（accuracy.v3.qualified passed），无需调优",
+            )
+        if acc_gate is not None and acc_gate.status == "unresolved":
+            return StepResult(
+                status="skipped",
+                skip_reason=f"精度无法评估（{acc_gate.reason[:80]}）——属工具/基线问题，"
+                            f"不按精度退化做算子调优",
             )
 
         revision = self.context.operator_revisions.get(self.context.current_revision_id)
@@ -819,6 +938,7 @@ class WorkflowEngine:
             revision_factory=self._revision_factory,
             startup=startup,
             plugin_mode=True,
+            poll_interval=self.long_task_poll_interval,
         )
         qualified, final_rev, report = tuning.tune_accuracy(
             revision, self.datasets, max_rounds=3,
@@ -885,7 +1005,15 @@ class WorkflowEngine:
         final_rev = self.context.operator_revisions.get("v3-final")
         established_passed = bool(final_rev and final_rev.frozen)
         if final_rev is None:
-            return StepResult(status="failed", fail_reason="release: v3-final revision 缺失")
+            # 降级路径（服务不可用 → 已跳过 06-09，没有 v3-final）：按当前 revision
+            # 打**私有**镜像。既有编排在 service_ok=false 时同样直接走私有发布，
+            # 不留"这一步没有产出"的空档。
+            final_rev = self.context.operator_revisions.get(self.context.current_revision_id)
+            if final_rev is None:
+                return StepResult(status="failed", fail_reason="release: 无可用 revision")
+            self.logger.warning(
+                f"无 v3-final（降级路径），按当前 revision {final_rev.revision_id} 私有发布"
+            )
 
         from ..domain import V3ReleaseManager  # 惰性导入，避免顶层循环
         manager = V3ReleaseManager(
@@ -949,6 +1077,7 @@ class WorkflowEngine:
             startup=self._make_startup_tuning(),
             reference_model=self.context.runtime.model_name,
             nv_baseline_file=self.NV_BASELINE,
+            poll_interval=self.long_task_poll_interval,
         )
         report = reduction.performance_search(
             v4_r0, baseline_throughput=baseline,
@@ -968,6 +1097,14 @@ class WorkflowEngine:
 
         if not report["candidates"]:
             self._set_v4_established_gate(False, f"V4 无合法性能提升（{report['reason']}）")
+            self._record_issue(
+                "performance", f"V4 搜索无合法提升（{report['reason']}）",
+                detail=f"基线={report.get('baseline_throughput')} tok/s，"
+                       f"轮次={report.get('rounds_probed')}，"
+                       f"试验={[(t.get('round'), t.get('outcome')) for t in report.get('trials', [])]}",
+                action="随机子集性能搜索（两轮）",
+                result="回退 V3（不产出 V4）",
+            )
             return StepResult(
                 status="skipped",
                 skip_reason=f"V4 无合法性能提升（{report['reason']}）→ 回退 V3",
@@ -1009,6 +1146,7 @@ class WorkflowEngine:
             startup=self._make_startup_tuning(),
             reference_model=self.context.runtime.model_name,
             nv_baseline_file=self.NV_BASELINE,
+            poll_interval=self.long_task_poll_interval,
         )
         selected, report = reduction.accuracy_backtrack(v4_r0, candidates, self.datasets)
 
@@ -1142,12 +1280,86 @@ class WorkflowEngine:
             set_current=False,
         )
 
+    # thinking 模型判定（与既有编排同口径：模型名正则；CLAUDE.md）
+    _THINKING_MODEL_RE = "qwen3|qwq|deepseek-r1|deepseek-r2|mimo|hunyuan"
+
+    def _prepare_service_params(self, force: bool = False):
+        """派生起服务参数并回填 runtime（GPU 规划 / TP / thinking / 端口）
+
+        这些参数早前**在 schema 里根本不存在**，引擎只能内联拼一条缺 TP、缺可见设备、
+        缺 max_model_len 的启动命令 → 多卡模型起不来、可能撞上别人占用的卡。
+
+        Returns:
+            (ServiceParams 或 None, 失败原因)
+        """
+        if self._service_params is not None and not force:
+            return self._service_params, ""
+
+        from ..domain.service_control import (
+            ServiceParams, derive_tp_size, plan_service_devices,
+        )
+        rt = self.context.runtime
+        container = rt.container_name
+        if not container or not rt.model_path:
+            return None, "container_name / model_path 未就绪"
+
+        # 1. thinking 判定（影响 --reasoning-parser 与评测预算）
+        if re.search(self._THINKING_MODEL_RE, (rt.model_name or "").lower()):
+            rt.thinking_model = True
+            self.logger.info("识别为 thinking 模型（将加 --reasoning-parser 并按 thinking 预算评测）")
+
+        # 2. TP：已锁定则复用（约束14：卡数/TP 全流程不变），否则按模型权重大小派生
+        tp = rt.tp_size
+        if tp <= 0:
+            tp = derive_tp_size(self.executor, container, rt.model_path, logger=self.logger)
+            if not tp:
+                return None, "TP 派生失败（calc_tp_size.py）——fail-closed，不盲目起服务"
+            rt.tp_size = tp
+
+        # 3. 可见卡：优先空闲卡；空闲不足时按约束14 复用上次卡列表（卡数优先）
+        devices, err = plan_service_devices(
+            self.executor, container, tp_needed=tp,
+            locked_devices=rt.cuda_visible_devices, logger=self.logger,
+        )
+        if devices is None:
+            return None, err
+        rt.cuda_visible_devices = devices
+        rt.gpu_count = len([d for d in devices.split(",") if d.strip()])
+        rt.gpu_count_locked = True
+
+        # 4. 服务名用短名（与既有编排 `model.name.split('/')[-1]` 一致；
+        #    start_service.sh 的 --served-model-name 与 wait_for_service 都按它匹配）
+        short_name = (rt.model_name or "").rstrip("/").split("/")[-1]
+
+        self._service_params = ServiceParams(
+            model_path=rt.model_path,
+            model_name=short_name,
+            port=rt.service_port,
+            tp_size=tp,
+            max_model_len=rt.max_model_len,
+            thinking=rt.thinking_model,
+            cuda_visible_devices=devices,
+        )
+        self._save_context()
+        self.logger.info(
+            f"服务参数就绪：tp={tp} devices={devices} port={rt.service_port} "
+            f"max_model_len={rt.max_model_len} thinking={rt.thinking_model}"
+        )
+        return self._service_params, ""
+
     def _make_startup_tuning(self):
         """构造配置好的启动调优器（步骤05/07/11/12 共用）
 
         服务重启（清缓存 → 下发算子白名单 → 起服务 → 等就绪）是调优/减算子的共同前置，
         统一从这里取，保证重启语义与就绪预算一致。
         """
+        # 自愈：断点续跑到 05/07/11/12 时（步骤03 在上一轮已成功）参数缓存可能是空的，
+        # 这里补一次派生；失败则不阻断构造，由 attempt_startup 以明确原因 fail-closed。
+        if self._service_params is None:
+            params, perr = self._prepare_service_params()
+            if params is None:
+                self.logger.warning(f"起服务参数派生失败（{perr}）——启动调优将 fail-closed")
+
         from ..domain import V3StartupTuning  # 惰性导入，避免顶层循环
         return V3StartupTuning(
             workspace_root=str(self.workspace_root),
@@ -1157,10 +1369,12 @@ class WorkflowEngine:
             executor=self.executor,
             revision_factory=self._revision_factory,
             model_path=self.context.runtime.model_path,
+            service_params=self._service_params,
             # 本工作流为 plugin-only（见 plan）；启动即 plugin 白名单路径
             plugin_mode=True,
             startup_timeout=self.startup_tuning_timeout,
             poll_interval=self.startup_tuning_poll_interval,
+            long_task_poll_interval=self.long_task_poll_interval,
         )
 
     def _step_report(self) -> StepResult:
@@ -1248,27 +1462,63 @@ class WorkflowEngine:
         )
         self._save_context()
 
+    @staticmethod
+    def _dataset_verdict_text(dataset: str, result: Dict) -> str:
+        """gate reason 的逐数据集文案：区分"判定结论"与"无法评估" """
+        if not result.get("assessed", True):
+            return f"{dataset}:unassessed({result.get('unassessed_reason', '')[:60]})"
+        return f"{dataset}:exit={result.get('exit_code')}"
+
     def _set_v4_accuracy_gate(self, results: Dict[str, Dict], passed: bool):
-        """置 V4 精度 gate（判定来自 accuracy_compare 退出码，不内联重算）"""
+        """置 V4 精度 gate（判定来自 accuracy_compare 退出码，不内联重算；三态同 V3）"""
+        all_assessed = all(r.get("assessed", True) for r in (results or {}).values())
+        status = "passed" if passed else ("failed" if all_assessed else "unresolved")
         self.context.gates["accuracy.v4.qualified"] = Gate(
             gate_id="accuracy.v4.qualified",
-            status="passed" if passed else "failed",
+            status=status,
             criteria="所有数据集 accuracy_compare 退出码=0（相对退化≤5%，含小样本噪声容忍）",
             evaluated_at=datetime.now().isoformat(),
             reason="; ".join(
-                f"{d}:exit={r.get('exit_code')}" for d, r in (results or {}).items()
+                self._dataset_verdict_text(d, r) for d, r in (results or {}).items()
             ) or "no candidate result",
         )
         self._save_context()
 
     @staticmethod
     def _map_inspect_env_to_capabilities(j: Dict) -> Dict:
-        """把 inspect_env.py 的 JSON 输出映射成 PluginOnlyAdmission.check_admission 所需 capabilities。"""
+        """把 inspect_env.py 的 JSON 输出映射成 PluginOnlyAdmission.check_admission 所需 capabilities。
+
+        真实输出结构（真机核对）是**嵌套**的：
+            {
+              "inspection": {
+                "core_packages": {"torch": ..., "vllm": "0.24.0", "torch_cuda": ...},
+                "flag_packages": {"flaggems": "5.3.4", "flagscale": "-", "flagcx": "-",
+                                  "vllm_plugin": "installed"},
+                "vllm_plugin_installed": true, ...
+              },
+              "flagtree": {"installed": false, "version": "", "triton_version": "3.6.0", ...}
+            }
+        而 check_admission 要的是**扁平**键（vllm_version / flaggems_installed / ...）。
+        早前实现读的是扁平顶层键，真实输入里全都不存在 → 四个组件全判缺失、准入必失败。
+        """
+        inspection = j.get("inspection") or {}
+        core = inspection.get("core_packages") or {}
+        flag_packages = inspection.get("flag_packages") or {}
+
+        def version_of(raw) -> str:
+            """版本值归一：未安装的组件在真实输出里是 '-' 或空"""
+            text = str(raw or "").strip()
+            return "" if text in ("-", "none", "None") else text
+
+        flaggems_version = version_of(flag_packages.get("flaggems"))
+        vllm_version = version_of(core.get("vllm"))
+
         return {
-            "flaggems_installed": j.get("flaggems_installed", False),
-            "flaggems_version": j.get("flaggems_version", ""),
-            "vllm_plugin_installed": j.get("vllm_plugin_installed", False),
-            "plugin_version": j.get("plugin_version", ""),
-            "vllm_version": j.get("vllm_version", ""),
-            "flagtree": j.get("flagtree", {}),
+            # 组件"已安装"以版本可用为准（真实输出无独立布尔位）
+            "flaggems_installed": bool(flaggems_version),
+            "flaggems_version": flaggems_version,
+            "vllm_plugin_installed": bool(inspection.get("vllm_plugin_installed", False)),
+            "plugin_version": version_of(flag_packages.get("vllm_plugin")),
+            "vllm_version": vllm_version,
+            "flagtree": j.get("flagtree") or {},
         }

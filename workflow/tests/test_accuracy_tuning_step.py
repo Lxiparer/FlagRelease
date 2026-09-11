@@ -34,6 +34,10 @@ from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.command_executor import FakeExecutor, ExecResult
 from workflow.schemas.context_v2 import Gate
 
+from workflow.tests.test_engine_e2e import (
+    script_eval_task, script_service_tools, write_eval_result,
+)
+
 OPS = ["op_a", "op_b", "op_c", "op_d"]
 
 
@@ -74,6 +78,8 @@ class AccuracyTuningBase(unittest.TestCase):
         eng.context.runtime.model_path = "/models/TestModel"
         eng.startup_tuning_timeout = 0
         eng.startup_tuning_poll_interval = 0
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)  # 评测结果文件（完整性校验会读）
         for sid, _ in WORKFLOW_STEPS[:6]:
             eng.context.steps[sid].status = "success"
         eng.create_operator_revision(
@@ -102,6 +108,8 @@ class TestAccuracyTuning(AccuracyTuningBase):
     def test_qualifies_on_first_group(self):
         """不达标 → 第1组候选达标 → 提交该 revision、gate 置 passed"""
         fake = FakeExecutor()
+        script_service_tools(fake)
+        script_eval_task(fake)
         fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
         # 基线评测不达标，第1组候选达标
         fake.when_sequence("accuracy_compare", [_compare(1), _compare(0)])
@@ -135,6 +143,8 @@ class TestAccuracyTuning(AccuracyTuningBase):
     def test_budget_exhausted_keeps_gate_failed(self):
         """所有候选组都不达标 → 步骤仍 success（流程继续），精度 gate 保持 failed"""
         fake = FakeExecutor()
+        script_service_tools(fake)
+        script_eval_task(fake)
         fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
         fake.when("accuracy_compare", returncode=1)  # 全程不达标
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
@@ -158,6 +168,8 @@ class TestAccuracyTuning(AccuracyTuningBase):
     def test_restart_failure_recorded_and_continues(self):
         """重启失败 → 记入证据并试下一组，不中断调优"""
         fake = FakeExecutor()
+        script_service_tools(fake)
+        script_eval_task(fake)
         fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
         fake.when_sequence("accuracy_compare", [_compare(1), _compare(0)])
         # 第1组白名单下发失败（重启不成功），第2组恢复
@@ -181,6 +193,8 @@ class TestAccuracyTuning(AccuracyTuningBase):
     def test_runtime_oplist_verification_narrows_enabled_set(self):
         """约束27：运行时 txt 是唯一权威来源——核验后以运行时生效集为准"""
         fake = FakeExecutor()
+        script_service_tools(fake)
+        script_eval_task(fake)
         fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
         fake.when_sequence("accuracy_compare", [_compare(1), _compare(0)])
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())
@@ -199,6 +213,8 @@ class TestAccuracyTuning(AccuracyTuningBase):
     def test_all_ops_disabled_candidate_is_skipped(self):
         """候选组会关掉全部算子 → 跳过该组（不能等价全关 FlagGems）"""
         fake = FakeExecutor()
+        script_service_tools(fake)
+        script_eval_task(fake)
         fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
         fake.when("accuracy_compare", returncode=1)
         fake.when("apply_op_config", returncode=0, stdout=_whitelist_env())

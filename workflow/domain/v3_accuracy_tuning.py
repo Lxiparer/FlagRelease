@@ -76,6 +76,7 @@ class V3AccuracyTuning:
         policy_validator: Optional[PolicyValidator] = None,
         session_manager: Optional[AgentSessionManager] = None,
         plugin_mode: bool = True,
+        poll_interval: Optional[float] = None,
     ):
         self.workspace_root = Path(workspace_root)
         self.container_name = container_name
@@ -95,6 +96,8 @@ class V3AccuracyTuning:
             plugin_mode=plugin_mode,
         )
         self.plugin_mode = plugin_mode
+        # 长任务（评测）轮询间隔；测试传 0 以免真的 sleep
+        self.poll_interval = poll_interval
         self.agent = agent
         self.policy_validator = policy_validator or PolicyValidator()
         self.session_manager = session_manager
@@ -237,6 +240,7 @@ class V3AccuracyTuning:
             container_name=self.container_name,
             artifact_registry=self.artifact_registry,
             executor=self.executor,
+            poll_interval=self.poll_interval,
         )
         all_qualified, results = evaluator.evaluate_accuracy(
             candidate="v3", revision=revision, datasets=datasets,
@@ -246,7 +250,8 @@ class V3AccuracyTuning:
         for dataset, result in results.items():
             evaluator.register_accuracy_artifact(
                 "v3", dataset, result,
-                f"results/accuracy/v3-{revision.revision_id}-{dataset}.json",
+                (result.get("details") or {}).get(
+                    "evidence_file", f"results/{dataset}_flagos_optimized.json"),
             )
         return all_qualified, results
 

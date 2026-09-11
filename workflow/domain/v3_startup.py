@@ -35,6 +35,17 @@ import logging
 from ..artifacts.registry import ArtifactRegistry
 from ..schemas.context_v2 import OperatorRevision, ArtifactReference
 from ..engine.command_executor import CommandExecutor, SubprocessExecutor
+from .service_control import (
+    DEFAULT_SERVICE_PORT,
+    ServiceParams,
+    start_service,
+    stop_service,
+    wait_for_service_ready,
+)
+from ..engine.long_task import LongTaskRunner
+
+
+SERVICE_PORT = DEFAULT_SERVICE_PORT
 
 
 class V3DiscoveryStartup:
@@ -46,43 +57,71 @@ class V3DiscoveryStartup:
         container_name: str = "",
         artifact_registry: Optional[ArtifactRegistry] = None,
         executor: Optional[CommandExecutor] = None,
+        poll_interval: Optional[float] = None,
     ):
         self.workspace_root = Path(workspace_root)
         self.container_name = container_name
         self.artifact_registry = artifact_registry or ArtifactRegistry(str(workspace_root))
         self.executor = executor or SubprocessExecutor()
+        # 端口释放探测间隔（None = 立即返回；测试传 0）
+        self.poll_interval = poll_interval
         self.logger = logging.getLogger("workflow.domain.v3_startup")
 
     def start_service_and_discover(
         self,
         model_path: str,
         flaggems_version: str,
+        params: Optional[ServiceParams] = None,
     ) -> Tuple[bool, Optional[str], Optional[List[str]]]:
         """启动服务并发现算子列表
 
         Args:
-            model_path: 模型路径
+            model_path: 模型路径（容器内）
             flaggems_version: FlagGems 版本
+            params: 服务启动参数（ServiceParams）。起服务参数由引擎派生后传入——
+                本模块**不再内联拼 vllm 命令**（那会丢掉 TP/可见设备/max_model_len/
+                reasoning-parser/VLLM_PLUGINS 决策，而它们都在既有 start_service.sh 里）
 
         Returns:
             (是否成功, 错误消息, 发现的算子列表)
         """
         self.logger.info("Starting V3 discovery startup with full components")
 
-        # 1. 清理缓存
-        self._clear_caches()
+        # 0. 先停旧服务（关键）：否则旧 vLLM 占着端口 → 新服务 bind 失败，而健康检查
+        #    问的是旧服务（它回答 200）→ 引擎以为起来了，接着抽到**旧服务的 oplist**，
+        #    全程"成功"但算子集是错的。这是最危险的一类静默错误。
+        stop_service(
+            self.executor, self.container_name,
+            port=SERVICE_PORT, poll_interval=self.poll_interval, logger=self.logger,
+        )
+        started_at = time.time()
 
-        # 2. 启动服务
-        success, error_msg = self._start_service(model_path)
+        if params is None:
+            return False, "缺少服务启动参数（ServiceParams）——不再内联拼启动命令", None
 
-        if not success:
-            return False, error_msg, None
+        # 1. 启动服务：经既有 start_service.sh（`vllm serve` + TP + max-model-len +
+        #    thinking 的 --reasoning-parser + VLLM_PLUGINS 三级决策 + 清缓存 + pid/日志软链）
+        if not start_service(
+            self.executor, self.container_name,
+            model_path=params.model_path, model_name=params.model_name,
+            port=params.port, tp_size=params.tp_size,
+            max_model_len=params.max_model_len, thinking=params.thinking,
+            cuda_visible_devices=params.cuda_visible_devices,
+            vllm_plugins=params.vllm_plugins,
+            env=params.env, logger=self.logger,
+        ):
+            return False, "start_service.sh 启动失败", None
 
-        # 3. 等待服务就绪
-        service_ready = self._wait_for_service_ready(timeout=300)
-
-        if not service_ready:
-            return False, "Service failed to become ready", None
+        # 2. 等待就绪：经既有 wait_for_service.sh（**日志活动感知**：180s 无新输出才算卡住、
+        #    绝对上限 5760s）。早前用 `curl /health` 轮询 300s 一刀切，大模型加载十几分钟
+        #    会被误判失败——慢 ≠ 死。可能阻塞 1.6h，故走长任务协议。
+        runner = LongTaskRunner(
+            self.executor, self.container_name, poll_interval=self.poll_interval,
+        )
+        if not wait_for_service_ready(
+            runner, self.container_name, params.port, params.model_name, logger=self.logger,
+        ):
+            return False, "服务未就绪（wait_for_service.sh）", None
 
         # 4. 提取 runtime oplist
         oplist, oplist_file = self._extract_runtime_oplist()
@@ -90,12 +129,14 @@ class V3DiscoveryStartup:
         if not oplist:
             return False, "Failed to extract runtime oplist", None
 
-        # 5. Freshness 校验
-        freshness_ok, freshness_reason = self._validate_freshness(oplist_file)
+        # 5. Freshness 校验：oplist 必须是**本次启动之后**写的
+        #    早前只判"5 分钟内"且失败仅告警——若新服务没起来，读到的是上一次服务的
+        #    oplist（可能仍在 5 分钟内），于是带着错误的算子集继续跑。这里改为阻断。
+        freshness_ok, freshness_reason = self._validate_freshness(oplist_file, since_ts=started_at)
 
         if not freshness_ok:
-            self.logger.warning(f"Freshness validation failed: {freshness_reason}")
-            # Freshness 失败不是致命错误，但会标记
+            self.logger.error(f"Freshness validation failed: {freshness_reason}")
+            return False, f"runtime oplist 不是本次启动产出：{freshness_reason}", None
 
         # 6. Identity 校验
         identity_ok, identity_reason = self._validate_identity(
@@ -109,68 +150,8 @@ class V3DiscoveryStartup:
 
         return True, None, oplist
 
-    def _clear_caches(self):
-        """清理 Triton/FlagGems 缓存（经注入的 executor）"""
-        cache_dirs = [
-            "/root/.triton/cache/",
-            "/tmp/triton_cache/",
-            "/root/.flaggems/code_cache/",
-        ]
 
-        for cache_dir in cache_dirs:
-            res = self.executor.docker_exec(self.container_name, f"rm -rf {cache_dir}")
-            if res.ok:
-                self.logger.info(f"Cleared cache: {cache_dir}")
-            else:
-                self.logger.warning(f"Failed to clear cache {cache_dir}: {res.stderr[:200]}")
 
-    def _start_service(self, model_path: str) -> Tuple[bool, Optional[str]]:
-        """启动服务（detached，经注入的 executor）
-
-        Args:
-            model_path: 模型路径
-
-        Returns:
-            (是否成功, 错误消息)
-        """
-        script = (
-            f"cd /flagos-workspace && "
-            f"VLLM_PLUGINS=fl USE_FLAGGEMS=1 "
-            f"python3 -m vllm.entrypoints.openai.api_server "
-            f"--model {model_path} --port 8000 > logs/service.log 2>&1"
-        )
-        res = self.executor.docker_exec(self.container_name, script, detach=True)
-        if res.ok:
-            self.logger.info("Service start command issued")
-            return True, None
-        error_msg = f"Failed to start service: {res.stderr[:300]}"
-        self.logger.error(error_msg)
-        return False, error_msg
-
-    def _wait_for_service_ready(self, timeout: int = 300) -> bool:
-        """等待服务就绪（经注入的 executor）
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            是否就绪
-        """
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            res = self.executor.docker_exec(
-                self.container_name,
-                "curl -s http://localhost:8000/health",
-                timeout=10,
-            )
-            if res.ok:
-                self.logger.info("Service is ready")
-                return True
-            time.sleep(5)
-
-        self.logger.error(f"Service not ready after {timeout}s")
-        return False
 
     def _extract_runtime_oplist(self) -> Tuple[Optional[List[str]], Optional[str]]:
         """提取运行时 oplist
@@ -203,16 +184,18 @@ class V3DiscoveryStartup:
         self.logger.error("No runtime oplist file found")
         return None, None
 
-    def _validate_freshness(self, oplist_file: str) -> Tuple[bool, str]:
-        """校验 oplist freshness（文件修改时间 vs 现在，经注入的 executor）
+    def _validate_freshness(self, oplist_file: str,
+                            since_ts: Optional[float] = None) -> Tuple[bool, str]:
+        """校验 oplist 是本次启动产出的（经注入的 executor）
 
         Args:
             oplist_file: Oplist 文件路径
+            since_ts: 本次启动的时间戳；给定时要求 oplist 的 mtime **晚于**它
+                      （不看"最近 5 分钟"这种宽松窗口——那会放过上一次服务的产物）
 
         Returns:
             (是否通过, 原因)
         """
-        # 简化实现：检查文件是否在最近 5 分钟内修改
         res = self.executor.docker_exec(
             self.container_name, f"stat -c %Y {oplist_file}", timeout=10
         )
@@ -223,8 +206,16 @@ class V3DiscoveryStartup:
         except (ValueError, AttributeError) as e:
             return False, f"Failed to parse mtime: {e}"
 
-        age = int(time.time()) - mtime
-        if age <= 300:  # 5 分钟内
+        now = time.time()
+        if since_ts is not None:
+            # 允许 60s 时钟/写入间隔（容器与宿主机时钟可能有偏差）
+            if mtime < since_ts - 60:
+                return False, (f"Oplist mtime={mtime} 早于本次启动 {int(since_ts)}"
+                               f"（疑似上一个服务的产物）")
+            return True, f"Oplist 由本次启动产出 (mtime={mtime})"
+
+        age = int(now) - mtime
+        if age <= 300:  # 兼容旧行为：未给 since_ts 时只看 5 分钟内
             return True, f"Oplist is fresh (age={age}s)"
         return False, f"Oplist is stale (age={age}s)"
 

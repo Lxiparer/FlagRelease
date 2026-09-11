@@ -1,0 +1,111 @@
+# 各厂商 docker run 模板（**数据化**：加一个厂商 = 加一段数据，不改代码）
+#
+# 来源：`flagos-container-preparation/SKILL.md` 的模板 A–G，逐字转写。
+# 占位符（由 create_container.py 展开）：
+#   {container}             容器名（编排层确定性预生成，执行层必须原样使用）
+#   {model_path}            宿主机模型路径（或预建的空目录）
+#   {container_model_path}  容器内模型路径（= 宿主机路径，原样映射）
+#   {workspace}             宿主机工作目录 /data/flagos-workspace/<model>
+#   {image}                 镜像地址
+#   {shm}                   共享内存大小
+#
+# 检测顺序很重要：**PPU（平头哥）必须排在 NVIDIA 之前**——PPU 主机上的 nvidia-smi
+# 实为 PPU wrapper，先匹配 nvidia 会误判厂商（见 detect_gpu.py 的注释）。
+# `backends`（可选）声明该厂商的可见设备环境变量，供引擎侧 GPU 规划使用。
+vendors:
+  zhenwu:                      # 平头哥 PPU（CUDA 兼容卡；nvidia-smi 可能是 wrapper）
+    label: 平头哥 PPU
+    argv: ["-itd", "--name={container}",
+           "--privileged", "--network=host", "--ipc=host",
+           "--shm-size={shm}",
+           "--ulimit", "memlock=-1", "--ulimit", "stack=67108864",
+           "--security-opt", "seccomp=unconfined",
+           "-v", "/dev:/dev",
+           "-v", "/usr/local/PPU_SDK:/usr/local/PPU_SDK",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "-e", "XPU_VISIBLE_DEVICES=all",
+           "-e", "XPU_DEVICE_ORDER=PCI_BUS_ID",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: XPU_VISIBLE_DEVICES
+    shm: 512g
+
+  nvidia:
+    label: NVIDIA
+    # 注意：严禁添加模板之外的任何参数（--privileged/--ipc=host/--shm-size 等会触发 authZ 拒绝）
+    argv: ["-itd", "--name={container}",
+           "--gpus=all", "--network=host",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "{image}"]
+    visible_devices_env: CUDA_VISIBLE_DEVICES
+
+  ascend:
+    label: 华为昇腾
+    argv: ["-d", "--name", "{container}",
+           "--net=host", "--ipc=host", "--privileged",
+           "--shm-size={shm}",
+           "-v", "/usr/local/Ascend/driver:/usr/local/Ascend/driver",
+           "-v", "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi",
+           "-v", "/usr/local/dcmi:/usr/local/dcmi",
+           "-v", "/usr/local/sbin:/usr/local/sbin",
+           "-v", "/etc/ascend_install.info:/etc/ascend_install.info",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "-e", "PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: ASCEND_RT_VISIBLE_DEVICES
+    shm: 64g
+
+  mthreads:
+    label: 摩尔线程
+    argv: ["-d", "--name", "{container}",
+           "--net=host", "--ipc=host", "--privileged",
+           "--shm-size={shm}",
+           "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined",
+           "--tmpfs", "/tmp:exec",
+           "-e", "MTHREADS_VISIBLE_DEVICES=all",
+           "-e", "MTHREADS_DRIVER_CAPABILITIES=all",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: MTHREADS_VISIBLE_DEVICES
+    shm: 16g
+
+  metax:
+    label: 沐曦
+    argv: ["-d", "--name", "{container}",
+           "--net=host", "--ipc=host", "--privileged",
+           "--shm-size={shm}",
+           "--group-add", "video", "--ulimit", "memlock=-1",
+           "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined",
+           "--device=/dev/dri", "--device=/dev/mxcd",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: CUDA_VISIBLE_DEVICES
+    shm: 64g
+
+  cambricon:
+    label: 寒武纪
+    argv: ["-d", "--name", "{container}",
+           "--net=host", "--ipc=host", "--privileged",
+           "-v", "/usr/bin/cnmon:/usr/bin/cnmon",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "-v", "/data:/data",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: MLU_VISIBLE_DEVICES
+
+  hygon:
+    label: 海光 DCU
+    argv: ["-d", "--name", "{container}",
+           "--net=host", "--ipc=host",
+           "--device=/dev/kfd", "--device=/dev/mkfd", "--device=/dev/dri",
+           "--group-add", "video",
+           "-v", "/opt/hyhal:/opt/hyhal",
+           "-v", "{model_path}:{container_model_path}",
+           "-v", "{workspace}:/flagos-workspace",
+           "-v", "/data:/data",
+           "{image}", "sleep", "infinity"]
+    visible_devices_env: HIP_VISIBLE_DEVICES

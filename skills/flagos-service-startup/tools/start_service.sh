@@ -20,6 +20,10 @@ MODE=""
 # 取值: "" (禁用所有 plugin) | "fl" | 厂商插件名(如 metax) | 逗号分隔多值
 VLLM_PLUGINS_OVERRIDE_SET=0
 VLLM_PLUGINS_OVERRIDE=""
+# 可选参数覆盖（引擎/编排层显式传参用；**不传则完全保持从 context.yaml 读的既有行为**）。
+# 加这些开关是为了让调用方不必为了传端口/TP 而回写 context.yaml（避免第二个写入者）。
+PORT_OVERRIDE=""; TP_SIZE_OVERRIDE=""; MODEL_PATH_OVERRIDE=""; MODEL_NAME_OVERRIDE=""
+MAX_MODEL_LEN_OVERRIDE=""; THINKING_OVERRIDE=""; CUDA_VISIBLE_OVERRIDE=""
 # 显式指定日志文件（调用方需要监控与写入落到同一文件时使用，如 baseline_selector 三选各 variant 独立日志）
 # 不传时回退到默认 startup_${MODE}.log，保持所有现存调用行为不变。
 LOG_FILE_OVERRIDE=""
@@ -33,6 +37,20 @@ while [[ $# -gt 0 ]]; do
         --vllm-plugins)   VLLM_PLUGINS_OVERRIDE="${2:-}"; VLLM_PLUGINS_OVERRIDE_SET=1; shift; shift 2>/dev/null || true ;;
         --log-file=*) LOG_FILE_OVERRIDE="${1#--log-file=}"; shift ;;
         --log-file)   LOG_FILE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --port=*)                PORT_OVERRIDE="${1#--port=}"; shift ;;
+        --port)                  PORT_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --tp-size=*)             TP_SIZE_OVERRIDE="${1#--tp-size=}"; shift ;;
+        --tp-size)               TP_SIZE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --model-path=*)          MODEL_PATH_OVERRIDE="${1#--model-path=}"; shift ;;
+        --model-path)            MODEL_PATH_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --model-name=*)          MODEL_NAME_OVERRIDE="${1#--model-name=}"; shift ;;
+        --model-name)            MODEL_NAME_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --max-model-len=*)       MAX_MODEL_LEN_OVERRIDE="${1#--max-model-len=}"; shift ;;
+        --max-model-len)         MAX_MODEL_LEN_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --thinking=*)            THINKING_OVERRIDE="${1#--thinking=}"; shift ;;
+        --thinking)              THINKING_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
+        --cuda-visible-devices=*) CUDA_VISIBLE_OVERRIDE="${1#--cuda-visible-devices=}"; shift ;;
+        --cuda-visible-devices)   CUDA_VISIBLE_OVERRIDE="${2:-}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done
@@ -103,6 +121,15 @@ FRAMEWORK=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.s
 CUDA_VISIBLE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['cuda_visible'])")
 VISIBLE_ENV=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['visible_devices_env'])")
 THINKING=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['thinking'])")
+
+# 应用显式覆盖（空串视为"未覆盖"，保持向后兼容）
+[ -n "${PORT_OVERRIDE}" ]          && PORT="${PORT_OVERRIDE}"
+[ -n "${TP_SIZE_OVERRIDE}" ]       && TP_SIZE="${TP_SIZE_OVERRIDE}"
+[ -n "${MODEL_PATH_OVERRIDE}" ]    && MODEL_PATH="${MODEL_PATH_OVERRIDE}"
+[ -n "${MODEL_NAME_OVERRIDE}" ]    && MODEL_NAME="${MODEL_NAME_OVERRIDE}"
+[ -n "${MAX_MODEL_LEN_OVERRIDE}" ] && MAX_MODEL_LEN="${MAX_MODEL_LEN_OVERRIDE}"
+[ -n "${THINKING_OVERRIDE}" ]      && THINKING="${THINKING_OVERRIDE}"
+[ -n "${CUDA_VISIBLE_OVERRIDE}" ]  && CUDA_VISIBLE="${CUDA_VISIBLE_OVERRIDE}"
 
 if [ -z "$MODEL_PATH" ]; then
     echo "ERROR: model.container_path 为空，无法启动服务" >&2

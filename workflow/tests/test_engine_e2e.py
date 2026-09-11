@@ -20,6 +20,7 @@
 中断可从断点恢复。domain 执行器为 stub，不接容器 / 不接 Claude。
 """
 
+import copy
 import unittest
 import sys
 import tempfile
@@ -27,6 +28,8 @@ import shutil
 import json
 import time
 from pathlib import Path
+from datetime import datetime, timedelta
+from typing import List, Optional
 
 import yaml
 
@@ -34,31 +37,125 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.state_store import YamlStateStore
-from workflow.engine.command_executor import FakeExecutor
+from workflow.engine.command_executor import ExecResult, FakeExecutor
 from workflow.schemas.context_v2 import (
     ContextSchemaV2,
     ContextValidationError,
 )
 
 
+# inspect_env.py 的真实输出形状（**嵌套**；真机核对过，见 test_cli_and_report.TestInspectEnvMapping）
 FULL_CAPS = {
-    "flaggems_installed": True, "flaggems_version": "5.1.0",
-    "vllm_plugin_installed": True, "plugin_version": "0.1",
-    "vllm_version": "0.7.3", "flagtree": {"installed": True, "version": "0.5.0"},
+    "execution": {"mode": "container"},
+    "inspection": {
+        "core_packages": {"torch": "2.5.0", "vllm": "0.7.3", "torch_cuda": "12.4"},
+        "flag_packages": {"flaggems": "5.1.0", "flagscale": "-", "flagcx": "-",
+                          "vllm_plugin": "installed"},
+        "vllm_plugin_installed": True,
+    },
+    "flagtree": {"installed": True, "version": "0.5.0", "triton_version": "3.2.0"},
 }
 
 
+def poll_payload(status: str = "", pid: Optional[int] = None, log: str = "",
+                 exit_code: Optional[int] = None) -> str:
+    """构造一次长任务轮询的 stdout（与 LongTaskRunner 的解析格式一致）"""
+    from workflow.engine.long_task import MARK_LOG, MARK_PID
+    state = {}
+    if status:
+        state = {"status": status, "pid": pid or 4321}
+        if exit_code is not None:
+            state["exit_code"] = exit_code
+    return (f"{json.dumps(state) if state else ''}\n{MARK_LOG}\n{log}\n{MARK_PID}\n"
+            f"{pid if pid else ''}\n")
+
+
+def script_service_tools(fake: FakeExecutor):
+    """脚本化"起服务/等就绪"用到的既有工具（detect_gpu / calc_tp_size / start_service.sh）
+
+    起服务已改为调用容器内既有工具（不再内联拼 vllm 命令），测试必须给它们应答。
+    """
+    fake.when("detect_gpu", stdout=json.dumps({
+        "vendor": "nvidia", "free_gpus": [1, 2, 3], "busy_gpus": [0],
+        "total": 4, "visible_devices_env": "CUDA_VISIBLE_DEVICES",
+    }))
+    fake.when("calc_tp_size", stdout=json.dumps({"recommended_tp": 1, "gpu_count": 4}))
+    return fake
+
+
+def script_eval_task(fake: FakeExecutor, polls: Optional[List[str]] = None):
+    """让 FakeExecutor 应答长任务协议（评测 detached + 轮询）
+
+    缺省：预检无任务 → 第一轮 running（进程存活）→ 第二轮 done。
+    注意轮询命令含 MARK_LOG，故用同一个 when_sequence 覆盖所有轮询。
+    """
+    seq = polls if polls is not None else [
+        poll_payload(),                          # 启动前预检：无 state 无进程
+        poll_payload("running", pid=4321, log="[EVAL] 10/30"),
+        poll_payload("done", pid=4321, log="[EVAL] 完成", exit_code=0),
+    ]
+    fake.when_sequence("FLAGOS-TASK-LOG", [ExecResult(0, s) for s in seq])
+    return fake
+
+
+def task_block(kind: str) -> List[str]:
+    """一个长任务的轮询序列：ok=成功；fail=静默死亡（终态，不会无限轮询）"""
+    if kind == "ok":
+        return [poll_payload(), poll_payload("running", pid=4321), poll_payload("done", pid=4321, exit_code=0)]
+    if kind == "fail":
+        return [poll_payload(), poll_payload("running", pid=4321), poll_payload("running")]
+    raise ValueError(f"unknown kind: {kind}")
+
+
+def script_task_blocks(fake: FakeExecutor, blocks: List[str]):
+    """按顺序脚本化多个长任务（如"第1轮起服务失败 → 第2轮成功"）
+
+    每个块对应一次 LongTaskRunner.run 的完整轮询；序列用尽后重复最后一项。
+    会**先清掉既有的长任务规则**——规则先注册先匹配，直接追加不会生效。
+    """
+    seq: List[str] = []
+    for b in blocks:
+        seq.extend(task_block(b))
+    fake.clear_rules("FLAGOS-TASK-LOG")
+    fake.clear_rules("FLAGOS-TASK-LOG")
+    fake.when_sequence("FLAGOS-TASK-LOG", [ExecResult(0, s) for s in seq])
+    return fake
+
+
+def write_eval_result(workspace, dataset: str = "gpqa_diamond",
+                      total_questions: int = 30, score: float = 65.5,
+                      producer: str = "fast_gpqa.py", timestamp: Optional[str] = None) -> Path:
+    """写出评测结果文件（结果有效性校验会读它）
+
+    时间戳默认为"现在 + 300s"：真实评测是在**评测过程中**写出结果的，
+    而测试是在 setUp 里预先写好、之后才跑评测——用未来的时间戳模拟这一时序，
+    否则会被"timestamp 早于本次评测开始 → 疑似上一轮残留"正确拦下。
+    """
+    path = Path(workspace) / "results" / f"{dataset}_flagos_optimized.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = timestamp or (datetime.now() + timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%S")
+    path.write_text(json.dumps({
+        "score": score, "total_questions": total_questions,
+        "_producer": producer, "timestamp": ts, "benchmark": dataset,
+        "_meta": {"test": "fixture"},
+    }), encoding="utf-8")
+    return path
+
+
 def make_fake(admitted: bool = True, accuracy_exit: int = 0) -> FakeExecutor:
-    """构造脚本化 FakeExecutor：满足步骤02 准入 + 步骤06 精度。"""
+    """构造脚本化 FakeExecutor：满足步骤02 准入 + 步骤06 精度（含长任务协议）。"""
     fake = FakeExecutor()
-    caps = dict(FULL_CAPS)
+    caps = copy.deepcopy(FULL_CAPS)  # 嵌套结构，必须深拷贝
     if not admitted:
-        caps["vllm_plugin_installed"] = False
+        caps["inspection"]["vllm_plugin_installed"] = False
     fake.when("inspect_env", stdout=json.dumps(caps))
     fake.when("stat -c %Y", stdout=str(int(time.time())))  # freshness（须先于 oplist 规则）
     fake.when("flaggems_enable_oplist",
               stdout="\n".join(f"op_{i}" for i in range(80)))  # 步骤03 oplist 发现
-    fake.when("fast_gpqa", returncode=0, stdout=json.dumps({"score": 65.5}))
+    script_service_tools(fake)  # 起服务/等就绪走既有工具
+    # 起服务等就绪 + 调优各轮重启 + 评测都会走长任务，序列要够长；
+    # 用尽后会重复末项（done），后续任务会"接管终态"而不再发命令
+    script_task_blocks(fake, ["ok"] * 6)
     fake.when(
         "accuracy_compare",
         returncode=accuracy_exit,
@@ -102,6 +199,9 @@ class TestEngineEndToEnd(unittest.TestCase):
         eng.context.runtime.model_path = "/models/TestModel"
         # V4 只测两轮（默认值）；e2e 的 fake 吞吐恒定 → 无提升 → 回退 V3
         eng.v4_max_rounds = 2
+        # 长任务轮询不睡（默认 60s）；并写出评测结果文件（完整性校验会读）
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)
         return eng
 
     def test_run_all_15_steps(self):
@@ -197,6 +297,8 @@ class TestEngineEndToEnd(unittest.TestCase):
 
         # 新引擎从磁盘加载并续跑
         engine2 = WorkflowEngine(self.tmpdir, executor=make_fake())
+        engine2.context.runtime.model_path = "/models/TestModel"
+        engine2.long_task_poll_interval = 0
         self.assertEqual(engine2.detect_recovery_point(), "05_v3_startup_tuning")
         ctx = engine2.run()
 

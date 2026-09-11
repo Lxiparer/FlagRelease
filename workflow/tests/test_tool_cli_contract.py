@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from workflow.engine.workflow_engine import WorkflowEngine
 from workflow.engine.command_executor import ExecResult
 
-from workflow.tests.test_engine_e2e import make_fake
+from workflow.tests.test_engine_e2e import make_fake, write_eval_result
 
 REPO = Path(__file__).parent.parent.parent
 
@@ -104,6 +104,8 @@ class TestToolCliContract(unittest.TestCase):
         cls.engine.context.runtime.container_name = "ctr"
         cls.engine.context.runtime.model_name = "TestModel"
         cls.engine.context.runtime.model_path = "/models/TestModel"
+        cls.engine.long_task_poll_interval = 0
+        write_eval_result(cls.tmpdir)
         cls.engine.run()
         cls.commands = [" ".join(call) for call in fake.calls]
 

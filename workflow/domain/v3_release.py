@@ -38,6 +38,75 @@ from ..engine.command_executor import CommandExecutor, SubprocessExecutor
 HARBOR_V3_PROJECT = "harbor.baai.ac.cn/flagrelease-project"
 
 
+def normalize_model_name(model_name: str) -> str:
+    """镜像 tag 里的模型名归一化
+
+    原因（真机）：`--model` 常带 vendor 前缀（如 `Qwen/Qwen3-8B`），直接拼进 tag 会
+    产生 `harbor.../Qwen/Qwen3-8B-flagos:...` 这种多级 repo 路径 → push 失败或推错地方。
+    取短名并与既有容器命名口径一致（宿主编排也是 `sed 's|.*/||'` 取短名），
+    再把 Docker 不允许的字符换成 `-`。
+    """
+    short = (model_name or "").rstrip("/").split("/")[-1]
+    safe = "".join(ch if (ch.isalnum() or ch in "-_.") else "-" for ch in short)
+    return safe or "model"
+
+
+# Harbor 凭证环境变量（CLAUDE.md：凭证通过环境变量提供）
+HARBOR_USER_ENV = "HARBOR_USER"
+HARBOR_PASSWORD_ENV = "HARBOR_PASSWORD"
+
+
+def harbor_login(executor, registry: str, logger: logging.Logger) -> bool:
+    """登录 Harbor（凭证从环境变量取；没配凭证则跳过并告警）
+
+    既有编排的教训：发布命令可能因权限/环境问题**静默失败**而流程照常继续
+    （2026-08-05 Mistral-Small V3 事故：报告说发布了，实际没有）。所以这里
+    显式登录 + 推送后回读校验。
+    """
+    user = os.environ.get(HARBOR_USER_ENV, "")
+    password = os.environ.get(HARBOR_PASSWORD_ENV, "")
+    if not user or not password:
+        logger.warning(
+            f"未提供 {HARBOR_USER_ENV}/{HARBOR_PASSWORD_ENV}，跳过 docker login"
+            f"（若宿主已登录则可继续）"
+        )
+        return False
+    # 密码走 stdin（`-p` 会让凭证出现在进程列表里）
+    res = executor.run(
+        ["docker", "login", registry, "-u", user, "--password-stdin"],
+        timeout=120, stdin=password,
+    )
+    if not res.ok:
+        logger.error(f"docker login {registry} 失败：{res.stderr[:200]}")
+        return False
+    logger.info(f"已登录 {registry}")
+    return True
+
+
+def push_image(executor, image_tag: str, logger: logging.Logger,
+               attempts: int = 2) -> bool:
+    """推送镜像：失败重试一次；成功后**回读校验**确认远端真的有这个 tag"""
+    for attempt in range(1, attempts + 1):
+        res = executor.run(["docker", "push", image_tag], timeout=3600)
+        if res.ok:
+            if verify_pushed(executor, image_tag, logger):
+                return True
+            logger.error(f"推送返回成功但回读校验失败（{image_tag}）——疑似静默未发布")
+        else:
+            logger.error(f"docker push 失败（第 {attempt}/{attempts} 次）：{res.stderr[:200]}")
+    return False
+
+
+def verify_pushed(executor, image_tag: str, logger: logging.Logger) -> bool:
+    """回读校验：确认镜像 tag 在远端仓库可见（防"命令成功但实际没发布"）"""
+    res = executor.run(["docker", "manifest", "inspect", image_tag], timeout=300)
+    if not res.ok:
+        logger.error(f"回读校验失败：docker manifest inspect {image_tag} → {res.stderr[:200]}")
+        return False
+    logger.info(f"发布回读校验通过：{image_tag}")
+    return True
+
+
 class V3ReleaseManager:
     """V3 发布管理器"""
 
@@ -117,7 +186,8 @@ class V3ReleaseManager:
         """
         # docker commit 快照容器为镜像（宿主机 docker 命令，非容器内执行）
         timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        image_tag = f"{HARBOR_V3_PROJECT}/{self.model_name}-flagos:{timestamp}-v3"
+        image_tag = (f"{HARBOR_V3_PROJECT}/"
+                     f"{normalize_model_name(self.model_name)}-flagos:{timestamp}-v3")
 
         self.logger.info(f"Packaging image: {image_tag}")
         res = self.executor.run(["docker", "commit", self.container_name, image_tag], timeout=1800)
@@ -142,10 +212,9 @@ class V3ReleaseManager:
         """
         self.logger.info(f"Uploading image: {image_tag} (scope={release_scope})")
 
-        # 始终 push 到 Harbor（宿主机 docker 命令）
-        res = self.executor.run(["docker", "push", image_tag], timeout=3600)
-        if not res.ok:
-            self.logger.error(f"docker push failed: exit={res.returncode}: {res.stderr[:300]}")
+        # 始终 push 到 Harbor（宿主机 docker 命令）：先登录、再推送、再回读校验
+        harbor_login(self.executor, HARBOR_V3_PROJECT.split("/")[0], self.logger)
+        if not push_image(self.executor, image_tag, self.logger):
             return False
 
         if release_scope == "full":
@@ -188,9 +257,11 @@ class V3ReleaseManager:
         }
 
         if release_scope == "full":
-            report["artifacts"]["published_to"].extend(
-                ["ModelScope", "HuggingFace"]
-            )
+            # 对外发布（MS/HF 权重 + README）**尚未实现**（M1c）。
+            # 这里只登记"待办"，绝不把它写进 published_to——否则报告会声称已对外发布，
+            # 而实际只 push 了 Harbor 私有镜像（"把步骤成功显示成版本达标"的同类问题）。
+            report["artifacts"]["pending_publish"] = ["ModelScope", "HuggingFace"]
+            report["artifacts"]["_pending_reason"] = "对外发布通道未实现（M1c）"
 
         return report
 

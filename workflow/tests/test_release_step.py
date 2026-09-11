@@ -50,7 +50,9 @@ class TestV3Release(unittest.TestCase):
         ok, report = m.release_v3(self.rev, accuracy_passed=True, established_passed=True)
         self.assertTrue(ok)
         self.assertEqual(report["release_scope"], "full")
-        self.assertIn("ModelScope", report["artifacts"]["published_to"])
+        # 对外发布未实现：只登记待办，绝不写进 published_to（否则台账会说谎）
+        self.assertNotIn("ModelScope", report["artifacts"]["published_to"])
+        self.assertEqual(report["artifacts"]["pending_publish"], ["ModelScope", "HuggingFace"])
         self.assertTrue(report["image_tag"].endswith("-v3"))
         # commit + push 都发出
         self.assertTrue(fake.calls_containing("docker commit"))

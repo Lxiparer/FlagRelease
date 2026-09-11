@@ -37,7 +37,7 @@ from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.command_executor import FakeExecutor
 from workflow.schemas.context_v2 import ContextSchemaV2, RuntimeInfo, WorkflowStep
 
-from workflow.tests.test_engine_e2e import make_fake
+from workflow.tests.test_engine_e2e import make_fake, write_eval_result
 
 
 def _ctx_with(statuses: dict) -> ContextSchemaV2:
@@ -103,8 +103,10 @@ class TestCliExitCodes(unittest.TestCase):
                 "--model-path", "/models/TestModel",
             ])
             self.assertEqual(rc, EXIT_PRECONDITION)
-            # 前置校验没过 → 不应产出报告
-            self.assertFalse((Path(tmp) / "results" / "report.md").exists())
+            # 前置校验没过 → **仍然要产出报告**（失败场景零产出是早前的缺陷）
+            self.assertTrue((Path(tmp) / "results" / "report.md").exists())
+            self.assertIn("01_container_preparation",
+                          (Path(tmp) / "results" / "report.md").read_text())
             # 引擎状态照常落盘（可续跑），且落在 config/engine/ 而非 shared/
             self.assertTrue((Path(tmp) / "config" / "engine" / "context.yaml").exists())
         finally:
@@ -185,6 +187,8 @@ class TestStep14Report(unittest.TestCase):
         eng.context.runtime.model_name = "TestModel"
         eng.context.runtime.model_path = "/models/TestModel"
         eng.v4_max_rounds = 2
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)   # 评测结果文件（完整性校验会读）
         eng.run()
         return eng
 
@@ -240,6 +244,109 @@ class TestStep14Report(unittest.TestCase):
         self.assertTrue(final["steps"]["15_finalize"]["status"] == "success")
 
 
+class TestInspectEnvMapping(unittest.TestCase):
+    """inspect_env 真实输出 → capabilities 映射（真机核对后固化）
+
+    真实输出是**嵌套**结构，而 check_admission 要扁平键。早前实现读扁平顶层键，
+    真实输入里全都不存在 → 四个组件全判缺失、准入在任何容器上都必失败。
+    下面这份 fixture 就是真机抓到的形状（OLMo 容器）。
+    """
+
+    # 真机抓取的真实结构（裁剪掉与本映射无关的字段）
+    REAL_JSON = {
+        "execution": {"mode": "container"},
+        "inspection": {
+            "core_packages": {"torch": "2.11.0+cu130", "vllm": "0.24.0", "torch_cuda": "13.0"},
+            "flag_packages": {"flaggems": "5.3.4", "flagscale": "-", "flagcx": "-",
+                              "vllm_plugin": "installed"},
+            "vllm_plugin_installed": True,
+            "gpu_compute_capability": "9.0",
+        },
+        "flagtree": {"installed": False, "version": "",
+                     "triton_version": "3.6.0", "backend": ""},
+    }
+
+    def _mapped(self, flagtree_installed: bool) -> dict:
+        j = json.loads(json.dumps(self.REAL_JSON))
+        j["flagtree"]["installed"] = flagtree_installed
+        if flagtree_installed:
+            j["flagtree"]["version"] = "0.5.0"
+        return WorkflowEngine._map_inspect_env_to_capabilities(j)
+
+    def test_maps_nested_real_shape(self):
+        caps = self._mapped(flagtree_installed=False)
+        self.assertEqual(caps["vllm_version"], "0.24.0")
+        self.assertEqual(caps["flaggems_version"], "5.3.4")
+        self.assertTrue(caps["flaggems_installed"])
+        self.assertTrue(caps["vllm_plugin_installed"])
+        self.assertEqual(caps["plugin_version"], "installed")  # 真实输出是标记串
+        self.assertFalse(caps["flagtree"]["installed"])
+
+    def test_uninstalled_component_is_blank_not_dash(self):
+        """未安装组件在真实输出里是 '-'，不能当成版本号"""
+        caps = self._mapped(flagtree_installed=True)
+        self.assertEqual(caps["flaggems_version"], "5.3.4")  # 有值时原样
+        # flagscale/flagcx 是 '-'，不进 capabilities，但同规则适用
+        empty = WorkflowEngine._map_inspect_env_to_capabilities(
+            {"inspection": {"core_packages": {"vllm": "-"},
+                            "flag_packages": {"flaggems": "-", "vllm_plugin": "-"}}})
+        self.assertEqual(empty["vllm_version"], "")
+        self.assertFalse(empty["flaggems_installed"])
+
+    def test_admission_passes_when_all_components_present(self):
+        """四组件齐全（含 FlagTree）→ 准入通过"""
+        from workflow.domain.admission import PluginOnlyAdmission
+        from workflow.artifacts.registry import ArtifactRegistry
+        tmp = tempfile.mkdtemp()
+        try:
+            admission = PluginOnlyAdmission(tmp, ArtifactRegistry(tmp))
+            result = admission.check_admission(self._mapped(flagtree_installed=True))
+            self.assertTrue(result.admitted, f"应通过，实际缺失={result.missing_components}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_admission_fails_with_flagtree_only_missing(self):
+        """真机同一份输入（缺 FlagTree）→ 只报 flagtree 缺失"""
+        from workflow.domain.admission import PluginOnlyAdmission
+        from workflow.artifacts.registry import ArtifactRegistry
+        tmp = tempfile.mkdtemp()
+        try:
+            admission = PluginOnlyAdmission(tmp, ArtifactRegistry(tmp))
+            result = admission.check_admission(self._mapped(flagtree_installed=False))
+            self.assertFalse(result.admitted)
+            self.assertEqual(result.missing_components, ["flagtree"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestJsonOutputParsing(unittest.TestCase):
+    """容器脚本 stdout 混杂日志时的 JSON 提取（真机：inspect_env 前有 vLLM INFO 行）"""
+
+    def test_logs_prefixed_json(self):
+        from workflow.engine.command_executor import parse_json_output
+        text = ('INFO 09-11 04:34:53 [__init__.py:44] Available plugins for group '
+                'vllm.platform_plugins:\n'
+                'INFO 09-11 04:34:54 [__init__.py:46] - fl -> vllm_fl:register\n'
+                'WARNING pkg_resources is deprecated\n'
+                '  ✓ 初始控制文件已创建: /root/flaggems_ops_control.json\n'
+                '{\n  "inspection": {"vllm_plugin_installed": true}\n}\n')
+        self.assertEqual(parse_json_output(text),
+                         {"inspection": {"vllm_plugin_installed": True}})
+
+    def test_does_not_return_nested_fragment(self):
+        """不能从最后一个 '{' 切——那会解析出嵌套片段（错误的子对象）"""
+        from workflow.engine.command_executor import parse_json_output
+        text = 'log{"a": 1}\nlog{"b": {"c": 2}}\n'
+        got = parse_json_output(text)
+        self.assertIn("a", got, f"应取第一个完整文档，实际 {got}")
+
+    def test_non_json_returns_none(self):
+        from workflow.engine.command_executor import parse_json_output
+        self.assertIsNone(parse_json_output(""))
+        self.assertIsNone(parse_json_output("no json at all"))
+        self.assertIsNone(parse_json_output("{broken"))
+
+
 class TestMigrationIsolation(unittest.TestCase):
     """迁移期隔离：引擎不碰 legacy 状态文件，也不复现 legacy 的路径漂移"""
 
@@ -262,6 +369,8 @@ class TestMigrationIsolation(unittest.TestCase):
         eng.context.runtime.container_name = "ctr"
         eng.context.runtime.model_name = "TestModel"
         eng.context.runtime.model_path = "/models/TestModel"
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)
         eng.run()
 
         self.assertEqual(legacy.read_bytes(), before, "legacy context.yaml 被引擎改写了")
@@ -273,6 +382,8 @@ class TestMigrationIsolation(unittest.TestCase):
         eng.context.runtime.container_name = "ctr"
         eng.context.runtime.model_name = "TestModel"
         eng.context.runtime.model_path = "/models/TestModel"
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)
         eng.run()
 
         # 模拟宿主编排的每轮归档（把 config/ 整体移走）
@@ -281,6 +392,7 @@ class TestMigrationIsolation(unittest.TestCase):
         shutil.move(str(Path(self.tmpdir) / "config"), str(archive / "config"))
 
         eng2 = WorkflowEngine(self.tmpdir, executor=make_fake())
+        eng2.long_task_poll_interval = 0
         self.assertEqual(eng2.detect_recovery_point(), "01_container_preparation")
         self.assertFalse(eng2.context.runtime.finished_at)
 

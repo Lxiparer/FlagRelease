@@ -35,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from workflow.engine.workflow_engine import WorkflowEngine, WORKFLOW_STEPS
 from workflow.engine.command_executor import FakeExecutor, ExecResult
 from workflow.domain.v4_reduction import pick_random_subset
+from workflow.tests.test_engine_e2e import (
+    script_service_tools, script_task_blocks, write_eval_result,
+)
 
 V4_OPS = ["op_a", "op_b", "op_c"]
 SEED = 0
@@ -66,6 +69,9 @@ def make_v4_fake(throughputs, accuracy_exit: int = 0, commit_ok: bool = True,
     whitelist_results: 自定义每轮算子白名单下发结果（序列）；缺省全部成功。
     """
     fake = FakeExecutor()
+    script_service_tools(fake)
+    # V4：两轮探针各一次重启 + 精度回溯每个候选一次重启与评测 → 序列给足
+    script_task_blocks(fake, ["ok"] * 8)
     fake.when_sequence("benchmark_runner", [ExecResult(0, _bench(t)) for t in throughputs])
     if whitelist_results is not None:
         fake.when_sequence("apply_op_config", list(whitelist_results))
@@ -101,6 +107,8 @@ class V4TestBase(unittest.TestCase):
         eng.context.runtime.model_path = "/models/TestModel"
         eng.startup_tuning_timeout = 0
         eng.startup_tuning_poll_interval = 0
+        eng.long_task_poll_interval = 0
+        write_eval_result(self.tmpdir)  # 评测结果文件（完整性校验会读）
         eng.v4_seed = SEED
         for sid, _ in WORKFLOW_STEPS[:10]:
             eng.context.steps[sid].status = "success"
@@ -192,8 +200,8 @@ class TestV4Search(V4TestBase):
         engine = self._engine(fake, v3_ops=V4_OPS)
         engine.execute_step("11_v4_reduction")
 
-        # 基线 + 2 轮 = 3 次重启（每次清缓存）
-        self.assertEqual(len(fake.calls_containing("rm -rf /root/.triton/cache/")), 3)
+        # 基线 + 2 轮 = 3 次重启（清缓存改由 start_service.sh 内部完成，引擎侧不再单独发 rm）
+        self.assertEqual(len(fake.calls_containing("start_service.sh")), 3)
         self.assertEqual(len(self._applied_whitelists(fake)), 3)
         # 核验真的读了运行时 txt
         self.assertTrue(fake.calls_containing("flaggems_enable_oplist"))

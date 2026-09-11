@@ -29,6 +29,7 @@
     1  有步骤 failed（打印步骤 id 与原因）
     2  前置校验失败或参数错误（含步骤01 的前置校验）
     3  状态文件损坏／不可解析
+    4  引擎内部错误（未预期异常；已尽力落快照与报告）
 """
 
 import argparse
@@ -47,6 +48,7 @@ EXIT_OK = 0
 EXIT_STEP_FAILED = 1
 EXIT_PRECONDITION = 2
 EXIT_STATE_CORRUPT = 3
+EXIT_INTERNAL = 4
 
 # 步骤01 是引擎侧的前置校验（容器/工作区就绪），其失败按"前置条件不满足"归类
 _PRECONDITION_STEP = "01_container_preparation"
@@ -77,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifacts-root", default="",
         help="Artifact 台账根目录（缺省 <workspace>/config/engine/artifacts）",
+    )
+    parser.add_argument(
+        "--proxy", default="",
+        help="容器内命令与外网操作使用的代理（缺省取环境变量 http_proxy/https_proxy）",
     )
     parser.add_argument("--v4-seed", type=int, default=0, help="V4 随机子集搜索种子（可复现）")
     parser.add_argument("--v4-max-rounds", type=int, default=2, help="V4 搜索轮数上限")
@@ -169,6 +175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             datasets=datasets,
             state_file=args.state_file or None,
             artifacts_root=args.artifacts_root or None,
+            proxy=args.proxy,
         )
     except ContextValidationError as e:
         print(f"✗ 引擎状态文件校验失败：{e}", file=sys.stderr)
@@ -191,7 +198,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"model={args.model} datasets={datasets} state={engine.context_file}"
     )
 
-    ctx = engine.run()
+    # run() 内部还会写状态（complete_step / _save_context），其校验异常不在 handler 的
+    # try 范围内；不兜住就会 traceback 退出，连终态快照与报告都不写。
+    try:
+        ctx = engine.run()
+    except ContextValidationError as e:
+        print(f"✗ 引擎状态校验失败：{e}", file=sys.stderr)
+        engine._finalize_run()  # 尽力留下现场（快照 + 报告）
+        return EXIT_STATE_CORRUPT
+    except Exception as e:
+        print(f"✗ 引擎内部错误：{type(e).__name__}: {e}", file=sys.stderr)
+        engine._finalize_run()
+        return EXIT_INTERNAL
+
     _print_summary(ctx)
 
     rc = exit_code_for_context(ctx)
