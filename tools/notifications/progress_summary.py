@@ -459,9 +459,9 @@ def build_models_markdown_table(
         return ""
     if max_rows is None:
         try:
-            max_rows = int(os.getenv("FLAGOS_FEISHU_TABLE_MAX_ROWS", "20"))
+            max_rows = int(os.getenv("FLAGOS_FEISHU_TABLE_MAX_ROWS", "50"))
         except ValueError:
-            max_rows = 20
+            max_rows = 50
     completed = _completed_by_task(state)
     current = nested_dict(state.get("current_model"))
     current_index = int(as_float(current.get("task_index")) or 0)

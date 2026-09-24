@@ -154,7 +154,7 @@ FLAGOS_PROGRESS_MAX_ATTEMPTS=3              事件最大处理次数
 FLAGOS_PROGRESS_END_SETTLE_SECONDS=2         batch-end 前的队列稳定时间
 FLAGOS_PROGRESS_END_MAX_WAIT_SECONDS=30      batch-end 最长后台等待时间
 FLAGOS_PROGRESS_CLAUDE_CONFIG_DIR=...        独立 Claude 配置目录
-FLAGOS_FEISHU_TABLE_MAX_ROWS=20             卡片表格最大行数
+FLAGOS_FEISHU_TABLE_MAX_ROWS=50             卡片表格最大行数
 ```
 
 ## 手动操作
