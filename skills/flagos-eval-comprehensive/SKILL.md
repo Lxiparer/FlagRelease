@@ -122,7 +122,7 @@ eval:
 
 ---
 
-# 模块 A：本地快速评测（GPQA Diamond / MMLU / MATH-500）
+# 模块 A：本地快速评测（GPQA Diamond / MMLU / MATH-500 / MMBench English / MMStar）
 
 主模式：**快速评测** — 一条命令跑完，自动适配所有模型（thinking/non-thinking），自动探测吞吐选并发。数据集通过 `--dataset` 指定（默认 `gpqa_diamond`）：
 
@@ -131,6 +131,7 @@ eval:
 | GPQA Diamond | `gpqa_diamond` | 0-shot | 50（--limit 0 全量 198） | 主流程 V1/V2 精度判据 |
 | MMLU | `mmlu` | 5-shot | 20/子集 | **per-subset 语义**：57 子集各取 limit 题（默认 20/子集 = 1140 题；--limit 100 = 5700 题，--limit 0 = 全量 14042） |
 | MATH-500 | `math_500` | 0-shot | 200（40/等级） | 500 题 test，`\boxed{}` 答案；**同为 per-subset 语义**（实测 1.5.1：5 子集 Level 1-5 各取 limit 题，默认 40/等级 = 200 题，--limit 0 = 全量 500） |
+| MM-Bench English | `mm_bench_en` | 0-shot | 默认 1000（--limit 0 全量 4329） | **多模态（VLM）**；映射 EvalScope `mm_bench` 的 `en` / `dev` 子集，需支持图片输入 |
 | MMStar | `mm_star` | 0-shot | **全量 1500**（默认；降采样显式传 --limit N/子集） | **多模态（VLM）视觉必答 4 选一 MCQ**，仅对视觉语言模型有意义（纯文本 LLM 收到图片会报错/胡答，且 vLLM 须以支持图像输入方式起服务）；6 子集各 250 题（**per-subset 语义**，reformat_subset=True）；**默认全量**（采样偏最难子集会显著偏低：300 题 44.67% vs 全量 62.6%）；多模态专用 max_tokens 硬上限 4096（MCQ 答案短，防复读死循环吃满窗口）、prompt 预留 16K、并发档位对半下调 |
 
 > 默认题数降采样为 2026-08-14 定稿（迁移成本优化）：mmlu 20/子集 gap 实测 -0.4pt（95% ±2.05pt）、math 200 题 ±5.4pt（用户已确认接受），详见 `eval-sampling-gap-measured` 记忆。
@@ -150,7 +151,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 # 也可在 config 指定多数据集: dataset: "mmlu, math_500"
 ```
 
-多数据集时 `--limit` 对所有数据集生效（per-subset 数据集按各子集取数）；不传则各数据集用默认题数。结果汇总表在终端打印，退出码 = 所有数据集得分都解析成功才为 0。
+多数据集时 `--limit` 对所有数据集生效（per-subset 数据集按各子集取数）；不传则各数据集用默认题数。MM-Bench English 的 `--limit` 针对所选 `en` 子集计数。结果汇总表在终端打印，退出码 = 所有数据集得分都解析成功才为 0。新增多模态数据集仅在显式选择时运行，不纳入默认 GPQA V1/V2 比较或门控流程。
 
 ## 核心特性
 
@@ -199,7 +200,7 @@ model:
 
 dataset_dir: ""                         # 可选，预下载缓存目录
 dataset_hub: "modelscope"               # modelscope 或 huggingface
-dataset: "gpqa_diamond"                 # 可选，gpqa_diamond / mmlu / math_500 / mm_star（多模态，仅 VLM）
+dataset: "gpqa_diamond"                 # 可选: gpqa_diamond / mmlu / math_500 / mm_bench_en / mm_star；后两者为多模态，仅适用于 VLM
 ```
 
 **步骤 4：运行评测**
@@ -222,7 +223,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
 
 ## 输出
 
-终端打印 + `{dataset}_result.json`（gpqa_diamond → `gpqa_result.json`，mmlu → `mmlu_result.json`，math_500 → `math_500_result.json`，mm_star → `mm_star_result.json`）：
+终端打印 + `{dataset}_result.json`（gpqa_diamond → `gpqa_result.json`，mmlu → `mmlu_result.json`，math_500 → `math_500_result.json`，mm_bench_en → `mm_bench_en_result.json`，mm_star → `mm_star_result.json`）：
 
 ```
 ============================================================

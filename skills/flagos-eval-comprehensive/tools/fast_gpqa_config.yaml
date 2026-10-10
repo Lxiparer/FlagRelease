@@ -25,8 +25,9 @@ dataset_dir: ""
 # 数据集来源: modelscope / huggingface
 dataset_hub: "modelscope"
 
-# 评测数据集: gpqa_diamond / mmlu / math_500，可多个（空格或逗号分隔，如 "mmlu, math_500"）
-# mmlu: 5-shot，--limit 为每子集题数；默认 20/子集 = 1140 题（--limit 100 = 57 子集 × 100 = 5700 题）
-# math_500: 0-shot，--limit 亦为每子集题数；默认 40/等级 = 200 题（5 子集 × limit；--limit 0 = 全量 500 题）
-# 默认题数降采样为 2026-08-14 定稿（迁移成本优化，gap 实测见记忆 eval-sampling-gap-measured）
+# 评测数据集: gpqa_diamond / mmlu / math_500 / mm_bench_en / mm_star，可多个（逗号分隔）
+# mm_bench_en: EvalScope mm_bench 的 en/dev 子集，默认 1000 题（limit 0 为英文全量）
+# mm_star: 多模态数据集，默认全量 1500 题；仅适用于支持图片输入的 VLM
+# MMLU、MATH-500、MMStar 的 limit 按子集取题；未指定时采用所选数据集默认值
+# GPQA Diamond 降采样依据见 eval-sampling-gap-measured
 dataset: "gpqa_diamond"

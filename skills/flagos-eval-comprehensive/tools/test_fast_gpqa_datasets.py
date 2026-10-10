@@ -1,5 +1,7 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
+import types
 
 
 TOOLS = Path(__file__).parent
@@ -37,3 +39,85 @@ def test_generation_config_accepts_model_sampling_fields(tmp_path):
 
 def test_invalid_dataset_names_do_not_fallback():
     assert 'not_a_dataset' not in FAST_GPQA.DATASET_CONFIG
+
+
+def test_mm_bench_task_config_uses_english_subset_and_default_limit(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeTaskConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    evalscope = types.ModuleType('evalscope')
+    evalscope.TaskConfig = FakeTaskConfig
+    evalscope.run_task = lambda task_cfg: {'result': {'score': 0.855, 'metrics': [{'num': 1000}]}}
+    constants = types.ModuleType('evalscope.constants')
+    constants.EvalType = types.SimpleNamespace(OPENAI_API='openai_api')
+    monkeypatch.setitem(sys.modules, 'evalscope', evalscope)
+    monkeypatch.setitem(sys.modules, 'evalscope.constants', constants)
+    monkeypatch.setattr(FAST_GPQA, 'auto_max_tokens', lambda *args, **kwargs: (4096, 32768))
+    monkeypatch.setattr(FAST_GPQA, 'check_truncation', lambda *args, **kwargs: (False, 4096))
+    monkeypatch.setattr(FAST_GPQA, 'probe_throughput', lambda **kwargs: (2, 0.1))
+    monkeypatch.setattr(FAST_GPQA, '_preload_dataset', lambda *args: None)
+    monkeypatch.setattr(FAST_GPQA, 'ServiceMonitor', None)
+    monkeypatch.chdir(tmp_path)
+
+    report = FAST_GPQA.run_fast_gpqa(
+        model_name='Qwen3-VL-4B-Instruct',
+        api_base='http://localhost:8000/v1',
+        dataset='mm_bench_en',
+    )
+
+    assert captured['datasets'] == ['mm_bench']
+    assert captured['dataset_args']['mm_bench']['subset_list'] == ['en']
+    assert captured['limit'] == 1000
+    assert captured['generation_config']['max_tokens'] == 4096
+    assert report['total_questions'] == 1000
+    assert report['_producer'] == 'fast_gpqa.py'
+
+
+def test_mm_star_task_config_defaults_to_full_corpus(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeTaskConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    evalscope = types.ModuleType('evalscope')
+    evalscope.TaskConfig = FakeTaskConfig
+    evalscope.run_task = lambda task_cfg: {'result': {'score': 0.626, 'metrics': [{'num': 1500}]}}
+    constants = types.ModuleType('evalscope.constants')
+    constants.EvalType = types.SimpleNamespace(OPENAI_API='openai_api')
+    monkeypatch.setitem(sys.modules, 'evalscope', evalscope)
+    monkeypatch.setitem(sys.modules, 'evalscope.constants', constants)
+    monkeypatch.setattr(FAST_GPQA, 'auto_max_tokens', lambda *args, **kwargs: (4096, 32768))
+    monkeypatch.setattr(FAST_GPQA, 'check_truncation', lambda *args, **kwargs: (False, 4096))
+    monkeypatch.setattr(FAST_GPQA, 'probe_throughput', lambda **kwargs: (2, 0.1))
+    monkeypatch.setattr(FAST_GPQA, '_preload_dataset', lambda *args: None)
+    monkeypatch.setattr(FAST_GPQA, 'ServiceMonitor', None)
+    monkeypatch.chdir(tmp_path)
+
+    report = FAST_GPQA.run_fast_gpqa(
+        model_name='Qwen3-VL-4B-Instruct',
+        api_base='http://localhost:8000/v1',
+        dataset='mm_star',
+    )
+
+    assert captured['datasets'] == ['mm_star']
+    assert 'limit' not in captured
+    assert report['total_questions'] == 1500
+
+
+def test_mm_bench_preload_uses_huggingface_dataset_loader(monkeypatch):
+    calls = []
+    datasets = types.ModuleType('datasets')
+    datasets.load_dataset = lambda *args, **kwargs: calls.append((args, kwargs))
+    monkeypatch.setitem(sys.modules, 'datasets', datasets)
+
+    FAST_GPQA._preload_dataset('modelscope', dataset='mm_bench_en')
+
+    assert len(calls) == 1
+    assert calls[0][0] == ('lmms-lab/MMBench',)
+    assert calls[0][1]['name'] == 'en'
+    assert calls[0][1]['split'] == 'dev'
+    assert calls[0][1]['trust_remote_code'] is True

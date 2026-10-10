@@ -113,7 +113,22 @@ DATASET_CONFIG = {
         },
         'benchmark_name': 'MATH-500',
     },
-    # MMStar：多模态（VLM）视觉必答 4 选一 MCQ。evalscope 注册名 mm_star，
+    # MMBench English：EvalScope 注册名 mm_bench，限定 en 子集和 dev split。
+    # 英文 dev 子集共 4329 题，默认评测 1000 题；--limit 0 为英文子集全量。
+    'mm_bench_en': {
+        'full_count': 4329,
+        'few_shot_num': 0,
+        'default_limit': 1000,
+        'eval_dataset': 'mm_bench',
+        'subset_list': ['en'],
+        'multimodal': True,
+        'preload_with_datasets': True,
+        'preload': {
+            'modelscope': ('lmms-lab/MMBench', 'en', 'dev'),
+            'huggingface': ('lmms-lab/MMBench', 'en', 'dev'),
+        },
+        'benchmark_name': 'MMBench English',
+    },
     # VisionLanguageAdapter（图文输入，图片以 base64 内嵌 chat message），
     # eval_split=val，6 子集各 250 题（reformat_subset=True → per-subset 语义），
     # metric=acc，0-shot。⚠ 仅对多模态模型有意义：纯文本 LLM 收到图片会报错/胡答，
@@ -261,6 +276,7 @@ def check_truncation(
     max_tokens: int,
     max_model_len: Optional[int],
     max_tokens_cap: Optional[int] = None,
+    generation_config: Optional[Dict] = None,
 ) -> Tuple[bool, int]:
     """
     发一条样题检查 finish_reason 是否为 length（截断）。
@@ -284,8 +300,9 @@ def check_truncation(
     payload = {
         'model': model_name,
         'messages': [{'role': 'user', 'content': GPQA_SAMPLE_QUESTION}],
+        **{k: v for k, v in (generation_config or {}).items()
+           if k not in ('max_tokens', 'stream', 'timeout', 'n')},
         'max_tokens': max_tokens,
-        'temperature': 0.0,
     }
 
     try:
@@ -490,7 +507,7 @@ def _sanitize_model_id(model_name: str) -> str:
 def _preload_dataset(dataset_hub: str, dataset_dir: Optional[str] = None,
                      dataset: str = 'gpqa_diamond'):
     """预加载数据集到缓存，确保探测阶段计时不含下载时间。"""
-    cfg = DATASET_CONFIG.get(dataset, DATASET_CONFIG['gpqa_diamond'])
+    cfg = DATASET_CONFIG[dataset]
     preload = cfg.get('preload', {})
     repo, subset, split = preload.get(dataset_hub, (None, None, None))
     if not repo:
@@ -499,10 +516,10 @@ def _preload_dataset(dataset_hub: str, dataset_dir: Optional[str] = None,
         if dataset_dir:
             # 检查本地缓存是否存在（按数据集名前缀匹配）
             import glob as glob_mod
-            prefix = dataset.split('_')[0]  # gpqa/mmlu/math
+            prefix = 'mmbench' if dataset == 'mm_bench_en' else dataset.split('_')[0]
             if glob_mod.glob(os.path.join(dataset_dir, '**', f'{prefix}*'), recursive=True):
                 return
-        if dataset_hub == 'modelscope':
+        if dataset_hub == 'modelscope' and not cfg.get('preload_with_datasets'):
             from modelscope import MsDataset
             MsDataset.load(repo, split=split, trust_remote_code=True)
         else:
@@ -514,7 +531,7 @@ def _preload_dataset(dataset_hub: str, dataset_dir: Optional[str] = None,
 
 
 def _probe_single_latency(api_base: str, api_key: str, model_name: str,
-                           max_tokens: int, is_thinking: bool) -> float:
+                           generation_config: Dict, is_thinking: bool) -> float:
     """直接调 OpenAI API 测一条推理的纯推理时间（剥离 evalscope 框架开销）"""
     SAMPLE_QUESTION = (
         "What is the result of the Diels-Alder reaction between cyclopentadiene "
@@ -523,8 +540,7 @@ def _probe_single_latency(api_base: str, api_key: str, model_name: str,
     payload = {
         'model': model_name,
         'messages': [{'role': 'user', 'content': SAMPLE_QUESTION}],
-        'max_tokens': max_tokens,
-        'temperature': 0.6 if is_thinking else 0.0,
+        **{k: v for k, v in generation_config.items() if k not in ('stream', 'timeout', 'n')},
     }
     headers = {'Content-Type': 'application/json'}
     if api_key and api_key != 'EMPTY':
@@ -565,7 +581,7 @@ def _estimate_concurrency(latency: float, is_thinking: bool) -> list:
 
 
 def _run_concurrent_probe(api_base: str, api_key: str, model_name: str,
-                           max_tokens: int, is_thinking: bool,
+                           generation_config: Dict, is_thinking: bool,
                            concurrency: int, num_requests: int = 3) -> Tuple[float, int]:
     """并发发 num_requests 个请求，返回 (throughput_rps, error_count)"""
     import concurrent.futures
@@ -577,8 +593,7 @@ def _run_concurrent_probe(api_base: str, api_key: str, model_name: str,
     payload = {
         'model': model_name,
         'messages': [{'role': 'user', 'content': SAMPLE_QUESTION}],
-        'max_tokens': max_tokens,
-        'temperature': 0.6 if is_thinking else 0.0,
+        **{k: v for k, v in generation_config.items() if k not in ('stream', 'timeout', 'n')},
     }
     headers = {'Content-Type': 'application/json'}
     if api_key and api_key != 'EMPTY':
@@ -613,7 +628,7 @@ def _run_concurrent_probe(api_base: str, api_key: str, model_name: str,
 
 
 def _validate_concurrency(api_base: str, api_key: str, model_name: str,
-                           candidates: list, max_tokens: int,
+                           candidates: list, generation_config: Dict,
                            is_thinking: bool) -> int:
     """对候选并发各跑 3 题，选吞吐最高且无 OOM/超时的。"""
     best_concurrency = candidates[0]
@@ -621,7 +636,7 @@ def _validate_concurrency(api_base: str, api_key: str, model_name: str,
 
     for c in candidates:
         throughput, errors = _run_concurrent_probe(
-            api_base, api_key, model_name, max_tokens, is_thinking,
+            api_base, api_key, model_name, generation_config, is_thinking,
             concurrency=c, num_requests=3,
         )
         print(f"  并发 {c}: throughput={throughput:.2f} rps, errors={errors}")
@@ -663,7 +678,7 @@ def probe_throughput(
     # 阶段 1: 纯 API 延迟
     print("[PROBE] 阶段1: 测量单条推理延迟（直接 API 调用）...")
     try:
-        latency = _probe_single_latency(api_url, api_key, model_name, max_tokens, is_thinking)
+        latency = _probe_single_latency(api_url, api_key, model_name, generation_config, is_thinking)
         print(f"[PROBE] 单条延迟: {latency:.1f}s (thinking={is_thinking})")
     except Exception as e:
         print(f"[PROBE] 延迟探测失败: {e}")
@@ -680,7 +695,7 @@ def probe_throughput(
 
     # 阶段 3: 快速验证
     print("[PROBE] 阶段2: 验证候选并发（每档 3 题）...")
-    best = _validate_concurrency(api_url, api_key, model_name, candidates, max_tokens, is_thinking)
+    best = _validate_concurrency(api_url, api_key, model_name, candidates, generation_config, is_thinking)
     print(f"[PROBE] 最终选择并发: {best}")
 
     return best, latency
@@ -742,7 +757,13 @@ def _find_score(d: dict, depth: int = 0) -> Optional[float]:
 # evalscope 自动挪入 extra_body 透传 vllm，不会报错）。刻意不含 max_tokens：
 # 模型配置里的 max_tokens 常偏小（如 1024）会导致截断、精度暴跌，max_tokens
 # 仍由 auto_max_tokens 基于 max_model_len 自适应计算 + 截断检测决定。
-_GEN_PARAM_WHITELIST = ("temperature", "top_p", "top_k", "repetition_penalty")
+_GEN_PARAM_WHITELIST = ("do_sample", "temperature", "top_p", "top_k", "repetition_penalty")
+_GEN_PARAM_RANGES = {
+    "temperature": (0.0, None),
+    "top_p": (0.0, 1.0),
+    "top_k": (0.0, None),
+    "repetition_penalty": (0.0, None),
+}
 
 
 def _resolve_model_dir(model_path: Optional[str] = None) -> Optional[str]:
@@ -805,8 +826,16 @@ def resolve_gen_params(is_thinking: bool, max_tokens: int,
                 applied = {}
                 for k in _GEN_PARAM_WHITELIST:
                     v = gc.get(k)
-                    # 仅采纳合法非负数值，避免字符串/None/负值污染
-                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+                    if k == "do_sample":
+                        if isinstance(v, bool):
+                            cfg[k] = v
+                            applied[k] = v
+                        continue
+                    lower, upper = _GEN_PARAM_RANGES[k]
+                    if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                            and v >= lower and (upper is None or v <= upper)
+                            and (k != "top_k" or isinstance(v, int))
+                            and (k != "repetition_penalty" or v > 0)):
                         cfg[k] = v
                         applied[k] = v
 
@@ -852,9 +881,10 @@ def run_fast_gpqa(
     dataset: str = 'gpqa_diamond',
     limit: Optional[int] = None,
     output_path: Optional[str] = None,
+    model_path: Optional[str] = None,
 ) -> Dict:
     """
-    快速精度评测主流程（GPQA Diamond / MMLU / MATH-500）。
+    快速精度评测（GPQA Diamond / MMLU / MATH-500 / MMBench English / MMStar）。
 
     Args:
         dataset: 数据集名（DATASET_CONFIG 的 key）
@@ -866,7 +896,7 @@ def run_fast_gpqa(
     from evalscope import TaskConfig, run_task
     from evalscope.constants import EvalType
 
-    cfg = DATASET_CONFIG.get(dataset, DATASET_CONFIG['gpqa_diamond'])
+    cfg = DATASET_CONFIG[dataset]
     if limit is None:
         limit = cfg['default_limit']
 
@@ -893,28 +923,25 @@ def run_fast_gpqa(
         print(f"  max_model_len: 未知 (使用 fallback)")
     print(f"  max_tokens: {max_tokens}")
 
-    # Step 3: 截断检测 — 发样题检查 finish_reason
-    # thinking 模型翻倍重试受 THINKING_MAX_TOKENS_CAP 约束（防线1）
-    # 多模态：截断翻倍上限锁死 MM_MAX_TOKENS_CAP，避免样题撞 length 后翻倍破窗
-    if is_multimodal:
-        trunc_cap = MM_MAX_TOKENS_CAP
-    elif is_thinking:
-        trunc_cap = THINKING_MAX_TOKENS_CAP
-    else:
-        trunc_cap = None
+    # Build generation settings before probing; use the same sampling config for
+    # truncation checks, throughput probes, and the final EvalScope run.
+    gen_config = resolve_gen_params(is_thinking, max_tokens, model_path=model_path or model_name)
+    trunc_cap = MM_MAX_TOKENS_CAP if is_multimodal else (
+        THINKING_MAX_TOKENS_CAP if is_thinking else None
+    )
     truncation_detected, max_tokens = check_truncation(
         api_base, api_key, model_name, max_tokens, max_model_len,
-        max_tokens_cap=trunc_cap,
+        max_tokens_cap=trunc_cap, generation_config=gen_config,
     )
+    gen_config['max_tokens'] = max_tokens
 
-    # Step 4: 构建 generation_config（优先采用模型自带 generation_config.json 的采样参数，
-    # 读取失败/缺失时无声回退现有默认；纯增强层，绝不新增评测报错点）
-    gen_config = resolve_gen_params(is_thinking, max_tokens, model_path=model_name)
-
-    # Step 5: 构建 dataset_args（few-shot 按数据集配置；thinking 模型加 remove_until 过滤）
-    dataset_args = {dataset: {'few_shot_num': cfg['few_shot_num']}}
+    # EvalScope registers MMBench as mm_bench; limit it to the English subset.
+    eval_dataset = cfg.get('eval_dataset', dataset)
+    dataset_args = {eval_dataset: {'few_shot_num': cfg['few_shot_num']}}
+    if cfg.get('subset_list'):
+        dataset_args[eval_dataset]['subset_list'] = cfg['subset_list']
     if is_thinking:
-        dataset_args[dataset]['filters'] = {'remove_until': '</think>'}
+        dataset_args[eval_dataset]['filters'] = {'remove_until': '</think>'}
 
     evalscope_config = {
         'dataset_hub': dataset_hub,
@@ -922,7 +949,11 @@ def run_fast_gpqa(
     if dataset_dir:
         evalscope_config['dataset_dir'] = dataset_dir
 
-    # Step 6: 探测吞吐，选并发
+    # Preload outside throughput measurement so initial data downloads do not
+    # distort the concurrency estimate.
+    _preload_dataset(dataset_hub, dataset_dir, dataset)
+
+    # Step 6: probe throughput and choose concurrency.
     batch_size, probe_time = probe_throughput(
         model_name=model_name,
         api_url=api_base,
@@ -935,7 +966,10 @@ def run_fast_gpqa(
 
     # Step 7: 正式评测
     print("-" * 60)
-    total_questions = limit if limit else cfg['full_count']
+    if dataset == 'mm_bench_en':
+        total_questions = min(limit, cfg['full_count']) if limit else cfg['full_count']
+    else:
+        total_questions = limit if limit else cfg['full_count']
     limit_note = f"（每子集 {limit} 题）" if limit and cfg.get('per_subset_limit') else ""
     print(f"[EVAL] 正式评测: {dataset}{limit_note} ({total_questions}题, 并发={batch_size})")
     print("-" * 60)
@@ -949,7 +983,7 @@ def run_fast_gpqa(
         api_url=api_base,
         api_key=api_key,
         eval_type=EvalType.OPENAI_API,
-        datasets=[dataset],
+        datasets=[eval_dataset],
         dataset_args=dataset_args,
         eval_batch_size=batch_size,
         generation_config=gen_config,
@@ -1048,7 +1082,7 @@ def run_fast_gpqa(
         report['crash_reason'] = reason
     report['_meta'] = {
             'model': '模型名称或路径',
-            'benchmark': '评测基准名称（gpqa_diamond / mmlu / math_500 / mm_star[多模态]）',
+            'benchmark': '评测基准名称（gpqa_diamond / mmlu / math_500 / mm_bench_en / mm_star[多模态]）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
             'score': f'{cfg["benchmark_name"]} 正确率百分比',
             'total_questions': f'实际评测题数（evalscope 报告为准；mmlu/math_500 为 per-subset：mmlu --limit 100 = 5700 题（57 子集×100）、math_500 --limit 10 = 50 题（5 子集×10），--limit 0 为全量 {cfg["full_count"]} 题）',
@@ -1103,7 +1137,7 @@ def run_fast_gpqa(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='快速精度评测（GPQA Diamond / MMLU / MATH-500 / MMStar[多模态]）',
+        description='快速精度评测（GPQA Diamond / MMLU / MATH-500 / MMBench English / MMStar[多模态]）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -1111,9 +1145,9 @@ def main():
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu --limit 100
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset math_500 --limit 0
-  # MMStar（多模态/VLM，仅对视觉语言模型有意义；6 子集 × limit，默认 50/子集=300 题，--limit 0 全量 1500）
-  python fast_gpqa.py --model-name Qwen2.5-VL-7B --api-base http://localhost:8000/v1 --dataset mm_star
-  python fast_gpqa.py --model-name Qwen2.5-VL-7B --api-base http://localhost:8000/v1 --dataset mm_star --limit 0
+  # MMBench English：默认 1000 题；MMStar 默认全量 1500 题，仅适用于 VLM
+  python fast_gpqa.py --model-name Qwen3-VL-4B-Instruct --api-base http://localhost:8000/v1 --dataset mm_bench_en
+  python fast_gpqa.py --model-name Qwen3-VL-4B-Instruct --api-base http://localhost:8000/v1 --dataset mm_star
   # 多数据集（空格或逗号分隔；多数据集时 --output 为目录，每数据集写 {dataset}_result.json）
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu math_500 --output /flagos-workspace/results/multi
   python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1 --dataset mmlu,math_500
@@ -1133,7 +1167,7 @@ def main():
                         help=f'评测数据集，可多个（空格或逗号分隔）: {" / ".join(DATASET_CONFIG)}'
                              f'（默认 gpqa_diamond，可被 config 覆盖；多数据集时 --output 视为目录，每数据集写 {{dataset}}_result.json）')
     parser.add_argument('--limit', type=int, default=None,
-                        help='限制评测题数（None=数据集默认，0=全量；mmlu/math_500 为每子集题数，如 mmlu 100=57子集各100题、math_500 10=5子集各10题）')
+                        help='限制评测题数（None=数据集默认，0=全量；MMLU/MATH-500/MMStar 为每子集题数）')
     parser.add_argument('--output', type=str, default=None,
                         help='结果 JSON 输出路径（如 /flagos-workspace/results/gpqa_native.json）')
     args = parser.parse_args()
@@ -1156,6 +1190,8 @@ def main():
     api_key = args.api_key or model_cfg.get('api_key', 'EMPTY')
     dataset_dir = args.dataset_dir or config.get('dataset_dir', '') or None
     dataset_hub = config.get('dataset_hub', 'modelscope')
+    configured_limit = args.limit if args.limit is not None else config.get('limit')
+    model_path = model_cfg.get('local_path') or model_cfg.get('container_path') or None
 
     # 数据集解析：--dataset 支持空格/逗号多值，config dataset 支持逗号分隔，均可被 --dataset 覆盖
     def _split_datasets(raw):
@@ -1239,8 +1275,9 @@ def main():
                 dataset_dir=dataset_dir,
                 dataset_hub=dataset_hub,
                 dataset=dataset,
-                limit=args.limit,
+                limit=configured_limit,
                 output_path=output_path,
+                model_path=model_path,
             )
             reports.append((dataset, report))
 
